@@ -41,18 +41,20 @@ func (te *testEnv) setupBase(args []string) int {
 	te.stderr.Reset()
 	te.fake.Calls = nil
 	saved := skipPrereqs
+	savedDownload := setupNodeDownload
 	skipPrereqs = true
-	defer func() { skipPrereqs = saved }()
+	setupNodeDownload = func(context.Context, vm.Backend, io.Writer) error { return nil }
+	defer func() { skipPrereqs = saved; setupNodeDownload = savedDownload }()
 	return te.main(context.Background(), args)
 }
 
 func exportsOf(t *testing.T, stdin []string) map[string]string {
 	t.Helper()
-	if len(stdin) == 0 || !strings.HasSuffix(stdin[0], agentvm.SetupScript) {
+	if len(stdin) == 0 || !strings.Contains(stdin[0], strings.Split(agentvm.SetupScript, "# For this session too:")[0]) {
 		t.Fatalf("the setup script was not run: %q", stdin)
 	}
 	m := map[string]string{}
-	for _, l := range strings.Split(strings.TrimSuffix(stdin[0], agentvm.SetupScript), "\n") {
+	for _, l := range strings.Split(strings.Split(stdin[0], "#!/usr/bin/env bash")[0], "\n") {
 		if k, v, ok := strings.Cut(strings.TrimPrefix(l, "export AGENT_VM_INSTALL_"), "="); ok {
 			m[k] = v
 		}

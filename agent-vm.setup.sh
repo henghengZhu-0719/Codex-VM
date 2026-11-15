@@ -181,7 +181,15 @@ echo '[ -f "$HOME/.agent-vm.env" ] && { set -a; . "$HOME/.agent-vm.env"; set +a;
 # they've opted out of preinstalled Node.
 echo "Installing mise..."
 curl -fsSL https://mise.run | sh
-echo 'eval "$(~/.local/bin/mise activate zsh)"' >> ~/.zshenv
+# Avoid scanning the SSHFS project on every chpwd/prompt. Shims still resolve
+# installed language tools; automatic project env activation is opt-in.
+cat >> ~/.zshenv <<'MISE_ENV'
+if [[ "${AGENT_VM_MISE_AUTO_ACTIVATE:-0}" == "1" ]]; then
+  eval "$(~/.local/bin/mise activate zsh)"
+else
+  export PATH="$HOME/.local/share/mise/shims:$PATH"
+fi
+MISE_ENV
 
 if [[ "$INSTALL_DOCKER" == "1" ]]; then
   # Install Docker from official repo (includes docker compose)
@@ -212,7 +220,13 @@ if [[ "$INSTALL_NODE" == "1" ]]; then
   echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/nodesource.asc] https://deb.nodesource.com/node_24.x nodistro main" | sudo tee /etc/apt/sources.list.d/nodesource.list > /dev/null
   printf 'Package: nodejs\nPin: origin deb.nodesource.com\nPin-Priority: 600\n' | sudo tee /etc/apt/preferences.d/nodejs > /dev/null
   apt_get update
-  apt_get install -y --no-install-recommends nodejs
+  # AGENT_VM_NODE_HOST_DOWNLOAD: setup injects the verified package here.
+  if [[ -f /tmp/agent-vm-node.deb ]]; then
+    apt_get install -y --no-install-recommends /tmp/agent-vm-node.deb
+    rm -f /tmp/agent-vm-node.deb
+  else
+    apt_get install -y --no-install-recommends nodejs
+  fi
 fi
 
 if [[ "$INSTALL_CHROMIUM" == "1" ]]; then

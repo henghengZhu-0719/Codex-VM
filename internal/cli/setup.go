@@ -2,6 +2,10 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"bytes"
+	"net/http"
 	"fmt"
 	"io"
 	"os"
@@ -379,6 +383,36 @@ func (e *app) askCodeExtensions(in install) {
 // serving the starts, with its markers, until the new one is complete.
 const building = vmname.Template + "-building"
 
+var setupNodeDownload = downloadNodePackage
+
+// downloadNodePackage uses authenticated APT metadata from the guest, downloads
+// on the host, verifies SHA-256, then streams the archive over the VM shell.
+func downloadNodePackage(ctx context.Context, b vm.Backend, log io.Writer) error {
+	var metadata bytes.Buffer
+	script := `set -eu
+version=$(apt-cache policy nodejs | awk '/Candidate:/ {print $2}')
+apt-cache show "nodejs=$version" | awk '/^Filename: / {f=$2} /^SHA256: / {s=$2} END {print f; print s}'
+`
+	code, err := b.Shell(ctx, building, vm.ShellOpts{Args: []string{"sh", "-c", script}, Stdout: &metadata, Stderr: log})
+	if err != nil { return err }; if code != 0 { return fmt.Errorf("reading Node.js package metadata: exit status %d", code) }
+	lines := strings.Fields(metadata.String())
+	if len(lines) != 2 || !strings.HasPrefix(lines[0], "pool/") || strings.Contains(lines[0], "..") { return fmt.Errorf("invalid Node.js package metadata") }
+	expected, err := hex.DecodeString(lines[1]); if err != nil || len(expected) != sha256.Size { return fmt.Errorf("invalid Node.js package checksum") }
+	url := "https://deb.nodesource.com/node_24.x/" + lines[0]
+	fmt.Fprintln(log, "Downloading Node.js package on the host:", url)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil); if err != nil { return err }
+	resp, err := http.DefaultClient.Do(req); if err != nil { return fmt.Errorf("host download: %w", err) }; defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK { return fmt.Errorf("host download: %s", resp.Status) }
+	f, err := os.CreateTemp("", "agent-vm-node-*.deb"); if err != nil { return err }; defer os.Remove(f.Name()); defer f.Close()
+	h := sha256.New(); if _, err = io.Copy(io.MultiWriter(f, h), resp.Body); err != nil { return err }
+	if !bytes.Equal(h.Sum(nil), expected) { return fmt.Errorf("Node.js package SHA-256 mismatch") }
+	if _, err = f.Seek(0, io.SeekStart); err != nil { return err }
+	fmt.Fprintln(log, "Copying verified Node.js package to the VM...")
+	code, err = b.Shell(ctx, building, vm.ShellOpts{Args: []string{"sh", "-c", "umask 077; cat > /tmp/agent-vm-node.deb"}, Stdin: f, Stdout: log, Stderr: log})
+	if err != nil { return err }; if code != 0 { return fmt.Errorf("copying Node.js package: exit status %d", code) }
+	return nil
+}
+
 // buildBase makes the base template: built as `building` (created, booted,
 // provisioned by the setup script and the user's, stopped), then swapped in
 // for the base and marked as ready. A setup that fails before the swap
@@ -466,16 +500,25 @@ func (e *app) buildBase(ctx context.Context, in install, disk, memory, cpus int)
 		return 1
 	}
 
-	// The choices as export lines, then the script, on stdin. Without them it
-	// installs the default set.
+	// Stop at the NodeSource install after apt has authenticated its metadata.
+	// A second shell continues the script with the same component choices.
 	fmt.Fprintln(e.io.Stdout, "Installing packages inside VM...")
 	if !windowed(func(w io.Writer) error {
-		code, err := b.Shell(ctx, building, vm.ShellOpts{Args: []string{"bash", "-l"},
-			Stdin: strings.NewReader(in.exports() + agentvm.SetupScript), Stdout: w, Stderr: w})
-		if err == nil && code != 0 {
-			err = fmt.Errorf("exit status %d", code)
+		run := func(script string) error {
+			code, err := b.Shell(ctx, building, vm.ShellOpts{Args: []string{"bash", "-l"},
+				Stdin: strings.NewReader(script), Stdout: w, Stderr: w})
+			if err == nil && code != 0 { err = fmt.Errorf("exit status %d", code) }
+			return err
 		}
-		return err
+		if !in["node"] { return run(in.exports() + agentvm.SetupScript) }
+		const marker = "  # AGENT_VM_NODE_HOST_DOWNLOAD: setup injects the verified package here."
+		const bootstrapEnd = "# For this session too:"
+		before, after, ok := strings.Cut(agentvm.SetupScript, marker)
+		bootstrap, _, bootOK := strings.Cut(agentvm.SetupScript, bootstrapEnd)
+		if !ok || !bootOK { return fmt.Errorf("Node.js setup marker missing") }
+		if err := run(in.exports() + before + "\nfi\n"); err != nil { return err }
+		if err := setupNodeDownload(ctx, b, w); err != nil { return err }
+		return run(in.exports() + bootstrap + "\nif [[ \"$INSTALL_NODE\" == \"1\" ]]; then\n" + after)
 	}) {
 		fmt.Fprintf(e.io.Stderr, "Error: Setup script failed. Full log: %s\n", logPath)
 		stopBase()
