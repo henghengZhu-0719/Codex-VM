@@ -1255,6 +1255,7 @@ struct MachinesView: View {
     @AppStorage("showVMDetails") private var showVMDetails = false
     @State private var showBaseInfo = false
     @State private var showingCreate = false
+    @State private var navigateToProxyAfterDismiss = false
     var onProxy: () -> Void = {}
     private var projects: [VM] { model.machines.filter { $0.name != "base" && $0.name != "base-building" } }
     private var bases: [VM] { model.machines.filter { $0.name == "base" || $0.name == "base-building" } }
@@ -1284,13 +1285,7 @@ struct MachinesView: View {
                 }
                 Spacer()
                 Button {
-                    model.step = 0
-                    model.buildStarted = false
-                    model.buildComplete = false
-                    model.operationFailed = false
-                    model.confirmation = false
-                    model.project = ""
-                    showingCreate = true
+                    beginCreation()
                 } label: {
                     Label("新建", systemImage: "plus")
                 }
@@ -1324,13 +1319,9 @@ struct MachinesView: View {
                     Image(systemName: "desktopcomputer").font(.system(size: 36)).foregroundStyle(.secondary)
                     Text("暂无虚拟机").font(.title3.bold())
                     Text("点击右上角「新建」创建项目虚拟机。").foregroundStyle(.secondary)
-                    Button("新建虚拟机", systemImage: "plus") {
-                        model.step = 0
-                        model.buildStarted = false
-                        model.project = ""
-                        showingCreate = true
-                    }
-                    .buttonStyle(.borderedProminent)
+                    Button("新建虚拟机", systemImage: "plus") { beginCreation() }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(model.busy)
                 }
                 .frame(maxWidth: .infinity, minHeight: 200)
             } else {
@@ -1347,16 +1338,31 @@ struct MachinesView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .sheet(isPresented: $showingCreate, onDismiss: {
-            model.refresh()
+            if navigateToProxyAfterDismiss {
+                navigateToProxyAfterDismiss = false
+                onProxy()
+            } else {
+                model.refresh()
+            }
         }) {
             WizardView(model: model, onMachines: {
                 showingCreate = false
                 model.refresh()
             }, onProxy: {
+                navigateToProxyAfterDismiss = true
                 showingCreate = false
-                onProxy()
             })
         }
+    }
+    private func beginCreation() {
+        guard !model.busy else { return }
+        model.step = 0
+        model.buildStarted = false
+        model.buildComplete = false
+        model.operationFailed = false
+        model.confirmation = false
+        model.project = ""
+        showingCreate = true
     }
 }
 
