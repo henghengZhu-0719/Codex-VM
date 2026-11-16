@@ -1000,46 +1000,69 @@ struct MachineRow: View {
                         .help(isBase ? "用于创建项目虚拟机" : projectPath)
                 }
                 Spacer(minLength: 0)
-                StatusBadge(status: vm.status)
+                VStack(alignment: .trailing, spacing: 8) {
+                    HStack(spacing: 5) {
+                        Circle()
+                            .fill(vm.status == "Running" ? Color.green : Color.secondary.opacity(0.6))
+                            .frame(width: 6, height: 6)
+                        Text(vm.status == "Running" ? "运行中" : vm.status == "Stopped" ? "已停止" : vm.status)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    HStack(spacing: 7) {
+                        if vm.status == "Running" {
+                            Button { model.terminal(vm) } label: {
+                                Image(systemName: "terminal")
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .frame(width: 28, height: 28)
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .help("打开终端")
+                            .accessibilityLabel("打开终端")
+                        } else {
+                            Button { model.start(vm) } label: {
+                                Image(systemName: "play.fill")
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .frame(width: 28, height: 28)
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(model.busy || vm.status != "Stopped" || model.vmMounts[vm.name]?.isEmpty != false)
+                            .help("启动虚拟机")
+                            .accessibilityLabel("启动虚拟机")
+                        }
+                        Menu {
+                            if vm.status == "Running" {
+                                Button("打开终端", systemImage: "terminal") { model.terminal(vm) }
+                                Button("停止虚拟机", systemImage: "stop.fill") { model.stop(vm) }
+                                    .disabled(model.busy)
+                                Divider()
+                            }
+                            Button(showDetails || showVMDetails ? "收起详情" : "查看详情",
+                                   systemImage: "info.circle") { showDetails.toggle() }
+                                .disabled(showVMDetails)
+                            Button("挂载文件夹…", systemImage: "folder") { managingFolders = true }
+                                .disabled(model.busy || model.vmMounts[vm.name]?.isEmpty != false)
+                            if !isBase {
+                                Button("刷新 Codex 额度", systemImage: "arrow.clockwise") { model.pollQuota(for: vm) }
+                                    .disabled(vm.status != "Running" || model.quotaPolling.contains(vm.name))
+                            }
+                            Divider()
+                            Button("删除虚拟机", systemImage: "trash", role: .destructive) { deleting = true }
+                                .disabled(model.busy || vm.name == "base")
+                        } label: {
+                            Image(systemName: "ellipsis")
+                                .font(.system(size: 14, weight: .semibold))
+                                .frame(width: 22, height: 28)
+                        }
+                        .menuStyle(.borderlessButton)
+                        .fixedSize()
+                        .help("更多操作")
+                        .accessibilityLabel("更多操作")
+                    }
+                    .controlSize(.small)
+                }
             }
             usageSummary
-
-            Divider()
-            HStack(spacing: 8) {
-                if vm.status == "Running" {
-                    Button { model.terminal(vm) } label: { Label("打开终端", systemImage: "terminal") }
-                        .buttonStyle(.borderedProminent)
-                    Button { model.stop(vm) } label: { Image(systemName: "stop.fill") }
-                        .help("停止虚拟机")
-                        .disabled(model.busy)
-                } else {
-                    Button { model.start(vm) } label: { Label("启动", systemImage: "play.fill") }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(model.busy || vm.status != "Stopped" || model.vmMounts[vm.name]?.isEmpty != false)
-                }
-                Spacer(minLength: 0)
-                Button { showDetails.toggle() } label: {
-                    Image(systemName: (showDetails || showVMDetails) ? "chevron.up" : "info.circle")
-                }
-                .buttonStyle(.borderless)
-                .help((showDetails || showVMDetails) ? "收起详情" : "查看详情")
-                .disabled(showVMDetails)
-                Menu {
-                    Button("挂载文件夹…", systemImage: "folder") { managingFolders = true }
-                        .disabled(model.busy || model.vmMounts[vm.name]?.isEmpty != false)
-                    if !isBase {
-                        Button("刷新 Codex 额度", systemImage: "arrow.clockwise") { model.pollQuota(for: vm) }
-                            .disabled(vm.status != "Running" || model.quotaPolling.contains(vm.name))
-                    }
-                    Divider()
-                    Button("删除虚拟机", systemImage: "trash", role: .destructive) { deleting = true }
-                        .disabled(model.busy || vm.name == "base")
-                } label: { Image(systemName: "ellipsis.circle") }
-                    .menuStyle(.borderlessButton)
-                    .fixedSize()
-                    .help("更多操作")
-            }
-            .controlSize(.small)
             if showDetails || showVMDetails {
                 Divider()
                 VStack(alignment: .leading, spacing: 8) {
