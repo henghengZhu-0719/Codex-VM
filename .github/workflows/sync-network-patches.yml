@@ -1,0 +1,104 @@
+name: sync-network-patches
+
+on:
+  push:
+    branches:
+      - feat/egress-gateway
+    paths:
+      - "patches/lima/**"
+      - "patches/gvisor-tap-vsock/**"
+      - "scripts/third-party-sync"
+      - ".github/workflows/sync-network-patches.yml"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-network-patches-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.ref }}
+          persist-credentials: true
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+      - name: Rebuild third_party from SOURCES and patches
+        run: scripts/third-party-sync all
+      - name: Verify generated third_party tree
+        run: make check-third-party
+      - name: Build agent-vm
+        run: make agent-vm
+      - name: Vet application packages
+        run: go vet . ./cmd/... ./internal/...
+      - name: Test application packages
+        run: go test . ./cmd/... ./internal/...
+      - name: Test patched gVisor and Lima networking
+        run: |
+          go test github.com/containers/gvisor-tap-vsock/pkg/services/dns
+          go test github.com/containers/gvisor-tap-vsock/pkg/services/forwarder
+          go test github.com/lima-vm/lima/v2/pkg/networks/usernet
+          go test github.com/lima-vm/lima/v2/pkg/hostagent/dns
+      - uses: actions/upload-artifact@v4
+        with:
+          name: synced-third-party
+          path: third_party/
+          if-no-files-found: error
+          retention-days: 2
+
+  platform-build:
+    needs: sync
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.ref }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: synced-third-party
+          path: third_party/
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+      - name: Build
+        run: go build ./cmd/agent-vm
+      - name: Vet
+        run: go vet . ./cmd/... ./internal/...
+      - name: Test
+        run: go test . ./cmd/... ./internal/...
+
+  commit-sync:
+    needs: [sync, platform-build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.ref }}
+          persist-credentials: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: synced-third-party
+          path: third_party/
+      - name: Commit synchronized sources
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add third_party/
+          if git diff --cached --quiet; then
+            echo "third_party is already synchronized"
+            exit 0
+          fi
+          git commit -m "build: synchronize third-party network patches"
+          git push origin HEAD:${GITHUB_REF_NAME}
