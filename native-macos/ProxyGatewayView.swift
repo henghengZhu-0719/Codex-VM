@@ -175,7 +175,7 @@ struct FlatProxyNode: Identifiable {
 }
 
 private enum ProxyTab: String, CaseIterable, Identifiable {
-    case gateway, sources, route, security, gate, diagnostics
+    case gateway, sources, route, security, gate, overview, diagnostics
     var id: String { rawValue }
     var title: String {
         switch self {
@@ -184,6 +184,7 @@ private enum ProxyTab: String, CaseIterable, Identifiable {
         case .route: return "3 出口链路"
         case .security: return "4 DNS 与安全"
         case .gate: return "5 自检"
+        case .overview: return "6 配置总览"
         case .diagnostics: return "连接监控"
         }
     }
@@ -268,7 +269,7 @@ struct ProxyGatewayView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             headerBar
-            statusBanner
+            compactStatus
             Picker("", selection: $tab) {
                 ForEach(ProxyTab.allCases) { item in
                     Text(item.title).tag(item)
@@ -317,6 +318,16 @@ struct ProxyGatewayView: View {
                 securityTab
             case .gate:
                 gateTab
+                HStack {
+                    Button("上一步：DNS 与安全") { tab = .security }
+                    Spacer()
+                    Button("查看配置总览", systemImage: "checklist") {
+                        model.refreshProxyStatus { syncFieldsFromStatus() }
+                        tab = .overview
+                    }
+                }
+            case .overview:
+                statusBanner
             case .diagnostics:
                 diagnosticsTab
             }
@@ -329,7 +340,7 @@ struct ProxyGatewayView: View {
         .onChange(of: tab) { next in
             if next == .diagnostics {
                 model.refreshConnections()
-            } else if next == .gate {
+            } else if next == .gate || next == .overview {
                 model.refreshProxyStatus()
             }
         }
@@ -351,6 +362,25 @@ struct ProxyGatewayView: View {
             }
             .disabled(model.proxyBusy)
         }
+    }
+
+    private var compactStatus: some View {
+        HStack(spacing: 12) {
+            Image(systemName: status?.useProxy == true ? "network" : "network.slash")
+                .foregroundStyle(status?.useProxy == true ? Color.green : Color.secondary)
+            Text(status?.useProxy == true ? (status?.proxyMode == "mihomo" ? "Mihomo 代理已配置" : "外部代理已配置") : "代理未启用")
+                .font(.subheadline.weight(.medium))
+            if status?.proxyMode == "mihomo" && status?.useProxy == true {
+                Text(status?.running == true ? "核心运行中" : "核心未运行")
+                    .foregroundStyle(status?.running == true ? Color.green : Color.orange)
+            }
+            Spacer()
+            Button("配置总览") { tab = .overview }
+                .buttonStyle(.borderless)
+        }
+        .font(.caption)
+        .padding(.horizontal, 14).padding(.vertical, 10)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
     }
 
     // This overview intentionally uses persisted status, not unsaved form fields.
@@ -376,8 +406,8 @@ struct ProxyGatewayView: View {
         let checkText: String = {
             guard let probe = st?.lastProbe else { return "尚未执行自检" }
             if hasFailed { return "有失败项 · 请查看报告" }
-            if !checks.isEmpty && !hasUnknown && probe.error == nil { return "上次报告：全部已列检查通过" }
             if probe.error != nil { return "上次检查发生错误" }
+            if !checks.isEmpty && !hasUnknown { return "上次报告：已列检查通过（非完整安全保证）" }
             return "结果未完全确认"
         }()
         return VStack(alignment: .leading, spacing: 14) {
@@ -403,10 +433,10 @@ struct ProxyGatewayView: View {
                 LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
                     overviewItem("代理方式", symbol: "network", section: .gateway,
                                  value: !enabled ? "代理已关闭" : mode == "mihomo" ? "内置 Mihomo" : "自定义 HTTP / SOCKS5",
-                                 detail: !enabled ? "新启动的虚拟机不使用代理" : mode == "mihomo" ? (st!.running ? "核心运行中" : "核心未运行") : st!.customProxyUrl)
+                                 detail: !enabled ? "新启动的虚拟机不使用代理" : mode == "mihomo" ? (st!.running ? "核心运行中" : "核心未运行") : maskedEndpoint(st!.customProxyUrl))
                     overviewItem("节点与出口", symbol: "arrow.triangle.branch", section: mode == "mihomo" ? .route : .gateway,
                                  value: !enabled ? "未启用" : mode == "mihomo" ? (route.isEmpty ? "未配置节点链路" : "已配置 \(route.count) 跳") : "使用外部代理",
-                                 detail: !enabled ? "—" : mode == "mihomo" ? routeText : st!.displayProxyUrl)
+                                 detail: !enabled ? "—" : mode == "mihomo" ? routeText : maskedEndpoint(st!.displayProxyUrl))
                     overviewItem("DNS 解析", symbol: "globe", section: .security,
                                  value: st!.dnsUrl.isEmpty ? "未配置 DoH" : "DoH 端点",
                                  detail: st!.dnsUrl.isEmpty ? "请设置 DNS 地址" : st!.dnsUrl)
@@ -421,8 +451,7 @@ struct ProxyGatewayView: View {
                                  detail: "仅为上次探测结果，不保证当前连接出口相同")
                 }
                 HStack {
-                    Text("可点击每项右侧的“配置”跳转到相应步骤。")
-                        .font(.caption).foregroundStyle(.secondary)
+                    Button("返回修改配置", systemImage: "slider.horizontal.3") { tab = .gateway }
                     Spacer()
                     Button("运行安全自检", systemImage: "checkmark.shield") {
                         tab = .gate
@@ -430,11 +459,20 @@ struct ProxyGatewayView: View {
                     }
                     .disabled(model.proxyBusy || !enabled)
                 }
+                Text("仅显示已保存的配置和上一次探测结果；不能据此确认虚拟机没有网络泄漏。")
+                    .font(.caption).foregroundStyle(.secondary)
             }
         }
         .padding(16)
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.06)))
+    }
+
+    private func maskedEndpoint(_ endpoint: String) -> String {
+        guard var components = URLComponents(string: endpoint) else { return "地址格式待检查" }
+        if components.user != nil { components.user = "***" }
+        if components.password != nil { components.password = "***" }
+        return components.string ?? "已配置"
     }
 
     private func overviewItem(_ title: String, symbol: String, section: ProxyTab,
