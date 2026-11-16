@@ -34,6 +34,7 @@ func New(proxy string, allow Allow)(*Gate,error){
  u,err:=url.Parse(proxy);if err!=nil{return nil,fmt.Errorf("egress: invalid proxy: %w",err)}
  if u.Scheme!="http" && u.Scheme!="socks5" {return nil,fmt.Errorf("egress: unsupported proxy scheme %q",u.Scheme)}
  if u.Hostname()=="" || u.Port()=="" || u.Path!="" || u.RawQuery!="" || u.Fragment!="" {return nil,errors.New("egress: invalid proxy endpoint")}
+ if ip,err:=netip.ParseAddr(u.Hostname());err!=nil || !ip.IsValid(){return nil,errors.New("egress: proxy server must use a numeric IP to avoid host DNS bootstrap")}
  port,err:=strconv.Atoi(u.Port());if err!=nil || port<1 || port>65535{return nil,errors.New("egress: invalid proxy port")}
  return &Gate{ProxyURL:u,Allow:allow,Timeout:10*time.Second},nil
 }
