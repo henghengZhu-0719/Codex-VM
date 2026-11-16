@@ -457,9 +457,10 @@ cat /var/lib/agent-vm-region/status
         DispatchQueue.global(qos: .utility).async {
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+            let quotedScript = "'" + script.replacingOccurrences(of: "'", with: "'\\\"'\\\"'") + "'"
             process.arguments = ["-F", config, "-o", "BatchMode=yes", "-o", "ConnectTimeout=3",
                                  "-o", "ConnectionAttempts=1", "-o", "ServerAliveInterval=2",
-                                 "-o", "ServerAliveCountMax=1", "lima-" + name, "sh", "-c", script]
+                                 "-o", "ServerAliveCountMax=1", "lima-" + name, "sh -c " + quotedScript]
             let output = Pipe()
             process.standardOutput = output
             process.standardError = FileHandle.nullDevice
