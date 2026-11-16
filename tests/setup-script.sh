@@ -175,7 +175,7 @@ else
     "$(jq -r .enableInstallTelemetry "$PIH/.pi/agent/settings.json" 2>/dev/null)" "false"
   PIH0="$SB/pi-home-nonode"; mkdir -p "$PIH0"
   run_pi_block "$PIH0" 0
-  check "pi: skipped without node" "$( [ -e "$PIH0/sudo.log" ] || [ -e "$PIH0/.pi" ]; echo $?)" "1"
+  check "pi: skipped without node" "$(if [ -e "$PIH0/sudo.log" ] || [ -e "$PIH0/.pi" ]; then echo 0; else echo 1; fi)" "1"
 fi
 
 # =============================================================================
