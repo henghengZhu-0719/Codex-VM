@@ -24,6 +24,7 @@ type Gate struct {
  state State
  epoch uint64
  expires time.Time
+ timer *time.Timer
  connections map[*trackedConn]struct{}
 }
 
@@ -50,6 +51,11 @@ func (g *Gate) Authorize(checkEpoch uint64, lease time.Duration) error {
  if lease <= 0 { return ErrClosed }
  g.state = Open
  g.expires = time.Now().Add(lease)
+ epoch:=g.epoch
+ g.timer=time.AfterFunc(lease,func(){
+  g.mu.Lock();defer g.mu.Unlock()
+  if g.epoch==epoch && g.state==Open && !time.Now().Before(g.expires){g.revokeLocked()}
+ })
  return nil
 }
 
@@ -82,6 +88,7 @@ func (g *Gate) expireLocked() {
  if g.state == Open && !time.Now().Before(g.expires) { g.revokeLocked() }
 }
 func (g *Gate) revokeLocked() {
+ if g.timer!=nil {g.timer.Stop();g.timer=nil}
  g.epoch++
  g.state = Closed
  g.expires = time.Time{}
