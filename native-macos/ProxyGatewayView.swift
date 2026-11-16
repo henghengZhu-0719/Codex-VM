@@ -463,7 +463,11 @@ struct ProxyGatewayView: View {
     private var routeTab: some View {
         VStack(alignment: .leading, spacing: 14) {
             stepHeading(3, "选择出口节点", "选择最终出口，必要时添加中转；应用节点后会启动或重启 Mihomo。")
-            // 2. Mihomo Core + Route Chain + Node List
+            if proxyMode != "mihomo" || !useProxy {
+                Label("当前代理模式不需要配置 Mihomo 出口链路。请返回代理方式或继续 DNS 设置。", systemImage: "info.circle")
+                    .font(.callout).foregroundStyle(.secondary)
+            }
+            // Mihomo core, route chain, and node selection
             VStack(alignment: .leading, spacing: 14) {
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
@@ -538,7 +542,7 @@ struct ProxyGatewayView: View {
                                 }
                             }
                             .buttonStyle(.borderedProminent)
-                            .disabled(model.proxyBusy || !routeValid || status?.coreAvailable != true)
+                            .disabled(model.proxyBusy || !routeValid || status?.coreAvailable != true || proxyMode != "mihomo" || !useProxy)
                         }
                     }
                     .padding(12)
@@ -707,6 +711,7 @@ struct ProxyGatewayView: View {
 
     private var sourcesTab: some View {
         VStack(alignment: .leading, spacing: 18) {
+            stepHeading(2, "导入节点来源", "选择订阅、YAML 文件或手动节点。导入成功后前往下一步选择出口。")
             // Import subscription / YAML
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
@@ -881,6 +886,7 @@ struct ProxyGatewayView: View {
 
     private var gateTab: some View {
         VStack(alignment: .leading, spacing: 18) {
+            stepHeading(5, "验证代理出口与安全边界", "先运行自检，再检查出口 IP、DNS 隧道和 Fail-Closed 结果；失败或 Unknown 不视为通过。")
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
                     VStack(alignment: .leading, spacing: 4) {
