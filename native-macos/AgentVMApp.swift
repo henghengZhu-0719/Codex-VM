@@ -21,6 +21,16 @@ struct VM: Identifiable {
     var id: String { name }
 }
 
+struct VMUsage {
+    let cpuPercent: Double
+    let usedMemoryMB: Double
+    let totalMemoryMB: Double
+    var memoryPercent: Double {
+        guard totalMemoryMB > 0 else { return 0 }
+        return min(100, max(0, usedMemoryMB / totalMemoryMB * 100))
+    }
+}
+
 struct ManagedFolder: Identifiable {
     let path: String, mode: String
     var id: String { path + ":" + mode }
@@ -107,9 +117,13 @@ struct CodexQuotaStatus: Decodable {
     @Published var proxyDownloadTotal: Int64 = 0
     @Published var vmAliases: [String: String] = UserDefaults.standard.dictionary(forKey: "vmAliases") as? [String: String] ?? [:]
     @Published var vmQuotas: [String: CodexQuotaStatus] = [:]
+    @Published var vmUsage: [String: VMUsage] = [:]
+    @Published var usageErrors: Set<String> = []
     @Published var quotaPolling: Set<String> = []
     @Published var lastQuotaPollAt: Date?
     private var quotaTimer: Timer?
+    private var usageTimer: Timer?
+    private var usagePolling: Set<String> = []
     let executable: String
 
     init() {
@@ -120,6 +134,11 @@ struct CodexQuotaStatus: Decodable {
         quotaTimer = Timer.scheduledTimer(withTimeInterval: 20 * 60, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.pollAllRunningQuotas()
+            }
+        }
+        usageTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.pollRunningUsage()
             }
         }
     }
@@ -389,6 +408,10 @@ cat /var/lib/agent-vm-region/status
                 guard parts.count >= 8 else { return nil }
                 return VM(name: parts[0], status: parts[1], ssh: parts[2], vmType: parts[3], arch: parts[4], cpus: parts[5], memory: parts[6], disk: parts[7])
             }
+            let runningNames = Set(self.machines.filter { $0.status == "Running" }.map(\.name))
+            self.vmUsage = self.vmUsage.filter { runningNames.contains($0.key) }
+            self.usageErrors = self.usageErrors.filter { runningNames.contains($0) }
+            self.pollRunningUsage()
             for vm in self.machines {
                 self.run(["vm-mounts", vm.name]) { code, text in
                     if code == 0, let data = text.data(using: .utf8), let mounts = try? JSONDecoder().decode([ProjectMount]?.self, from: data) {
@@ -400,6 +423,81 @@ cat /var/lib/agent-vm-region/status
                 }
             }
             self.refreshManagedFolders()
+        }
+    }
+    func pollRunningUsage() {
+        for vm in machines where vm.status == "Running" && vm.name != "base" && vm.name != "base-building" {
+            pollUsage(for: vm)
+        }
+    }
+    func pollUsage(for vm: VM) {
+        guard vm.status == "Running", !usagePolling.contains(vm.name) else { return }
+        let state = ProcessInfo.processInfo.environment["AGENT_VM_STATE_DIR"] ?? NSHomeDirectory() + "/.agent-vm"
+        let lima = ProcessInfo.processInfo.environment["AGENT_VM_LIMA_HOME"] ?? state + "/lima"
+        let config = URL(fileURLWithPath: lima).appendingPathComponent(vm.name).appendingPathComponent("ssh.config").path
+        guard FileManager.default.fileExists(atPath: config) else {
+            vmUsage.removeValue(forKey: vm.name)
+            usageErrors.insert(vm.name)
+            return
+        }
+        usagePolling.insert(vm.name)
+        let name = vm.name
+        // Read two Linux /proc/stat snapshots to calculate a short-window guest CPU percentage.
+        // MemAvailable excludes reclaimable cache from used memory.
+        let script = #"""
+        set -- $(awk '/^cpu / { total=0; for(i=2;i<=NF;i++) total+=$i; print $5+$6, total; exit }' /proc/stat)
+        idle1=$1; total1=$2
+        sleep 0.3
+        set -- $(awk '/^cpu / { total=0; for(i=2;i<=NF;i++) total+=$i; print $5+$6, total; exit }' /proc/stat)
+        idle2=$1; total2=$2
+        cpu=$(awk -v i1="$idle1" -v t1="$total1" -v i2="$idle2" -v t2="$total2" 'BEGIN { dt=t2-t1; di=i2-i1; if(dt<=0) print "0"; else printf "%.1f", 100*(dt-di)/dt }')
+        mem=$(awk '/^MemTotal:/ { total=$2 } /^MemAvailable:/ { available=$2 } END { if(total>0 && available>=0) printf "%.0f|%.0f", (total-available)/1024, total/1024 }' /proc/meminfo)
+        printf '%s|%s\n' "$cpu" "$mem"
+        """#
+        DispatchQueue.global(qos: .utility).async {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+            process.arguments = ["-F", config, "-o", "BatchMode=yes", "-o", "ConnectTimeout=3",
+                                 "-o", "ConnectionAttempts=1", "-o", "ServerAliveInterval=2",
+                                 "-o", "ServerAliveCountMax=1", "lima-" + name, "sh", "-c", script]
+            let output = Pipe()
+            process.standardOutput = output
+            process.standardError = FileHandle.nullDevice
+            var result: VMUsage?
+            do {
+                try process.run()
+                let data = output.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+                if process.terminationStatus == 0,
+                   let line = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   let last = line.components(separatedBy: .newlines).last {
+                    let parts = last.split(separator: "|")
+                    if parts.count == 3,
+                       let cpu = Double(parts[0]), let used = Double(parts[1]),
+                       let total = Double(parts[2]), total > 0,
+                       cpu.isFinite, used.isFinite, total.isFinite {
+                        result = VMUsage(cpuPercent: min(100, max(0, cpu)),
+                                         usedMemoryMB: max(0, used), totalMemoryMB: total)
+                    }
+                }
+            } catch {
+                // SSH errors should not affect VM operations or overwrite the main error banner.
+            }
+            DispatchQueue.main.async {
+                self.usagePolling.remove(name)
+                guard self.machines.contains(where: { $0.name == name && $0.status == "Running" }) else {
+                    self.vmUsage.removeValue(forKey: name)
+                    self.usageErrors.remove(name)
+                    return
+                }
+                if let result {
+                    self.vmUsage[name] = result
+                    self.usageErrors.remove(name)
+                } else {
+                    self.vmUsage.removeValue(forKey: name)
+                    self.usageErrors.insert(name)
+                }
+            }
         }
     }
     func refreshManagedFolders() {
@@ -903,15 +1001,7 @@ struct MachineRow: View {
                 Spacer(minLength: 0)
                 StatusBadge(status: vm.status)
             }
-            HStack(spacing: 14) {
-                Label("\(vm.cpus) 核", systemImage: "cpu")
-                Label(vm.memory, systemImage: "memorychip")
-                Label(vm.disk, systemImage: "internaldrive")
-                Spacer(minLength: 0)
-            }
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            .lineLimit(1)
+            usageSummary
 
             Divider()
             HStack(spacing: 8) {
@@ -958,6 +1048,9 @@ struct MachineRow: View {
                     detail("架构", value: vm.arch)
                     detail("类型", value: vm.vmType)
                     detail("SSH", value: vm.status == "Running" ? vm.ssh : "未运行")
+                    detail("CPU 配额", value: "\(vm.cpus) 核")
+                    detail("内存配置", value: vm.memory)
+                    detail("磁盘配置", value: vm.disk)
                     if !isBase {
                         codexQuotaSummary
                     }
@@ -1007,6 +1100,41 @@ struct MachineRow: View {
             }
             .padding(24).frame(minWidth: 600)
         }
+    }
+    @ViewBuilder
+    private var usageSummary: some View {
+        if vm.status != "Running" {
+            Label("停止时不采集资源", systemImage: "pause.circle")
+                .font(.caption).foregroundStyle(.secondary)
+        } else if let usage = model.vmUsage[vm.name] {
+            HStack(alignment: .top, spacing: 14) {
+                usageMeter(title: "CPU", value: String(format: "%.1f%%", usage.cpuPercent),
+                           percent: usage.cpuPercent, tint: .green)
+                usageMeter(title: "内存",
+                           value: String(format: "%.0f / %.0f MB", usage.usedMemoryMB, usage.totalMemoryMB),
+                           percent: usage.memoryPercent, tint: .blue)
+            }
+        } else {
+            HStack(spacing: 6) {
+                if model.usageErrors.contains(vm.name) {
+                    Label("暂无法读取实时使用量", systemImage: "exclamationmark.circle")
+                } else {
+                    ProgressView().controlSize(.mini)
+                    Text("正在读取实时使用量…")
+                }
+            }
+            .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+    private func usageMeter(title: String, value: String, percent: Double, tint: Color) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title).font(.caption).foregroundStyle(.secondary)
+            Text(value).font(.subheadline.weight(.semibold)).lineLimit(1)
+                .minimumScaleFactor(0.75)
+            ProgressView(value: min(100, max(0, percent)), total: 100)
+                .tint(tint)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
     private func resource(_ title: String, value: String) -> some View {
         VStack(alignment: .leading, spacing: 3) {
