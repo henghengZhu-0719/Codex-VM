@@ -1063,6 +1063,10 @@ struct MachineRow: View {
                 }
             }
             usageSummary
+            if !isBase {
+                Divider()
+                codexQuotaSummary
+            }
             if showDetails || showVMDetails {
                 Divider()
                 VStack(alignment: .leading, spacing: 8) {
@@ -1075,9 +1079,6 @@ struct MachineRow: View {
                     detail("CPU 配额", value: "\(vm.cpus) 核")
                     detail("内存配置", value: vm.memory)
                     detail("磁盘配置", value: vm.disk)
-                    if !isBase {
-                        codexQuotaSummary
-                    }
                     if let mounts = model.vmMounts[vm.name] {
                         Text("挂载文件夹（\(mounts.count)）")
                             .font(.caption.weight(.semibold))
@@ -1178,7 +1179,9 @@ struct MachineRow: View {
         let quota = model.vmQuotas[vm.name]
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 6) {
-                Text("Codex 额度").font(.caption).foregroundStyle(.secondary)
+                Label("Codex 额度", systemImage: "sparkles")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
                 if let plan = quota?.planType, !plan.isEmpty {
                     Text(plan.uppercased())
                         .font(.caption2.weight(.semibold))
@@ -1186,18 +1189,22 @@ struct MachineRow: View {
                         .background(AgentTheme.accent.opacity(0.14), in: Capsule())
                         .foregroundStyle(AgentTheme.accent)
                 }
+                if vm.status != "Running" {
+                    Text("上次记录").font(.caption2).foregroundStyle(.tertiary)
+                }
+                Spacer(minLength: 0)
                 if polling {
                     ProgressView().controlSize(.mini)
                 }
             }
             if let quota {
                 if quota.status == "ok" {
-                    HStack(spacing: 14) {
+                    HStack(alignment: .top, spacing: 12) {
                         if let five = quota.fiveHour {
-                            quotaPill(label: "5小时", window: five)
+                            quotaPill(label: "5 小时", window: five)
                         }
                         if let wk = quota.weekly {
-                            quotaPill(label: "周额度", window: wk)
+                            quotaPill(label: "每周", window: wk)
                         }
                     }
                 } else if quota.status == "not_logged_in" {
@@ -1206,24 +1213,32 @@ struct MachineRow: View {
                     Text(quota.error ?? "额度查询失败").font(.caption).foregroundStyle(.orange).lineLimit(1)
                 }
             } else {
-                Text(vm.status == "Running" ? "等待检测…" : "未运行").font(.caption).foregroundStyle(.secondary)
+                Text(vm.status == "Running" ? "正在获取额度…" : "启动后获取额度")
+                    .font(.caption).foregroundStyle(.secondary)
             }
         }
     }
     private func quotaPill(label: String, window: CodexWindowQuota) -> some View {
         let rem = window.remainingPercent
         let tint: Color = rem > 30 ? .green : rem > 10 ? .orange : .red
-        return VStack(alignment: .leading, spacing: 2) {
+        return VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 4) {
-                Text("\(label) 剩 \(rem)%").font(.caption.weight(.medium)).foregroundStyle(tint)
-                if let sec = window.resetAfterSeconds, sec > 0 {
-                    Text("(\(formatReset(sec)))").font(.caption2).foregroundStyle(.secondary)
-                }
+                Text(label).foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+                Text("\(rem)%").fontWeight(.semibold).foregroundStyle(tint)
             }
+            .font(.caption)
             ProgressView(value: Double(rem), total: 100)
                 .tint(tint)
-                .frame(width: 110)
+            if let sec = window.resetAfterSeconds, sec > 0 {
+                Text(formatReset(sec))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+            }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
     private func formatReset(_ seconds: Int) -> String {
         let d = seconds / 86400
