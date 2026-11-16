@@ -13,3 +13,17 @@ func TestRevokeClosesConnection(t *testing.T){g:=openGate(t);a,b:=net.Pipe();def
 func TestRaceWithDial(t *testing.T){g:=openGate(t);entered:=make(chan struct{});resume:=make(chan struct{});result:=make(chan error,1);go func(){_,err:=g.Dial(context.Background(),func(context.Context)(net.Conn,error){close(entered);<-resume;a,b:=net.Pipe();b.Close();return a,nil});result<-err}();<-entered;g.Revoke();close(resume);if err:=<-result;!errors.Is(err,ErrStale){t.Fatal(err)}}
 func TestLeaseExpiry(t *testing.T){g:=New();e:=g.BeginCheck();if err:=g.Authorize(e,time.Millisecond);err!=nil{t.Fatal(err)};time.Sleep(5*time.Millisecond);if s,_:=g.Status();s!=Closed{t.Fatal(s)}}
 func TestOldCheckCannotAuthorize(t *testing.T){g:=New();e:=g.BeginCheck();g.Revoke();if err:=g.Authorize(e,time.Second);!errors.Is(err,ErrStale){t.Fatal(err)}}
+
+func TestLeaseClosesActiveConnectionWithoutStatusPolling(t *testing.T){
+ g:=New();epoch:=g.BeginCheck()
+ if err:=g.Authorize(epoch,10*time.Millisecond);err!=nil{t.Fatal(err)}
+ a,b:=net.Pipe();defer b.Close()
+ conn,err:=g.Dial(context.Background(),func(context.Context)(net.Conn,error){return a,nil})
+ if err!=nil{t.Fatal(err)}
+ defer conn.Close()
+ deadline:=time.After(500*time.Millisecond)
+ for {
+  if err:=a.SetReadDeadline(time.Now());err!=nil {break}
+  select {case <-deadline:t.Fatal("lease did not close active connection");default:time.Sleep(time.Millisecond)}
+ }
+}
