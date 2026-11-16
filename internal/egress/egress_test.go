@@ -81,3 +81,26 @@ func TestCancelledHTTPConnectHandshakeReturnsWithoutFallback(t *testing.T){
   t.Fatal("cancelled proxy handshake did not stop")
  }
 }
+
+func TestHTTPConnectPreservesImmediateTunnelPayload(t *testing.T){
+ g,_:=New("http://127.0.0.1:1080",func(string,netip.AddrPort)bool{return true})
+ client,proxy:=net.Pipe()
+ defer proxy.Close()
+ g.DialProxy=func(context.Context,string,string)(net.Conn,error){return client,nil}
+ go func(){
+  reader:=bufio.NewReader(proxy)
+  for {
+   line,err:=reader.ReadString('\n')
+   if err!=nil{return}
+   if line=="\r\n"{break}
+  }
+  _,_=io.WriteString(proxy,"HTTP/1.1 200 Connection Established\r\n\r\nhello")
+ }()
+ conn,err:=g.DialContext(context.Background(),"tcp",netip.MustParseAddrPort("1.1.1.1:443"))
+ if err!=nil{t.Fatal(err)}
+ defer conn.Close()
+ _=conn.SetReadDeadline(time.Now().Add(time.Second))
+ buf:=make([]byte,5)
+ if _,err:=io.ReadFull(conn,buf);err!=nil{t.Fatal(err)}
+ if string(buf)!="hello"{t.Fatalf("unexpected payload %q",buf)}
+}
