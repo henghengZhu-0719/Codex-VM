@@ -54,8 +54,9 @@ func (g *Gate) DialContext(ctx context.Context, network string, dst netip.AddrPo
  keep:=false
  defer func(){stopCancel();if !keep {_=c.Close()}}()
  if deadline,has:=ctx.Deadline();has{_ = c.SetDeadline(deadline)}
+ var tunnelReader *bufio.Reader
  switch g.ProxyURL.Scheme{
- case "http":err=connectHTTP(c,g.ProxyURL,dst.String())
+ case "http":tunnelReader,err=connectHTTP(c,g.ProxyURL,dst.String())
  case "socks5":err=connectSOCKS5(c,g.ProxyURL,dst)
  default:err=ErrNoProxy
  }
@@ -64,24 +65,35 @@ func (g *Gate) DialContext(ctx context.Context, network string, dst netip.AddrPo
  if !g.Allow(network,dst){return nil,ErrDenied}
  _=c.SetDeadline(time.Time{})
  keep=true
+ if tunnelReader!=nil{return &bufferedProxyConn{Conn:c,reader:tunnelReader},nil}
  return c,nil
 }
 
-func connectHTTP(c net.Conn,u *url.URL,target string)error{
+type bufferedProxyConn struct {
+ net.Conn
+ reader *bufio.Reader
+}
+func (c *bufferedProxyConn) Read(p []byte)(int,error){return c.reader.Read(p)}
+func (c *bufferedProxyConn) CloseWrite()error{
+ if w,ok:=c.Conn.(interface{CloseWrite()error});ok{return w.CloseWrite()}
+ return errors.ErrUnsupported
+}
+
+func connectHTTP(c net.Conn,u *url.URL,target string)(*bufio.Reader,error){
  var auth string
  if u.User!=nil{password,_:=u.User.Password();auth="Proxy-Authorization: Basic "+base64.StdEncoding.EncodeToString([]byte(u.User.Username()+":"+password))+"\r\n"}
- if _,err:=io.WriteString(c,"CONNECT "+target+" HTTP/1.1\r\nHost: "+target+"\r\n"+auth+"\r\n");err!=nil{return fmt.Errorf("egress: CONNECT write: %w",err)}
+ if _,err:=io.WriteString(c,"CONNECT "+target+" HTTP/1.1\r\nHost: "+target+"\r\n"+auth+"\r\n");err!=nil{return nil,fmt.Errorf("egress: CONNECT write: %w",err)}
  br:=bufio.NewReaderSize(c,1)
- line,err:=br.ReadString('\n');if err!=nil{return fmt.Errorf("egress: CONNECT response: %w",err)}
- if len(line)>8192{return errors.New("egress: response too long")}
+ line,err:=br.ReadString('\n');if err!=nil{return nil,fmt.Errorf("egress: CONNECT response: %w",err)}
+ if len(line)>8192{return nil,errors.New("egress: response too long")}
  fields:=strings.Fields(line)
- if len(fields)<2 || !strings.HasPrefix(fields[0],"HTTP/1.") || fields[1]!="200"{return errors.New("egress: CONNECT rejected")}
+ if len(fields)<2 || !strings.HasPrefix(fields[0],"HTTP/1.") || fields[1]!="200"{return nil,errors.New("egress: CONNECT rejected")}
  for i:=0;i<64;i++{
-  h,err:=br.ReadString('\n');if err!=nil{return err}
-  if len(h)>8192{return errors.New("egress: oversized CONNECT header")}
-  if h=="\r\n"{if br.Buffered()!=0{return errors.New("egress: unexpected tunnel bytes")};return nil}
+  h,err:=br.ReadString('\n');if err!=nil{return nil,err}
+  if len(h)>8192{return nil,errors.New("egress: oversized CONNECT header")}
+  if h=="\r\n"{return br,nil}
  }
- return errors.New("egress: too many CONNECT headers")
+ return nil,errors.New("egress: too many CONNECT headers")
 }
 
 func connectSOCKS5(c net.Conn,u *url.URL,dst netip.AddrPort)error{
