@@ -49,6 +49,12 @@ func (g *Gate) Authorize(checkEpoch uint64, lease time.Duration) error {
  g.expireLocked()
  if g.epoch != checkEpoch || g.state != Checking { return ErrStale }
  if lease <= 0 { return ErrClosed }
+ g.openLocked(lease)
+ return nil
+}
+
+// Caller must hold g.mu. Only a trusted host verifier may grant access.
+func (g *Gate) openLocked(lease time.Duration) {
  g.state = Open
  g.expires = time.Now().Add(lease)
  epoch:=g.epoch
@@ -56,7 +62,6 @@ func (g *Gate) Authorize(checkEpoch uint64, lease time.Duration) error {
   g.mu.Lock();defer g.mu.Unlock()
   if g.epoch==epoch && g.state==Open && !time.Now().Before(g.expires){g.revokeLocked()}
  })
- return nil
 }
 
 func (g *Gate) Revoke() { g.mu.Lock(); defer g.mu.Unlock(); g.revokeLocked() }
