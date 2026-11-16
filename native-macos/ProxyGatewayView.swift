@@ -1,0 +1,1032 @@
+import SwiftUI
+import AppKit
+
+struct ProxyNodeItem: Decodable, Identifiable, Hashable {
+    let id: String
+    let name: String
+    let type: String
+}
+
+struct ProxySkippedItem: Decodable, Identifiable {
+    let index: Int
+    let name: String?
+    let type: String?
+    let reason: String
+    var id: String { "\(index)-\(name ?? "")" }
+}
+
+struct ProxySourceItem: Decodable, Identifiable {
+    let id: String
+    let name: String
+    let remote: Bool
+    let host: String?
+    let intervalHours: Int
+    let updatedAt: String
+    let error: String?
+    let usage: String?
+    let nodes: [ProxyNodeItem]?
+    let skipped: [ProxySkippedItem]?
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, remote, host, error, usage, nodes, skipped
+        case intervalHours = "interval_hours"
+        case updatedAt = "updated_at"
+    }
+
+    var safeNodes: [ProxyNodeItem] { nodes ?? [] }
+    var safeSkipped: [ProxySkippedItem] { skipped ?? [] }
+}
+
+struct GateInstanceItem: Decodable, Identifiable {
+    let dir: String
+    let socket: String
+    let state: String
+    let epoch: UInt64
+    let error: String?
+    var id: String { dir }
+}
+
+struct SafetyCheckItem: Decodable, Identifiable {
+    let id: String
+    let state: String
+    let evidence: String
+    let checkedAt: String
+
+    enum CodingKeys: String, CodingKey {
+        case id, state, evidence
+        case checkedAt = "checked_at"
+    }
+}
+
+struct SafetyReportItem: Decodable {
+    let policy: String
+    let runId: String
+    let configuration: String
+    let checkEpoch: UInt64
+    let createdAt: String
+    let checks: [SafetyCheckItem]?
+
+    enum CodingKeys: String, CodingKey {
+        case policy, configuration, checks
+        case runId = "run_id"
+        case checkEpoch = "check_epoch"
+        case createdAt = "created_at"
+    }
+
+    var safeChecks: [SafetyCheckItem] { checks ?? [] }
+}
+
+struct ProbeResultItem: Decodable {
+    let checkedAt: String
+    let proxyUrl: String
+    let dnsUrl: String
+    let exitIp: String?
+    let exitIpError: String?
+    let gateTriggered: Bool
+    let report: SafetyReportItem?
+    let error: String?
+
+    enum CodingKeys: String, CodingKey {
+        case report, error
+        case checkedAt = "checked_at"
+        case proxyUrl = "proxy_url"
+        case dnsUrl = "dns_url"
+        case exitIp = "exit_ip"
+        case exitIpError = "exit_ip_error"
+        case gateTriggered = "gate_triggered"
+    }
+}
+
+struct ProxyStatusResponse: Decodable {
+    let proxyMode: String
+    let managedEnabled: Bool
+    let useProxy: Bool
+    let customProxyUrl: String
+    let displayProxyUrl: String
+    let managedConfigPath: String
+    let dnsUrl: String
+    let bootstrapDns: [String]?
+    let port: Int
+    let selected: String
+    let route: [String]?
+    let routeError: String?
+    let running: Bool
+    let coreAvailable: Bool
+    let corePath: String?
+    let coreVersion: String?
+    let sources: [ProxySourceItem]?
+    let gates: [GateInstanceItem]?
+    let lastProbe: ProbeResultItem?
+
+    enum CodingKeys: String, CodingKey {
+        case port, selected, route, running, sources, gates
+        case proxyMode = "proxy_mode"
+        case managedEnabled = "managed_enabled"
+        case useProxy = "use_proxy"
+        case customProxyUrl = "custom_proxy_url"
+        case displayProxyUrl = "display_proxy_url"
+        case managedConfigPath = "managed_config_path"
+        case dnsUrl = "dns_url"
+        case bootstrapDns = "bootstrap_dns"
+        case routeError = "route_error"
+        case coreAvailable = "core_available"
+        case corePath = "core_path"
+        case coreVersion = "core_version"
+        case lastProbe = "last_probe"
+    }
+
+    var safeRoute: [String] { route ?? [] }
+    var safeSources: [ProxySourceItem] { sources ?? [] }
+    var safeGates: [GateInstanceItem] { gates ?? [] }
+    var safeBootstrapDns: [String] { bootstrapDns ?? [] }
+}
+
+struct ProxyConnectionItem: Decodable, Identifiable {
+    let id: String
+    let host: String
+    let port: String
+    let network: String
+    let upload: Int64
+    let download: Int64
+}
+
+struct ConnectionsSnapshotItem: Decodable {
+    let uploadTotal: Int64
+    let downloadTotal: Int64
+    let connections: [ProxyConnectionItem]?
+
+    enum CodingKeys: String, CodingKey {
+        case connections
+        case uploadTotal = "upload_total"
+        case downloadTotal = "download_total"
+    }
+}
+
+struct ProxyDelayResponse: Decodable {
+    let delays: [String: Int]?
+    let errors: [String: String]?
+}
+
+struct FlatProxyNode: Identifiable {
+    let node: ProxyNodeItem
+    let sourceID: String
+    let sourceName: String
+    var id: String { node.id }
+}
+
+private enum ProxyTab: String, CaseIterable, Identifiable {
+    case gateway, sources, gate, diagnostics
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .gateway: return "网关与节点"
+        case .sources: return "订阅与导入"
+        case .gate: return "门禁与自检"
+        case .diagnostics: return "连接与诊断"
+        }
+    }
+}
+
+struct ProxyGatewayView: View {
+    @ObservedObject var model: Model
+    @State private var tab: ProxyTab = .gateway
+
+    // Gateway form state
+    @State private var proxyMode = "custom"
+    @State private var useProxy = true
+    @State private var managedEnabled = false
+    @State private var customProxyURL = "http://10.126.126.1:8787"
+    @State private var dnsURL = "https://1.1.1.1/dns-query"
+    @State private var mihomoPort = "17896"
+    @State private var routeDraft: [String]? = nil
+    @State private var nodeSearch = ""
+    @State private var filterSourceID = ""
+
+    // Import form state
+    @State private var importMode = "url" // "url" | "yaml"
+    @State private var importName = ""
+    @State private var importURL = ""
+    @State private var importYAML = ""
+    @State private var importInterval = 24
+    @State private var importHostDownload = true
+
+    // Manual node form state
+    @State private var manualType = "socks5"
+    @State private var manualName = ""
+    @State private var manualServer = ""
+    @State private var manualPort = "1080"
+    @State private var manualUser = ""
+    @State private var manualPass = ""
+    @State private var manualUUID = ""
+    @State private var manualCipher = "aes-256-gcm"
+    @State private var manualSNI = ""
+    @State private var manualTLS = false
+    @State private var manualSkipCert = false
+    @State private var expandedSkipped: Set<String> = []
+
+    private var status: ProxyStatusResponse? { model.proxyStatus }
+
+    private var allNodes: [FlatProxyNode] {
+        (status?.safeSources ?? []).flatMap { src in
+            src.safeNodes.map { FlatProxyNode(node: $0, sourceID: src.id, sourceName: src.name) }
+        }
+    }
+
+    private var filteredNodes: [FlatProxyNode] {
+        let q = nodeSearch.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return allNodes.filter { item in
+            if !filterSourceID.isEmpty && item.sourceID != filterSourceID { return false }
+            if q.isEmpty { return true }
+            return item.node.name.lowercased().contains(q)
+                || item.node.type.lowercased().contains(q)
+                || item.sourceName.lowercased().contains(q)
+        }
+    }
+
+    private var savedRoute: [String] {
+        if let r = status?.safeRoute, !r.isEmpty { return r }
+        if let sel = status?.selected, !sel.isEmpty { return [sel] }
+        return []
+    }
+
+    private var activeRoute: [String] {
+        if let routeDraft, !routeDraft.isEmpty { return routeDraft }
+        if !savedRoute.isEmpty { return savedRoute }
+        return [""]
+    }
+
+    private var routeValid: Bool {
+        let r = activeRoute
+        guard !r.isEmpty else { return false }
+        if Set(r).count != r.count { return false }
+        let ids = Set(allNodes.map(\.id))
+        return r.allSatisfy { !$0.isEmpty && ids.contains($0) }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            headerBar
+            statusBanner
+            Picker("", selection: $tab) {
+                ForEach(ProxyTab.allCases) { item in
+                    Text(item.title).tag(item)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(maxWidth: 520)
+
+            if !model.proxyError.isEmpty {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
+                    Text(model.proxyError).font(.callout).foregroundStyle(.red).textSelection(.enabled)
+                }
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.red.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+            } else if !model.proxyMessage.isEmpty {
+                HStack(spacing: 8) {
+                    Image(systemName: "info.circle.fill").foregroundStyle(.secondary)
+                    Text(model.proxyMessage).font(.callout).foregroundStyle(.secondary).textSelection(.enabled)
+                }
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
+            }
+
+            switch tab {
+            case .gateway:
+                gatewayTab
+            case .sources:
+                sourcesTab
+            case .gate:
+                gateTab
+            case .diagnostics:
+                diagnosticsTab
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .onAppear {
+            syncFieldsFromStatus()
+            model.refreshProxyStatus { syncFieldsFromStatus() }
+        }
+        .onChange(of: tab) { next in
+            if next == .diagnostics {
+                model.refreshConnections()
+            } else if next == .gate {
+                model.refreshProxyStatus()
+            }
+        }
+    }
+
+    private var headerBar: some View {
+        HStack(alignment: .firstTextBaseline) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("代理与门禁").font(.largeTitle.bold())
+                Text("管理 Egress 代理出口、代理内 DoH 解析、Mihomo 节点链路与 Fail-Closed 连接门禁。")
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            if model.proxyBusy { ProgressView().controlSize(.small) }
+            Button {
+                model.refreshProxyStatus { syncFieldsFromStatus() }
+            } label: {
+                Label("刷新", systemImage: "arrow.clockwise")
+            }
+            .disabled(model.proxyBusy)
+        }
+    }
+
+    private var statusBanner: some View {
+        let st = status
+        let modeText = st?.proxyMode == "mihomo" ? "内置 Mihomo 核心" : "自定义代理"
+        let endpointText = st?.displayProxyUrl ?? customProxyURL
+        let dnsText = st?.dnsUrl ?? dnsURL
+        let mihomoState = st == nil ? "读取中" : !st!.coreAvailable ? "核心缺失" : st!.running ? "核心运行中" : "核心已停止"
+        let gateSummary: String = {
+            let gates = st?.safeGates ?? []
+            if gates.isEmpty {
+                return (st?.managedEnabled ?? false) ? "暂无运行中的托管 VM" : "未开启托管模式"
+            }
+            return gates.map { "\($0.state.uppercased()) (Epoch \($0.epoch))" }.joined(separator: " · ")
+        }()
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 12) {
+                pill(title: "出口模式", value: (st?.useProxy ?? useProxy) ? modeText : "代理已关闭", tint: (st?.useProxy ?? useProxy) ? .green : .secondary)
+                pill(title: "Mihomo 核心", value: mihomoState, tint: (st?.running ?? false) ? .green : (st?.coreAvailable ?? false) ? .secondary : .orange)
+                pill(title: "托管门禁", value: gateSummary, tint: (st?.safeGates.isEmpty ?? true) ? .secondary : .blue)
+                Spacer()
+            }
+            HStack(spacing: 24) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("当前代理地址").font(.caption).foregroundStyle(.secondary)
+                    Text(endpointText).font(.callout.monospaced()).textSelection(.enabled)
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("代理内 DoH 解析").font(.caption).foregroundStyle(.secondary)
+                    Text(dnsText).font(.callout.monospaced()).textSelection(.enabled)
+                }
+                if let exitIP = st?.lastProbe?.exitIp, !exitIP.isEmpty {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("最近探测出口 IP").font(.caption).foregroundStyle(.secondary)
+                        Text(exitIP).font(.callout.monospaced().weight(.semibold)).foregroundStyle(.green).textSelection(.enabled)
+                    }
+                }
+                Spacer()
+            }
+        }
+        .padding(14)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.06)))
+    }
+
+    private func pill(title: String, value: String, tint: Color) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title).font(.caption2).foregroundStyle(.secondary)
+            Text(value)
+                .font(.caption.weight(.semibold))
+                .padding(.horizontal, 8).padding(.vertical, 3)
+                .background(tint.opacity(0.15), in: Capsule())
+                .foregroundStyle(tint)
+        }
+    }
+
+    private var gatewayTab: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            // 1. Egress + DoH + Gate Configuration
+            VStack(alignment: .leading, spacing: 14) {
+                Text("出站网关与 DoH 设置").font(.headline)
+                Picker("代理模式", selection: $proxyMode) {
+                    Text("自定义 HTTP / SOCKS5 代理").tag("custom")
+                    Text("内置 Mihomo 代理核心").tag("mihomo")
+                }
+                .pickerStyle(.radioGroup)
+                .horizontalRadioGroupLayout()
+
+                Toggle("对新建/启动的虚拟机启用此代理", isOn: $useProxy)
+
+                if proxyMode == "custom" {
+                    HStack {
+                        Text("自定义代理地址").frame(width: 120, alignment: .leading)
+                        TextField("http://10.126.126.1:8787 或 socks5://127.0.0.1:7890", text: $customProxyURL)
+                            .textFieldStyle(.roundedBorder)
+                        Button("10.126.126.1:8787") { customProxyURL = "http://10.126.126.1:8787" }.controlSize(.small)
+                        Button("127.0.0.1:7890") { customProxyURL = "http://127.0.0.1:7890" }.controlSize(.small)
+                    }
+                    Text("Egress 强制要求数字 IPv4 + 端口（禁止域名），避免触发宿主机系统 DNS。")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else {
+                    HStack {
+                        Text("本地混合监听端口").frame(width: 120, alignment: .leading)
+                        TextField("17896", text: $mihomoPort)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 110)
+                        Text("绑定 127.0.0.1，仅宿主 Egress 拨号器携带随机密钥访问。")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+
+                HStack {
+                    Text("DoH 解析端点").frame(width: 120, alignment: .leading)
+                    TextField("https://1.1.1.1/dns-query", text: $dnsURL)
+                        .textFieldStyle(.roundedBorder)
+                    Button("1.1.1.1") { dnsURL = "https://1.1.1.1/dns-query" }.controlSize(.small)
+                    Button("223.5.5.5") { dnsURL = "https://223.5.5.5/dns-query" }.controlSize(.small)
+                    Button("8.8.8.8") { dnsURL = "https://8.8.8.8/dns-query" }.controlSize(.small)
+                }
+                Text("需使用带路径的 IPv4 HTTPS 字面量（例如 https://1.1.1.1/dns-query），所有来宾 DNS 均在代理隧道内通过 DoH 完成。")
+                    .font(.caption).foregroundStyle(.secondary)
+
+                Divider()
+
+                Toggle("启用托管网络与 Fail-Closed 连接门禁（实验性 / 开发联调）", isOn: $managedEnabled)
+                Text("开启后启动 VM 会注入 AGENT_VM_MANAGED_NETWORK_CONFIG，在宿主侧安装 gVisor/Lima 强制代理与 DoH 钩子，并创建私有 Netgate 控制 Socket。注意：当前门禁默认保持 Closed（待实机边界测量完善），仅用于自检探测与隔离联调。")
+                    .font(.caption).foregroundStyle(.secondary)
+
+                HStack {
+                    Button("保存网关配置") {
+                        saveGatewayConfig()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(model.proxyBusy)
+                    Spacer()
+                    if let path = status?.managedConfigPath {
+                        Text("托管配置：\(path)").font(.caption2).foregroundStyle(.secondary).textSelection(.enabled)
+                    }
+                }
+            }
+            .padding(16)
+            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.06)))
+
+            // 2. Mihomo Core + Route Chain + Node List
+            VStack(alignment: .leading, spacing: 14) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Mihomo 核心与代理链路").font(.headline)
+                        if let ver = status?.coreVersion, !ver.isEmpty {
+                            Text(ver).font(.caption).foregroundStyle(.secondary)
+                        } else if status?.coreAvailable == false {
+                            Text("未检测到 mihomo 可执行文件（可放到 ~/.agent-vm/bin/mihomo 或重新构建 App）")
+                                .font(.caption).foregroundStyle(.orange)
+                        }
+                    }
+                    Spacer()
+                    if status?.running == true {
+                        Button("停止核心") { model.stopProxyCore { syncFieldsFromStatus() } }
+                            .disabled(model.proxyBusy)
+                    }
+                }
+
+                if !allNodes.isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("代理链路编排（支持多跳中转）").font(.subheadline.weight(.semibold))
+                        ForEach(Array(activeRoute.enumerated()), id: \.offset) { idx, hopID in
+                            let isFinal = idx == activeRoute.count - 1
+                            HStack(spacing: 8) {
+                                Text(isFinal ? "最终出口" : "中转节点 \(idx + 1)")
+                                    .font(.caption.weight(.medium))
+                                    .frame(width: 72, alignment: .leading)
+                                Picker("", selection: Binding(
+                                    get: { hopID },
+                                    set: { next in updateHop(index: idx, nodeID: next) }
+                                )) {
+                                    Text("请选择节点").tag("")
+                                    ForEach(status?.safeSources ?? []) { src in
+                                        ForEach(src.safeNodes) { n in
+                                            Text("\(n.name) [\(src.name) · \(n.type.uppercased())]").tag(n.id)
+                                        }
+                                    }
+                                }
+                                .labelsHidden()
+                                .frame(maxWidth: 380)
+                                if !isFinal {
+                                    Button {
+                                        var copy = activeRoute
+                                        copy.remove(at: idx)
+                                        routeDraft = copy
+                                    } label: {
+                                        Image(systemName: "xmark.circle")
+                                    }
+                                    .buttonStyle(.borderless)
+                                }
+                            }
+                        }
+                        HStack(spacing: 10) {
+                            if allNodes.count > activeRoute.count {
+                                Button("添加中转") {
+                                    var copy = activeRoute
+                                    copy.insert("", at: max(0, copy.count - 1))
+                                    routeDraft = copy
+                                }
+                                .controlSize(.small)
+                            }
+                            if routeDraft != nil {
+                                Button("撤销链修改") { routeDraft = nil }.controlSize(.small)
+                            }
+                            Spacer()
+                            Button(status?.running == true && routeDraft == nil ? "重新应用并重启核心" : "应用节点并启动 Mihomo") {
+                                let port = Int(mihomoPort) ?? 17896
+                                model.applyProxyRoute(route: activeRoute, port: port) {
+                                    routeDraft = nil
+                                    syncFieldsFromStatus()
+                                }
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(model.proxyBusy || !routeValid || status?.coreAvailable != true)
+                        }
+                    }
+                    .padding(12)
+                    .background(Color.primary.opacity(0.03), in: RoundedRectangle(cornerRadius: 8))
+                }
+
+                HStack {
+                    TextField("搜索节点名称、协议或来源", text: $nodeSearch)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 280)
+                    Picker("来源", selection: $filterSourceID) {
+                        Text("全部来源").tag("")
+                        ForEach(status?.safeSources ?? []) { src in
+                            Text(src.name).tag(src.id)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(width: 160)
+                    Spacer()
+                    Button {
+                        model.measureDelay(nodeID: nil)
+                    } label: {
+                        Label("全部测速", systemImage: "speedometer")
+                    }
+                    .disabled(model.proxyBusy || status?.running != true || allNodes.isEmpty)
+                    Button("导入订阅 / 添加节点") { tab = .sources }
+                }
+
+                if allNodes.isEmpty {
+                    VStack(spacing: 8) {
+                        Text("暂无代理节点").font(.headline)
+                        Text("前往「订阅与导入」导入 Clash/Mihomo YAML 订阅链接、本地配置或手动添加节点。")
+                            .font(.caption).foregroundStyle(.secondary)
+                        Button("添加第一份节点来源") { tab = .sources }
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 120)
+                } else {
+                    VStack(spacing: 6) {
+                        ForEach(filteredNodes) { item in
+                            nodeRow(item)
+                        }
+                        if filteredNodes.isEmpty {
+                            Text("没有符合筛选条件的节点。").font(.caption).foregroundStyle(.secondary).padding(.vertical, 12)
+                        }
+                    }
+                }
+            }
+            .padding(16)
+            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.06)))
+        }
+    }
+
+    private func nodeRow(_ item: FlatProxyNode) -> some View {
+        let isExit = activeRoute.last == item.id
+        let isTransit = activeRoute.dropLast().contains(item.id)
+        let delayText = model.nodeDelays[item.id] ?? "未测速"
+        return HStack(spacing: 10) {
+            Button {
+                updateHop(index: max(0, activeRoute.count - 1), nodeID: item.id)
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: isExit ? "checkmark.circle.fill" : "circle")
+                        .foregroundStyle(isExit ? Color.green : Color.secondary)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(item.node.name).fontWeight(isExit ? .semibold : .regular)
+                        Text("\(item.sourceName) · \(item.node.type.uppercased())")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(isTransit)
+
+            Spacer()
+            if savedRoute.contains(item.id) && status?.proxyMode == "mihomo" {
+                Text(item.id == status?.selected ? "当前出口" : "当前中转")
+                    .font(.caption2.weight(.semibold))
+                    .padding(.horizontal, 6).padding(.vertical, 2)
+                    .background(Color.green.opacity(0.15), in: Capsule())
+                    .foregroundStyle(.green)
+            } else if isTransit {
+                Text("已作中转").font(.caption2).foregroundStyle(.secondary)
+            }
+            Text(delayText)
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(delayColor(delayText))
+                .frame(width: 68, alignment: .trailing)
+            Button {
+                model.measureDelay(nodeID: item.id)
+            } label: {
+                Image(systemName: "waveform.path.ecg")
+            }
+            .controlSize(.small)
+            .help("测速")
+            .disabled(model.proxyBusy || status?.running != true)
+        }
+        .padding(.horizontal, 10).padding(.vertical, 7)
+        .background((isExit ? Color.green.opacity(0.07) : Color.primary.opacity(0.025)), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func delayColor(_ text: String) -> Color {
+        if text.hasSuffix(" ms"), let v = Int(text.replacingOccurrences(of: " ms", with: "")) {
+            if v < 180 { return .green }
+            if v < 500 { return .orange }
+            return .red
+        }
+        if text == "失败" || text == "超时" { return .red }
+        return .secondary
+    }
+
+    private var sourcesTab: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            // Import subscription / YAML
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Text("导入 Clash / Mihomo 订阅或配置").font(.headline)
+                    Spacer()
+                    Picker("", selection: $importMode) {
+                        Text("HTTPS 订阅链接").tag("url")
+                        Text("YAML 文本 / 文件").tag("yaml")
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(width: 260)
+                }
+                HStack {
+                    Text("来源名称").frame(width: 90, alignment: .leading)
+                    TextField("例如：主力订阅", text: $importName).textFieldStyle(.roundedBorder)
+                }
+                if importMode == "url" {
+                    HStack {
+                        Text("订阅地址").frame(width: 90, alignment: .leading)
+                        TextField("https://example.com/sub.yaml", text: $importURL).textFieldStyle(.roundedBorder)
+                    }
+                    HStack(spacing: 16) {
+                        Stepper("更新间隔：\(importInterval) 小时", value: $importInterval, in: 0...168)
+                        Toggle("通过主机环境代理下载订阅（推荐初次配置时勾选）", isOn: $importHostDownload)
+                    }
+                } else {
+                    HStack {
+                        Text("YAML 内容").frame(width: 90, alignment: .leading)
+                        Button("从本地 YAML 文件读取…") { pickYAMLFile() }
+                        Spacer()
+                    }
+                    TextEditor(text: $importYAML)
+                        .font(.system(.caption, design: .monospaced))
+                        .frame(height: 120)
+                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.primary.opacity(0.15)))
+                }
+                HStack {
+                    Spacer()
+                    Button("导入来源") {
+                        model.importProxySource(
+                            name: importName,
+                            url: importMode == "url" ? importURL : "",
+                            content: importMode == "yaml" ? importYAML : "",
+                            interval: importInterval,
+                            hostDownload: importHostDownload
+                        ) {
+                            importName = ""; importURL = ""; importYAML = ""
+                            syncFieldsFromStatus()
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(model.proxyBusy || importName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || (importMode == "url" ? importURL.isEmpty : importYAML.isEmpty))
+                }
+            }
+            .padding(16)
+            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.06)))
+
+            // Manual single node form
+            VStack(alignment: .leading, spacing: 12) {
+                Text("手动添加单个节点").font(.headline)
+                HStack(spacing: 12) {
+                    Picker("协议", selection: $manualType) {
+                        ForEach(["socks5", "http", "ss", "vmess", "vless", "trojan", "hysteria2", "ssh"], id: \.self) { t in
+                            Text(t.uppercased()).tag(t)
+                        }
+                    }.frame(width: 150)
+                    TextField("节点名称", text: $manualName).textFieldStyle(.roundedBorder)
+                    TextField("服务器地址 / IP", text: $manualServer).textFieldStyle(.roundedBorder)
+                    TextField("端口", text: $manualPort).textFieldStyle(.roundedBorder).frame(width: 80)
+                }
+                HStack(spacing: 12) {
+                    if manualType == "vmess" || manualType == "vless" {
+                        TextField("UUID", text: $manualUUID).textFieldStyle(.roundedBorder)
+                    } else {
+                        TextField("用户名（可选）", text: $manualUser).textFieldStyle(.roundedBorder)
+                    }
+                    if manualType != "vless" {
+                        SecureField("密码 / 密钥（可选）", text: $manualPass).textFieldStyle(.roundedBorder)
+                    }
+                    if manualType == "ss" || manualType == "vmess" {
+                        TextField("加密方式", text: $manualCipher).textFieldStyle(.roundedBorder).frame(width: 150)
+                    }
+                    if ["http", "socks5", "vmess", "vless", "trojan", "hysteria2"].contains(manualType) {
+                        TextField("SNI（可选）", text: $manualSNI).textFieldStyle(.roundedBorder).frame(width: 150)
+                    }
+                }
+                HStack {
+                    if ["http", "socks5", "vmess", "vless"].contains(manualType) {
+                        Toggle("启用 TLS", isOn: $manualTLS)
+                    }
+                    if ["http", "socks5", "vmess", "vless", "trojan", "hysteria2"].contains(manualType) {
+                        Toggle("跳过证书校验", isOn: $manualSkipCert)
+                    }
+                    Spacer()
+                    Button("添加节点") {
+                        model.addManualNode(
+                            name: manualName,
+                            type: manualType,
+                            server: manualServer,
+                            port: Int(manualPort) ?? 1080,
+                            username: manualUser,
+                            password: manualPass,
+                            uuid: manualUUID,
+                            cipher: manualCipher,
+                            sni: manualSNI,
+                            tls: manualTLS,
+                            skipCertVerify: manualSkipCert
+                        ) {
+                            manualName = ""; manualServer = ""; manualPass = ""
+                            syncFieldsFromStatus()
+                        }
+                    }
+                    .disabled(model.proxyBusy || manualName.isEmpty || manualServer.isEmpty)
+                }
+            }
+            .padding(16)
+            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.06)))
+
+            // Existing sources
+            VStack(alignment: .leading, spacing: 10) {
+                Text("已导入来源（\(status?.safeSources.count ?? 0)）").font(.headline)
+                if let srcs = status?.safeSources, !srcs.isEmpty {
+                    ForEach(srcs) { src in
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(src.name).font(.subheadline.weight(.semibold))
+                                    Text("\(src.remote ? (src.host ?? "远程订阅") : "本地导入") · \(src.safeNodes.count) 个节点\(src.usage?.isEmpty == false ? " · " + src.usage! : "")")
+                                        .font(.caption).foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                if src.remote {
+                                    Button("刷新") {
+                                        model.refreshSubscription(id: src.id, hostDownload: importHostDownload) { syncFieldsFromStatus() }
+                                    }.controlSize(.small).disabled(model.proxyBusy)
+                                }
+                                Button("删除", role: .destructive) {
+                                    model.deleteSource(id: src.id) { syncFieldsFromStatus() }
+                                }.controlSize(.small).disabled(model.proxyBusy)
+                            }
+                            if let err = src.error, !err.isEmpty {
+                                Text(err).font(.caption).foregroundStyle(.red)
+                            }
+                            if !src.safeSkipped.isEmpty {
+                                DisclosureGroup("已跳过 \(src.safeSkipped.count) 个不兼容或不安全节点", isExpanded: Binding(
+                                    get: { expandedSkipped.contains(src.id) },
+                                    set: { on in if on { expandedSkipped.insert(src.id) } else { expandedSkipped.remove(src.id) } }
+                                )) {
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        ForEach(src.safeSkipped) { issue in
+                                            Text("#\(issue.index) \(issue.name ?? "") (\(issue.type ?? "-")): \(issue.reason)")
+                                                .font(.caption2).foregroundStyle(.secondary)
+                                        }
+                                    }
+                                    .padding(.top, 4)
+                                }
+                                .font(.caption)
+                            }
+                        }
+                        .padding(12)
+                        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
+                        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.primary.opacity(0.06)))
+                    }
+                } else {
+                    Text("尚未导入任何订阅或手动节点。").font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    private var gateTab: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Fail-Closed 连接门禁与安全自检").font(.headline)
+                        Text("绑定到运行标识（RunID）、配置指纹与 Epoch；未实测的来宾隔离项目保持 Unknown，不会错误放行。")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("撤销全部门禁 (Revoke)") {
+                        model.closeGate()
+                    }
+                    .disabled(model.proxyBusy)
+                    Button("运行网关与门禁自检") {
+                        model.runGateProbe()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(model.proxyBusy)
+                }
+
+                Divider()
+
+                Text("运行中的 HostAgent Netgate 实例（\(status?.safeGates.count ?? 0)）").font(.subheadline.weight(.semibold))
+                if let gates = status?.safeGates, !gates.isEmpty {
+                    ForEach(gates) { g in
+                        HStack {
+                            Text(g.dir).font(.caption.monospaced())
+                            Text(g.state.uppercased())
+                                .font(.caption.weight(.semibold))
+                                .padding(.horizontal, 7).padding(.vertical, 2)
+                                .background(Color.blue.opacity(0.15), in: Capsule())
+                            Text("Epoch \(g.epoch)").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                            Spacer()
+                            Text(g.socket).font(.caption2.monospaced()).foregroundStyle(.secondary).lineLimit(1)
+                        }
+                        .padding(8)
+                        .background(Color.primary.opacity(0.03), in: RoundedRectangle(cornerRadius: 8))
+                    }
+                } else {
+                    Text("当前没有处于托管模式并开启私有 Netgate Socket 的虚拟机进程；点击上方自检按钮仍可在宿主机执行离线隧道、DoH 与门禁闭态验证。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            .padding(16)
+            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.06)))
+
+            if let probe = status?.lastProbe {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack {
+                        Text("最近一次自检报告").font(.headline)
+                        Spacer()
+                        Text(probe.gateTriggered ? "来源：HostAgent Netgate /check" : "来源：宿主机独立探测")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    HStack(spacing: 24) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("探测出口 IP").font(.caption).foregroundStyle(.secondary)
+                            Text(probe.exitIp ?? (probe.exitIpError ?? "未测出"))
+                                .font(.callout.monospaced())
+                                .foregroundStyle(probe.exitIp != nil ? .green : .orange)
+                                .textSelection(.enabled)
+                        }
+                        if let rep = probe.report {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("RunID / Epoch").font(.caption).foregroundStyle(.secondary)
+                                Text("\(rep.runId) · Epoch \(rep.checkEpoch)")
+                                    .font(.caption.monospaced()).textSelection(.enabled)
+                            }
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("配置指纹 (SHA-256)").font(.caption).foregroundStyle(.secondary)
+                                Text(String(rep.configuration.prefix(24)) + "…")
+                                    .font(.caption.monospaced()).textSelection(.enabled)
+                            }
+                        }
+                    }
+
+                    if let checks = probe.report?.safeChecks, !checks.isEmpty {
+                        Divider()
+                        ForEach(checks) { c in
+                            HStack(alignment: .top, spacing: 10) {
+                                Image(systemName: c.state == "passed" ? "checkmark.circle.fill" : c.state == "failed" ? "xmark.circle.fill" : "questionmark.circle")
+                                    .foregroundStyle(c.state == "passed" ? Color.green : c.state == "failed" ? Color.red : Color.secondary)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    HStack {
+                                        Text(checkTitle(c.id)).font(.callout.weight(.medium))
+                                        Text("(\(c.id))").font(.caption.monospaced()).foregroundStyle(.secondary)
+                                        Spacer()
+                                        Text(c.state.uppercased()).font(.caption2.weight(.semibold))
+                                            .foregroundStyle(c.state == "passed" ? .green : c.state == "failed" ? .red : .secondary)
+                                    }
+                                    Text(c.evidence).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                                }
+                            }
+                            .padding(.vertical, 3)
+                        }
+                    }
+                }
+                .padding(16)
+                .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
+                .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.06)))
+            }
+        }
+    }
+
+    private var diagnosticsTab: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("托管网络边界策略").font(.headline)
+                Text("• 客机公网 UDP、IPv6 与 ICMP：在托管模式下阻断（禁止旁路泄漏）").font(.caption)
+                Text("• 业务域名解析：通过代理隧道内 DoH 端点（\(status?.dnsUrl ?? dnsURL)）执行，禁止混合 AAAA 查询回退").font(.caption)
+                Text("• 基础设施引导 DoH：\((status?.safeBootstrapDns ?? []).joined(separator: "、"))（仅直连公网数值 IPv4，不使用系统 DNS）").font(.caption)
+            }
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.06)))
+
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Text("Mihomo 实时连接（\(model.proxyConnections.count)）").font(.headline)
+                    Spacer()
+                    Text("累计上传 \(formatBytes(model.proxyUploadTotal)) · 下载 \(formatBytes(model.proxyDownloadTotal))")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Button("刷新连接") { model.refreshConnections() }.controlSize(.small)
+                }
+                if model.proxyConnections.isEmpty {
+                    Text(status?.running == true ? "当前无活动连接。" : "Mihomo 核心未运行。")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else {
+                    ForEach(model.proxyConnections) { conn in
+                        HStack {
+                            Text("\(conn.host):\(conn.port)").font(.caption.monospaced()).textSelection(.enabled)
+                            Text(conn.network.uppercased()).font(.caption2).foregroundStyle(.secondary)
+                            Spacer()
+                            Text("↑ \(formatBytes(conn.upload))  ↓ \(formatBytes(conn.download))")
+                                .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+                        }
+                        .padding(.vertical, 3)
+                    }
+                }
+            }
+            .padding(16)
+            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.06)))
+        }
+    }
+
+    private func syncFieldsFromStatus() {
+        guard let st = model.proxyStatus else { return }
+        proxyMode = st.proxyMode
+        useProxy = st.useProxy
+        managedEnabled = st.managedEnabled
+        customProxyURL = st.customProxyUrl
+        dnsURL = st.dnsUrl
+        mihomoPort = String(st.port)
+    }
+
+    private func saveGatewayConfig() {
+        let portVal = Int(mihomoPort) ?? 17896
+        model.saveProxyConfig(
+            proxyMode: proxyMode,
+            managedEnabled: managedEnabled,
+            useProxy: useProxy,
+            customProxyURL: customProxyURL,
+            dnsURL: dnsURL,
+            port: portVal
+        ) {
+            syncFieldsFromStatus()
+        }
+    }
+
+    private func updateHop(index: Int, nodeID: String) {
+        var copy = activeRoute
+        guard index < copy.count else { return }
+        copy[index] = nodeID
+        routeDraft = copy
+    }
+
+    private func pickYAMLFile() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        if panel.runModal() == .OK, let url = panel.url, let content = try? String(contentsOf: url, encoding: .utf8) {
+            importYAML = content
+            if importName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                importName = url.deletingPathExtension().lastPathComponent
+            }
+        }
+    }
+
+    private func checkTitle(_ id: String) -> String {
+        switch id {
+        case "proxy_transport": return "代理 TCP 隧道"
+        case "dns_transport": return "代理内 DoH 解析"
+        case "fail_closed": return "门禁 Fail-Closed"
+        case "egress_policy": return "来宾出站策略"
+        case "udp_policy": return "UDP 阻断策略"
+        case "ipv6_policy": return "IPv6 阻断策略"
+        case "host_boundary": return "宿主机隔离边界"
+        case "exit_consistency": return "出口 IP 一致性"
+        default: return id
+        }
+    }
+
+    private func formatBytes(_ v: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: max(0, v), countStyle: .binary)
+    }
+}

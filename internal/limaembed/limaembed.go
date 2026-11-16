@@ -4,10 +4,12 @@
 package limaembed
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
@@ -61,7 +63,8 @@ func Run(args []string) bool {
 		usernet.Names, usernet.Answered = policy.Name, policy.Answered
 		dns.Names, dns.Answered = policy.Name, policy.Answered
 	}
-	// Managed mode installs host-owned transport hooks and starts CLOSED.
+	// Managed mode installs host-owned transport hooks and starts CLOSED,
+	// opening only if the host-side proxy, DoH, and fail-closed probes pass.
 	// Initialization failures abort startup rather than fall back to legacy networking.
 	var stopManagedNetwork func()
 	if configPath := managedNetworkRequested(); configPath != "" {
@@ -69,7 +72,12 @@ func Run(args []string) bool {
 		if err != nil {
 			logrus.Fatal(err)
 		}
-		control, err := netgate.StartControl(filepath.Join(string(st), ".netgate-private"), gate, check)
+		wrappedCheck := wrapCheckWithGateAuth(gate, check)
+		initEpoch := gate.BeginCheck()
+		if !hostProbesPassed(wrappedCheck(context.Background(), initEpoch)) {
+			logrus.Warn("managed network startup probe failed; gate remains closed")
+		}
+		control, err := netgate.StartControl(filepath.Join(string(st), ".netgate-private"), gate, wrappedCheck)
 		if err != nil {
 			logrus.Fatal(err)
 		}
@@ -108,6 +116,31 @@ func Run(args []string) bool {
 	}
 	os.Exit(0)
 	return true
+}
+
+// hostProbesPassed reports whether all three host-measurable checks passed.
+func hostProbesPassed(report netgate.SafetyReport) bool {
+	states := make(map[string]netgate.CheckState, len(report.Checks))
+	for _, check := range report.Checks {
+		states[check.ID] = check.State
+	}
+	return states["proxy_transport"] == netgate.Passed &&
+		states["dns_transport"] == netgate.Passed &&
+		states["fail_closed"] == netgate.Passed
+}
+
+// wrapCheckWithGateAuth runs check and authorizes gate for 24h when host probes pass,
+// or revokes the gate if any host probe fails.
+func wrapCheckWithGateAuth(gate *netgate.Gate, check func(context.Context, uint64) netgate.SafetyReport) func(context.Context, uint64) netgate.SafetyReport {
+	return func(ctx context.Context, epoch uint64) netgate.SafetyReport {
+		report := check(ctx, epoch)
+		if hostProbesPassed(report) {
+			_ = gate.Authorize(epoch, 24*time.Hour)
+		} else {
+			gate.Revoke()
+		}
+		return report
+	}
 }
 
 // windowsPath puts QEMU's usual folders on PATH, as limactl's main does.

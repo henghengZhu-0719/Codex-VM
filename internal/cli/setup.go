@@ -1,13 +1,14 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"bytes"
-	"net/http"
+	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -17,6 +18,7 @@ import (
 	agentvm "github.com/sylvinus/agent-vm"
 	"github.com/sylvinus/agent-vm/internal/env"
 	"github.com/sylvinus/agent-vm/internal/host"
+	"github.com/sylvinus/agent-vm/internal/managedproxy"
 	"github.com/sylvinus/agent-vm/internal/state"
 	"github.com/sylvinus/agent-vm/internal/ui"
 	"github.com/sylvinus/agent-vm/internal/version"
@@ -400,8 +402,28 @@ apt-cache show "nodejs=$version" | awk '/^Filename: / {f=$2} /^SHA256: / {s=$2} 
 	expected, err := hex.DecodeString(lines[1]); if err != nil || len(expected) != sha256.Size { return fmt.Errorf("invalid Node.js package checksum") }
 	url := "https://deb.nodesource.com/node_24.x/" + lines[0]
 	fmt.Fprintln(log, "Downloading Node.js package on the host:", url)
+	client := http.DefaultClient
+	if cfgPath := strings.TrimSpace(os.Getenv("AGENT_VM_MANAGED_NETWORK_CONFIG")); cfgPath != "" {
+		raw, err := os.ReadFile(cfgPath)
+		if err != nil {
+			return fmt.Errorf("reading managed network config: %w", err)
+		}
+		var cfg struct {
+			ProxyURL string `json:"proxy_url"`
+			DNSURL   string `json:"dns_url"`
+		}
+		if err := json.Unmarshal(raw, &cfg); err != nil {
+			return fmt.Errorf("parsing managed network config: %w", err)
+		}
+		c, err := managedproxy.ProxyDownloadClient(cfg.ProxyURL, cfg.DNSURL)
+		if err != nil {
+			return fmt.Errorf("configuring managed proxy download client: %w", err)
+		}
+		defer c.CloseIdleConnections()
+		client = c
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil); if err != nil { return err }
-	resp, err := http.DefaultClient.Do(req); if err != nil { return fmt.Errorf("host download: %w", err) }; defer resp.Body.Close()
+	resp, err := client.Do(req); if err != nil { return fmt.Errorf("host download: %w", err) }; defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK { return fmt.Errorf("host download: %s", resp.Status) }
 	f, err := os.CreateTemp("", "agent-vm-node-*.deb"); if err != nil { return err }; defer os.Remove(f.Name()); defer f.Close()
 	h := sha256.New(); if _, err = io.Copy(io.MultiWriter(f, h), resp.Body); err != nil { return err }

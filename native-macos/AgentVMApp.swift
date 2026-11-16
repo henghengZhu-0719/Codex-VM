@@ -48,23 +48,42 @@ struct ManagedFolder: Identifiable {
     @Published var buildComplete = false
     @Published var syncRegion = UserDefaults.standard.object(forKey: "syncRegion") as? Bool ?? true
     @Published var regionMessage = ""
+    @Published var proxyStatus: ProxyStatusResponse?
+    @Published var proxyBusy = false
+    @Published var proxyMessage = ""
+    @Published var proxyError = ""
+    @Published var nodeDelays: [String: String] = [:]
+    @Published var proxyConnections: [ProxyConnectionItem] = []
+    @Published var proxyUploadTotal: Int64 = 0
+    @Published var proxyDownloadTotal: Int64 = 0
     let executable: String
 
     init() {
         let bundled = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/agent-vm").path
         executable = ProcessInfo.processInfo.environment["AGENT_VM_BINARY"] ?? (FileManager.default.isExecutableFile(atPath: bundled) ? bundled : Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("bin/agent-vm").path)
         refresh()
+        refreshProxyStatus()
     }
     func run(_ arguments: [String], cwd: String? = nil, input: String? = nil, progress: ((String) -> Void)? = nil, completion: @escaping (Int32, String) -> Void) {
         let path = executable
         var environment = ProcessInfo.processInfo.environment
+        let activeUseProxy = proxyStatus?.useProxy ?? useProxy
+        let proxyMode = proxyStatus?.proxyMode ?? "custom"
+        let managedMode = activeUseProxy && (proxyMode == "mihomo" || (proxyStatus?.managedEnabled ?? false))
+        let customEndpoint = proxyStatus?.customProxyUrl ?? "http://10.126.126.1:8787"
+        let legacyEnvProxy = (activeUseProxy && !managedMode && proxyMode == "custom") ? customEndpoint : ""
         for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {
-            environment[key] = useProxy ? "http://10.126.126.1:8787" : ""
+            environment[key] = legacyEnvProxy
         }
         environment["ALL_PROXY"] = ""; environment["all_proxy"] = ""
-        if useProxy {
+        if !legacyEnvProxy.isEmpty {
             environment["NO_PROXY"] = "localhost,127.0.0.1,::1"
             environment["no_proxy"] = "localhost,127.0.0.1,::1"
+        }
+        if arguments.first != "proxy", managedMode, let st = proxyStatus, !st.managedConfigPath.isEmpty {
+            environment["AGENT_VM_MANAGED_NETWORK_CONFIG"] = st.managedConfigPath
+        } else {
+            environment.removeValue(forKey: "AGENT_VM_MANAGED_NETWORK_CONFIG")
         }
         DispatchQueue.global(qos: .userInitiated).async {
             let process = Process(); let pipe = Pipe()
@@ -117,10 +136,14 @@ struct ManagedFolder: Identifiable {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             let file = directory.appendingPathComponent("network")
             let existing = FileManager.default.fileExists(atPath: file.path) ? try String(contentsOf: file, encoding: .utf8) : ""
-            let rule = "allow 10.126.126.1:8787 # Agent VM HTTP proxy"
-            var lines = existing.components(separatedBy: .newlines).filter { $0 != rule }
+            let marker = " # Agent VM HTTP proxy"
+            var lines = existing.components(separatedBy: .newlines).filter { !$0.hasSuffix(marker) }
             while lines.last == "" { lines.removeLast() }
-            if useProxy { lines.append(rule) }
+            let proxyMode = proxyStatus?.proxyMode ?? "custom"
+            let customURL = proxyStatus?.customProxyUrl ?? "http://10.126.126.1:8787"
+            if useProxy && proxyMode == "custom", let u = URL(string: customURL), let host = u.host, let port = u.port {
+                lines.append("allow \(host):\(port)\(marker)")
+            }
             let updated = lines.isEmpty ? "" : lines.joined(separator: "\n") + "\n"
             if updated != existing { try updated.write(to: file, atomically: true, encoding: .utf8) }
             UserDefaults.standard.set(useProxy, forKey: "useProxy")
@@ -158,7 +181,11 @@ struct ManagedFolder: Identifiable {
     }
     func updateRegion(project: String, completion: @escaping () -> Void) {
         let enabled = syncRegion
-        let proxy = useProxy ? "http://10.126.126.1:8787" : ""
+        let activeUseProxy = proxyStatus?.useProxy ?? useProxy
+        let proxyMode = proxyStatus?.proxyMode ?? "custom"
+        let managedMode = activeUseProxy && (proxyMode == "mihomo" || (proxyStatus?.managedEnabled ?? false))
+        let customEndpoint = proxyStatus?.customProxyUrl ?? "http://10.126.126.1:8787"
+        let proxy = (activeUseProxy && !managedMode && proxyMode == "custom") ? customEndpoint : ""
         let script: String
         if enabled {
             script = "printf '%s\\n' 'HTTPS_PROXY=" + proxy + "' 'https_proxy=" + proxy + "' 'HTTP_PROXY=" + proxy + "' 'http_proxy=" + proxy + "' | sudo tee /etc/default/agent-vm-region >/dev/null\n" + Self.regionInstaller
@@ -439,6 +466,176 @@ cat /var/lib/agent-vm-region/status
         output = ""
         operationFailed = false
     }
+
+    private func runProxyStatusCommand(_ arguments: [String], payload: [String: Any]? = nil, message: String? = nil, completion: (() -> Void)? = nil) {
+        var jsonInput: String? = nil
+        if let payload {
+            guard let data = try? JSONSerialization.data(withJSONObject: payload),
+                  let text = String(data: data, encoding: .utf8) else {
+                proxyError = "无法编码请求参数"
+                return
+            }
+            jsonInput = text
+        }
+        proxyBusy = true
+        proxyError = ""
+        if let message { proxyMessage = message }
+        run(["proxy"] + arguments, input: jsonInput) { code, text in
+            self.proxyBusy = false
+            guard code == 0 else {
+                self.proxyError = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                return
+            }
+            if let data = text.data(using: .utf8),
+               let decoded = try? JSONDecoder().decode(ProxyStatusResponse.self, from: data) {
+                self.proxyStatus = decoded
+                self.useProxy = decoded.useProxy
+                UserDefaults.standard.set(decoded.useProxy, forKey: "useProxy")
+            }
+            if message == nil { self.proxyMessage = "" }
+            completion?()
+        }
+    }
+
+    func refreshProxyStatus(completion: (() -> Void)? = nil) {
+        runProxyStatusCommand(["status"], completion: completion)
+    }
+
+    func saveProxyConfig(proxyMode: String, managedEnabled: Bool, useProxy: Bool, customProxyURL: String, dnsURL: String, port: Int, completion: (() -> Void)? = nil) {
+        let payload: [String: Any] = [
+            "proxy_mode": proxyMode,
+            "managed_enabled": managedEnabled,
+            "use_proxy": useProxy,
+            "custom_proxy_url": customProxyURL,
+            "dns_url": dnsURL,
+            "port": port
+        ]
+        runProxyStatusCommand(["config"], payload: payload, message: "网关配置已保存并同步", completion: completion)
+    }
+
+    func importProxySource(name: String, url: String, content: String, interval: Int, hostDownload: Bool, completion: (() -> Void)? = nil) {
+        let payload: [String: Any] = [
+            "name": name,
+            "url": url,
+            "content": content,
+            "interval_hours": interval,
+            "host_download": hostDownload
+        ]
+        runProxyStatusCommand(["import"], payload: payload, message: "节点来源已导入", completion: completion)
+    }
+
+    func addManualNode(name: String, type: String, server: String, port: Int, username: String, password: String, uuid: String, cipher: String, sni: String, tls: Bool, skipCertVerify: Bool, completion: (() -> Void)? = nil) {
+        let payload: [String: Any] = [
+            "source_name": "手动节点",
+            "name": name,
+            "type": type,
+            "server": server,
+            "port": port,
+            "username": username,
+            "password": password,
+            "uuid": uuid,
+            "cipher": cipher,
+            "sni": sni,
+            "tls": tls,
+            "skip_cert_verify": skipCertVerify
+        ]
+        runProxyStatusCommand(["manual"], payload: payload, message: "手动节点已添加", completion: completion)
+    }
+
+    func refreshSubscription(id: String, hostDownload: Bool, completion: (() -> Void)? = nil) {
+        var args = ["refresh", id]
+        if hostDownload { args.append("--host") }
+        runProxyStatusCommand(args, message: "订阅已更新", completion: completion)
+    }
+
+    func deleteSource(id: String, completion: (() -> Void)? = nil) {
+        runProxyStatusCommand(["delete", id], message: "订阅来源已删除", completion: completion)
+    }
+
+    func applyProxyRoute(route: [String], port: Int, completion: (() -> Void)? = nil) {
+        let payload: [String: Any] = [
+            "route": route,
+            "selected": route.last ?? "",
+            "port": port
+        ]
+        runProxyStatusCommand(["apply"], payload: payload, message: "Mihomo 核心已应用并启动", completion: completion)
+    }
+
+    func stopProxyCore(completion: (() -> Void)? = nil) {
+        runProxyStatusCommand(["stop"], message: "Mihomo 核心及门禁已停止", completion: completion)
+    }
+
+    func measureDelay(nodeID: String?) {
+        proxyBusy = true
+        proxyError = ""
+        proxyMessage = nodeID == nil ? "正在测速全部节点…" : "正在测速节点…"
+        let args = nodeID.map { ["proxy", "delay", $0] } ?? ["proxy", "delay"]
+        run(args) { code, text in
+            self.proxyBusy = false
+            guard code == 0, let data = text.data(using: .utf8),
+                  let res = try? JSONDecoder().decode(ProxyDelayResponse.self, from: data) else {
+                self.proxyError = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                return
+            }
+            for (id, ms) in res.delays ?? [:] {
+                self.nodeDelays[id] = ms > 0 ? "\(ms) ms" : "超时"
+            }
+            for (id, _) in res.errors ?? [:] {
+                self.nodeDelays[id] = "失败"
+            }
+            self.proxyMessage = "测速完成"
+        }
+    }
+
+    func runGateProbe() {
+        proxyBusy = true
+        proxyError = ""
+        proxyMessage = "正在通过代理隧道与 DoH 执行安全自检…"
+        run(["proxy", "probe"]) { code, text in
+            self.proxyBusy = false
+            if code != 0 && text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                self.proxyError = "安全自检失败"
+                return
+            }
+            if let data = text.data(using: .utf8),
+               let result = try? JSONDecoder().decode(ProbeResultItem.self, from: data) {
+                if let err = result.error, !err.isEmpty {
+                    self.proxyError = err
+                } else {
+                    self.proxyMessage = result.exitIp.map { "自检完成，当前出口 IP：\($0)" } ?? "自检完成，请查看门禁检查详情"
+                }
+            } else if code != 0 {
+                self.proxyError = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            self.refreshProxyStatus()
+        }
+    }
+
+    func closeGate() {
+        proxyBusy = true
+        proxyError = ""
+        run(["proxy", "gate-close"]) { code, text in
+            self.proxyBusy = false
+            if code != 0 {
+                self.proxyError = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                return
+            }
+            self.proxyMessage = "已撤销全部托管连接门禁"
+            self.refreshProxyStatus()
+        }
+    }
+
+    func refreshConnections() {
+        run(["proxy", "connections"]) { code, text in
+            guard code == 0, let data = text.data(using: .utf8),
+                  let snap = try? JSONDecoder().decode(ConnectionsSnapshotItem.self, from: data) else {
+                return
+            }
+            self.proxyUploadTotal = snap.uploadTotal
+            self.proxyDownloadTotal = snap.downloadTotal
+            self.proxyConnections = snap.connections ?? []
+        }
+    }
 }
 
 private enum AgentTheme {
@@ -648,6 +845,7 @@ struct MachinesView: View {
 struct WizardView: View {
     @ObservedObject var model: Model
     var onMachines: () -> Void = {}
+    var onProxy: () -> Void = {}
     private let stepTitles = ["资源配置", "确认并开始"]
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
@@ -749,9 +947,28 @@ struct WizardView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("网络") {
-                Toggle("使用 HTTP 代理 10.126.126.1:8787", isOn: $model.useProxy)
-                    .onChange(of: model.useProxy) { _ in _ = model.saveNetworkSettings() }
-                Text("用于 HTTP 和 HTTPS 请求；更改后须重新启动已运行的虚拟机。")
+                Toggle("启用代理（\(model.proxyStatus?.displayProxyUrl ?? "http://10.126.126.1:8787")）", isOn: $model.useProxy)
+                    .onChange(of: model.useProxy) { newValue in
+                        if let st = model.proxyStatus {
+                            model.saveProxyConfig(
+                                proxyMode: st.proxyMode,
+                                managedEnabled: st.managedEnabled,
+                                useProxy: newValue,
+                                customProxyURL: st.customProxyUrl,
+                                dnsURL: st.dnsUrl,
+                                port: st.port
+                            )
+                        } else {
+                            _ = model.saveNetworkSettings()
+                        }
+                    }
+                HStack {
+                    Text("DoH：\(model.proxyStatus?.dnsUrl ?? "https://1.1.1.1/dns-query") · \(model.proxyStatus?.managedEnabled == true ? "托管门禁已开启" : "常规模式")")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("打开代理与门禁设置…") { onProxy() }.controlSize(.small)
+                }
+                Text("更改代理后须重新启动已运行的虚拟机。")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
@@ -779,18 +996,20 @@ struct WizardView: View {
 }
 
 enum WorkbenchSection: String, CaseIterable, Identifiable, Hashable {
-    case machines, setup
+    case machines, setup, proxy
     var id: String { rawValue }
     var title: String {
         switch self {
         case .machines: return "虚拟机"
         case .setup: return "创建环境"
+        case .proxy: return "代理与门禁"
         }
     }
     var symbol: String {
         switch self {
         case .machines: return "desktopcomputer"
         case .setup: return "plus.square.fill"
+        case .proxy: return "network"
         }
     }
 }
@@ -847,7 +1066,8 @@ struct ContentView: View {
                     Group {
                         switch section {
                         case .machines: MachinesView(model: model)
-                        case .setup: WizardView(model: model, onMachines: { section = .machines })
+                        case .setup: WizardView(model: model, onMachines: { section = .machines }, onProxy: { section = .proxy })
+                        case .proxy: ProxyGatewayView(model: model)
                         }
                     }
                     .padding(28)

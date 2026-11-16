@@ -51,3 +51,46 @@ func TestSafetyProbeDoesNotGrantWhenProxyFailsOrGuestChecksAreMissing(t *testing
 		t.Fatal("gate opened")
 	}
 }
+
+func TestHostProbesPassedAndWrapCheckWithGateAuth(t *testing.T) {
+	passingReport := netgate.SafetyReport{
+		Checks: []netgate.SafetyCheck{
+			{ID: "proxy_transport", State: netgate.Passed},
+			{ID: "dns_transport", State: netgate.Passed},
+			{ID: "fail_closed", State: netgate.Passed},
+			{ID: "egress_policy", State: netgate.Unknown},
+		},
+	}
+	if !hostProbesPassed(passingReport) {
+		t.Fatal("expected hostProbesPassed=true when all three host checks passed")
+	}
+	failingReport := netgate.SafetyReport{
+		Checks: []netgate.SafetyCheck{
+			{ID: "proxy_transport", State: netgate.Passed},
+			{ID: "dns_transport", State: netgate.Failed},
+			{ID: "fail_closed", State: netgate.Passed},
+		},
+	}
+	if hostProbesPassed(failingReport) {
+		t.Fatal("expected hostProbesPassed=false when dns_transport failed")
+	}
+
+	gate := netgate.New()
+	wrappedPass := wrapCheckWithGateAuth(gate, func(context.Context, uint64) netgate.SafetyReport {
+		return passingReport
+	})
+	epoch := gate.BeginCheck()
+	wrappedPass(context.Background(), epoch)
+	if state, _ := gate.Status(); state != netgate.Open {
+		t.Fatalf("expected gate Open after passing host probe, got %s", state)
+	}
+
+	wrappedFail := wrapCheckWithGateAuth(gate, func(context.Context, uint64) netgate.SafetyReport {
+		return failingReport
+	})
+	epoch = gate.BeginCheck()
+	wrappedFail(context.Background(), epoch)
+	if state, _ := gate.Status(); state != netgate.Closed {
+		t.Fatalf("expected gate Closed after failing host probe, got %s", state)
+	}
+}

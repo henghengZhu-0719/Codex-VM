@@ -12,7 +12,7 @@ printf '// duplicate module map masked for this build\n' > "$cache/empty.modulem
 cat > "$cache/overlay.yaml" <<OVERLAY
 { 'version': 0, 'roots': [ { 'type': 'file', 'name': '/Library/Developer/CommandLineTools/usr/include/swift/bridging.modulemap', 'external-contents': '$cache/empty.modulemap' } ] }
 OVERLAY
-xcrun swiftc -target arm64-apple-macos13 -module-cache-path "${AGENT_VM_SWIFT_MODULE_CACHE:-$cache/modules}" -vfsoverlay "$cache/overlay.yaml" -parse-as-library "$root/native-macos/AgentVMApp.swift" -o "$app/Contents/MacOS/AgentVM" -framework SwiftUI -framework AppKit
+xcrun swiftc -target arm64-apple-macos13 -module-cache-path "${AGENT_VM_SWIFT_MODULE_CACHE:-$cache/modules}" -vfsoverlay "$cache/overlay.yaml" -parse-as-library "$root/native-macos/AgentVMApp.swift" "$root/native-macos/ProxyGatewayView.swift" -o "$app/Contents/MacOS/AgentVM" -framework SwiftUI -framework AppKit
 cat > "$app/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -22,6 +22,14 @@ PLIST
 test -x "$root/_output/bin/agent-vm"
 cp "$root/_output/bin/agent-vm" "$app/Contents/MacOS/agent-vm"
 codesign --force --sign - --entitlements "$root/third_party/lima/vz.entitlements" "$app/Contents/MacOS/agent-vm"
+for mihomo_src in "$root/_output/bin/mihomo" "$root/_output/proxy-core/mihomo"; do
+  if [ -x "$mihomo_src" ]; then
+    cp "$mihomo_src" "$app/Contents/MacOS/mihomo"
+    chmod 755 "$app/Contents/MacOS/mihomo"
+    codesign --force --sign - "$app/Contents/MacOS/mihomo"
+    break
+  fi
+done
 mkdir -p "$app/Contents/Resources"
 codesign --force --sign - "$app"
 codesign --verify --verbose "$app"

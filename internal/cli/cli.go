@@ -29,7 +29,7 @@ type IO struct {
 // not read as if something had been made read-only.
 var noVMOpts = map[string]bool{
 	"stop": true, "rm": true, "destroy": true, "destroy-all": true, "list": true, "status": true,
-	"name": true, "info": true, "env": true, "project-env": true, "vm-mounts": true, "vm-volume": true, "version": true, "--version": true,
+	"name": true, "info": true, "env": true, "project-env": true, "vm-mounts": true, "vm-volume": true, "proxy": true, "version": true, "--version": true,
 	"-V": true, "licenses": true, "doctor": true, "install": true, "uninstall": true, "help": true, "--help": true, "-h": true,
 }
 
@@ -45,7 +45,7 @@ var stateful = map[string]bool{
 	"name": true, "list": true, "status": true, "stop": true, "rm": true, "destroy": true, "destroy-all": true,
 	"info": true, "env": true, "project-env": true, "claude": true, "opencode": true, "codex": true, "vibe": true,
 	"pi": true, "shell": true, "sh": true, "run": true, "setup": true, "doctor": true, "install": true,
-	"uninstall": true, "code": true, "vm-mounts": true, "vm-volume": true,
+	"uninstall": true, "code": true, "vm-mounts": true, "vm-volume": true, "proxy": true,
 }
 
 // needsState reports whether the command line runs a command in stateful.
@@ -116,6 +116,8 @@ func (e *app) main(ctx context.Context, args []string) int {
 		return e.vmMountsCmd(ctx, args)
 	case "vm-volume":
 		return e.vmVolumeCmd(ctx, args)
+	case "proxy":
+		return e.proxyCmd(ctx, args)
 	case "claude", "opencode", "codex", "vibe", "pi":
 		return e.agentCmd(ctx, cmd, opts, args)
 	case "shell", "sh":
