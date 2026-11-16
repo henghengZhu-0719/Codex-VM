@@ -22,6 +22,7 @@ import (
 
 	"github.com/sylvinus/agent-vm/internal/guard"
 	"github.com/sylvinus/agent-vm/internal/netguard"
+ "github.com/sylvinus/agent-vm/internal/netgate"
 	"github.com/sylvinus/agent-vm/internal/state"
 )
 
@@ -62,10 +63,17 @@ func Run(args []string) bool {
 	}
 	// Managed mode installs host-owned transport hooks and starts CLOSED.
 	// Initialization failures abort startup rather than fall back to legacy networking.
+	var stopManagedNetwork func()
 	if configPath := managedNetworkRequested(); configPath != "" {
-		if _, err := installManagedNetwork(configPath, policy); err != nil {
+		gate, err := installManagedNetwork(configPath, policy)
+		if err != nil {
 			logrus.Fatal(err)
 		}
+		control, err := netgate.StartControl(filepath.Join(string(st), ".netgate-private"), gate)
+		if err != nil {
+			logrus.Fatal(err)
+		}
+		stopManagedNetwork = func() { _ = control.Close() }
 	}
 	// The user is asked before the VM changes a file their machine runs on
 	// its own (guard): the shares' SFTP server runs here.
@@ -92,6 +100,7 @@ func Run(args []string) bool {
 	// instance is the last argument.
 	root.SetOut(newEventWatch(os.Stdout, args[len(args)-1]))
 	err = root.Execute()
+	if stopManagedNetwork != nil { stopManagedNetwork() }
 	server.Disconnect()
 	osutil.HandleExitError(err)
 	if err != nil {
