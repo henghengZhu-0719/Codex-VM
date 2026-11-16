@@ -48,7 +48,11 @@ func (g *Gate) DialContext(ctx context.Context, network string, dst netip.AddrPo
  dial:=g.DialProxy;if dial==nil{d:=&net.Dialer{};dial=d.DialContext}
  c,err:=dial(ctx,"tcp",g.ProxyURL.Host)
  if err!=nil{return nil,fmt.Errorf("egress: upstream connection failed: %w",err)}
- keep:=false;defer func(){if !keep {_=c.Close()}}()
+ // Context cancellation must interrupt a stalled proxy handshake, not only
+ // the initial TCP dial. Stop the callback before returning a live tunnel.
+ stopCancel:=context.AfterFunc(ctx,func(){_ = c.Close()})
+ keep:=false
+ defer func(){stopCancel();if !keep {_=c.Close()}}()
  if deadline,has:=ctx.Deadline();has{_ = c.SetDeadline(deadline)}
  switch g.ProxyURL.Scheme{
  case "http":err=connectHTTP(c,g.ProxyURL,dst.String())
