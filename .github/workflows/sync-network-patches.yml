@@ -7,6 +7,10 @@ on:
       - codex/egress-gateway-fixes
     paths:
       - "patches/**"
+      - "go.mod"
+      - "go.sum"
+      - "internal/**"
+      - "cmd/**"
       - "third_party/SOURCES"
       - "third_party/**"
       - "scripts/third-party-sync"

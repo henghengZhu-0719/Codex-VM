@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode"
 
 	"github.com/sylvinus/agent-vm/internal/mounts"
 	"github.com/sylvinus/agent-vm/internal/paths"
@@ -40,7 +41,11 @@ func (e *app) vmVolumeCmd(ctx context.Context, args []string) int {
 	if err != nil || vmname.Name(project) != name {
 		return fail(fmt.Errorf("cannot verify the VM's original project directory"))
 	}
-	if !filepath.IsAbs(src) || strings.ContainsAny(src+project, ":#*?[]\r\n") {
+	if !filepath.IsAbs(src) {
+		return fail(fmt.Errorf("folder path contains unsupported characters"))
+	}
+	src, project = paths.Host(src), paths.Host(project)
+	if !volumePathFieldValid(src) || !volumePathFieldValid(project) {
 		return fail(fmt.Errorf("folder path contains unsupported characters"))
 	}
 	if why, bad := mounts.Unmountable(src); bad {
@@ -108,4 +113,13 @@ func (e *app) vmVolumeCmd(ctx context.Context, args []string) int {
 	}
 	fmt.Fprintln(e.io.Stdout, "Folder settings saved. Restart the VM to apply them.")
 	return 0
+}
+
+// volumePathFieldValid keeps volume separators and project glob syntax out of
+// literal paths, allowing only the drive colon in Windows absolute paths.
+func volumePathFieldValid(path string) bool {
+	if paths.Windows() && len(path) >= 3 && ((path[0] >= 'a' && path[0] <= 'z') || (path[0] >= 'A' && path[0] <= 'Z')) && path[1] == ':' && path[2] == '/' {
+		path = path[2:]
+	}
+	return !strings.ContainsAny(path, ":#*?[]\"\\|\r\n") && strings.IndexFunc(path, unicode.IsControl) < 0
 }
