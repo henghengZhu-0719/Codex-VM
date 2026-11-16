@@ -12,7 +12,8 @@ import (
  "path/filepath"
  "strings"
 
- "github.com/lima-vm/lima/v2/pkg/hostagent/dns"
+ limadns "github.com/lima-vm/lima/v2/pkg/hostagent/dns"
+ mdns "github.com/miekg/dns"
  "github.com/lima-vm/lima/v2/pkg/networks/usernet"
  "github.com/sylvinus/agent-vm/internal/egress"
  "github.com/sylvinus/agent-vm/internal/netgate"
@@ -47,11 +48,12 @@ func installManagedNetwork(path string, policy *netguard.Policy)(*netgate.Gate,e
  cfg,err:=loadManagedNetworkConfig(filepath.Clean(path));if err!=nil{return nil,err}
  // No ordinary netguard allow rule may widen a managed proxy guest's access
  // to host/private addresses or to UDP.
+ defaultPolicy:=&netguard.Policy{}
  public:=func(network string,dst netip.AddrPort)bool{
   if network!="tcp" || !dst.IsValid() || !dst.Addr().Unmap().Is4(){return false}
   addr:=dst.Addr().Unmap()
   if !addr.IsGlobalUnicast() || addr.IsPrivate() || addr.IsLoopback() || addr.IsLinkLocalUnicast(){return false}
-  return policy.Allows("tcp",dst)
+  return defaultPolicy.Allows("tcp",dst) && policy.Allows("tcp",dst)
  }
  dialer,err:=egress.New(cfg.ProxyURL,public);if err!=nil{return nil,err}
  resolver,err:=egress.NewResolver(dialer,cfg.DNSURL);if err!=nil{return nil,err}
@@ -66,7 +68,7 @@ func installManagedNetwork(path string, policy *netguard.Policy)(*netgate.Gate,e
   if err!=nil || !public(network,dst){return nil,egress.ErrDenied}
   return gate.Dial(ctx,func(ctx context.Context)(net.Conn,error){return dialer.DialContext(ctx,"tcp",dst)})
  }
- exchange:=func(ctx context.Context,q *dns.Msg)(*dns.Msg,error){
+ exchange:=func(ctx context.Context,q *mdns.Msg)(*mdns.Msg,error){
   state,epoch:=gate.Status()
   if state!=netgate.Open{return nil,netgate.ErrClosed}
   response,err:=resolver.Exchange(ctx,q)
@@ -75,9 +77,9 @@ func installManagedNetwork(path string, policy *netguard.Policy)(*netgate.Gate,e
   return response,err
  }
  usernet.DNSExchange=exchange
- dns.Exchange=exchange
+ limadns.Exchange=exchange
  usernet.Names=nil;usernet.Answered=nil
- dns.Names=nil;dns.Answered=nil
+ limadns.Names=nil;limadns.Answered=nil
  return gate,nil
 }
 
