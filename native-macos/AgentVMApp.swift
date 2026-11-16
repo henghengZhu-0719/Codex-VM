@@ -851,117 +851,133 @@ struct MachineRow: View {
     @State private var renameDraft = ""
     @AppStorage("showVMDetails") private var showVMDetails = false
     private var isBase: Bool { vm.name == "base" || vm.name == "base-building" }
+    private var projectPath: String {
+        model.vmMounts[vm.name]?.first?.location ?? "尚未获取项目路径"
+    }
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack(alignment: .top, spacing: 12) {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 10) {
                 Image(systemName: isBase ? "internaldrive" : "desktopcomputer")
-                    .font(.title3).foregroundStyle(AgentTheme.accent).frame(width: 34, height: 34)
-                    .background(AgentTheme.accent.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
-                VStack(alignment: .leading, spacing: 4) {
+                    .font(.title3)
+                    .foregroundStyle(AgentTheme.accent)
+                    .frame(width: 36, height: 36)
+                    .background(AgentTheme.accent.opacity(0.10), in: RoundedRectangle(cornerRadius: 9))
+                VStack(alignment: .leading, spacing: 5) {
                     HStack(spacing: 6) {
-                        Text(model.displayName(for: vm)).font(.headline)
+                        Text(model.displayName(for: vm))
+                            .font(.headline)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .help(model.displayName(for: vm))
                         if !isBase {
                             Button {
                                 renameDraft = model.vmAliases[vm.name] ?? ""
                                 renaming = true
-                            } label: {
-                                Image(systemName: "pencil")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                            .buttonStyle(.borderless)
-                            .help("修改虚拟机显示名称")
-                            .popover(isPresented: $renaming) {
-                                VStack(alignment: .leading, spacing: 10) {
-                                    Text("修改虚拟机名称").font(.headline)
-                                    Text("实例 ID：\(vm.name)").font(.caption).foregroundStyle(.secondary)
-                                    TextField("输入自定义名称", text: $renameDraft)
-                                        .textFieldStyle(.roundedBorder)
-                                        .frame(width: 240)
-                                    HStack {
-                                        Button("恢复默认") {
-                                            model.renameVM(vm, to: "")
-                                            renaming = false
+                            } label: { Image(systemName: "pencil").font(.caption) }
+                                .buttonStyle(.borderless)
+                                .help("修改显示名称")
+                                .popover(isPresented: $renaming) {
+                                    VStack(alignment: .leading, spacing: 10) {
+                                        Text("修改虚拟机名称").font(.headline)
+                                        Text("实例 ID：\(vm.name)").font(.caption).foregroundStyle(.secondary)
+                                        TextField("输入自定义名称", text: $renameDraft)
+                                            .textFieldStyle(.roundedBorder).frame(width: 240)
+                                        HStack {
+                                            Button("恢复默认") { model.renameVM(vm, to: ""); renaming = false }
+                                            Spacer()
+                                            Button("取消") { renaming = false }
+                                            Button("保存") { model.renameVM(vm, to: renameDraft); renaming = false }
+                                                .buttonStyle(.borderedProminent)
                                         }
-                                        Spacer()
-                                        Button("取消") { renaming = false }
-                                        Button("保存") {
-                                            model.renameVM(vm, to: renameDraft)
-                                            renaming = false
-                                        }
-                                        .buttonStyle(.borderedProminent)
-                                    }
+                                    }.padding(14)
                                 }
-                                .padding(14)
-                            }
                         }
-                        StatusBadge(status: vm.status)
                     }
-                    if !isBase, let alias = model.vmAliases[vm.name], !alias.isEmpty {
-                        Text("项目虚拟机 · 实例 \(vm.name)").font(.caption).foregroundStyle(.secondary)
-                    } else {
-                        Text(isBase ? "用于创建项目虚拟机" : "项目虚拟机")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-                Spacer()
-                Button(showDetails ? "收起详情" : "查看详情") { showDetails.toggle() }
-                    .buttonStyle(.borderless).disabled(showVMDetails)
-            }
-            HStack(alignment: .top, spacing: 20) {
-                resource("CPU", value: "\(vm.cpus) 核")
-                resource("内存", value: vm.memory)
-                resource("磁盘", value: vm.disk)
-                if !isBase {
-                    Divider().frame(height: 34)
-                    codexQuotaSummary
+                    Text(isBase ? "基础模板" : projectPath)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .help(isBase ? "用于创建项目虚拟机" : projectPath)
                 }
                 Spacer(minLength: 0)
+                StatusBadge(status: vm.status)
             }
-            if vm.name != "base" && vm.name != "base-building" {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("项目文件夹").font(.caption).foregroundStyle(.secondary)
-                    Text(model.vmMounts[vm.name]?.first?.location ?? "尚未获取项目文件夹")
-                        .font(.callout).textSelection(.enabled).lineLimit(2)
+            HStack(spacing: 14) {
+                Label("\(vm.cpus) 核", systemImage: "cpu")
+                Label(vm.memory, systemImage: "memorychip")
+                Label(vm.disk, systemImage: "internaldrive")
+                Spacer(minLength: 0)
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+
+            Divider()
+            HStack(spacing: 8) {
+                if vm.status == "Running" {
+                    Button { model.terminal(vm) } label: { Label("打开终端", systemImage: "terminal") }
+                        .buttonStyle(.borderedProminent)
+                    Button { model.stop(vm) } label: { Image(systemName: "stop.fill") }
+                        .help("停止虚拟机")
+                        .disabled(model.busy)
+                } else {
+                    Button { model.start(vm) } label: { Label("启动", systemImage: "play.fill") }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(model.busy || vm.status != "Stopped" || model.vmMounts[vm.name]?.isEmpty != false)
                 }
+                Spacer(minLength: 0)
+                Button { showDetails.toggle() } label: {
+                    Image(systemName: (showDetails || showVMDetails) ? "chevron.up" : "info.circle")
+                }
+                .buttonStyle(.borderless)
+                .help((showDetails || showVMDetails) ? "收起详情" : "查看详情")
+                .disabled(showVMDetails)
+                Menu {
+                    Button("挂载文件夹…", systemImage: "folder") { managingFolders = true }
+                        .disabled(model.busy || model.vmMounts[vm.name]?.isEmpty != false)
+                    if !isBase {
+                        Button("刷新 Codex 额度", systemImage: "arrow.clockwise") { model.pollQuota(for: vm) }
+                            .disabled(vm.status != "Running" || model.quotaPolling.contains(vm.name))
+                    }
+                    Divider()
+                    Button("删除虚拟机", systemImage: "trash", role: .destructive) { deleting = true }
+                        .disabled(model.busy || vm.name == "base")
+                } label: { Image(systemName: "ellipsis.circle") }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    .help("更多操作")
             }
+            .controlSize(.small)
             if showDetails || showVMDetails {
                 Divider()
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("虚拟机信息").font(.subheadline.weight(.semibold))
-                    detail("名称", value: vm.name)
-                    detail("状态", value: vm.status == "Running" ? "运行中" : vm.status == "Stopped" ? "已停止" : vm.status)
+                    Text("虚拟机详情").font(.subheadline.weight(.semibold))
+                    detail("实例", value: vm.name)
+                    detail("状态", value: vm.status)
                     detail("架构", value: vm.arch)
                     detail("类型", value: vm.vmType)
                     detail("SSH", value: vm.status == "Running" ? vm.ssh : "未运行")
+                    if !isBase {
+                        codexQuotaSummary
+                    }
                     if let mounts = model.vmMounts[vm.name] {
-                        Text("当前挂载（\(mounts.count)）").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                        if mounts.isEmpty { Text("无挂载文件夹").font(.caption).foregroundStyle(.secondary) }
+                        Text("挂载文件夹（\(mounts.count)）")
+                            .font(.caption.weight(.semibold))
                         ForEach(mounts) { mount in
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(mount.location).textSelection(.enabled)
-                                Text("虚拟机：\(mount.guestPath) · \(mount.writable ? "读写" : "只读")").foregroundStyle(.secondary).textSelection(.enabled)
-                            }.font(.caption)
+                            Text("\(mount.location) → \(mount.guestPath) · \(mount.writable ? "读写" : "只读")")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
                         }
-                    } else { Text("挂载信息暂不可用").font(.caption).foregroundStyle(.secondary) }
+                    }
                 }
             }
-            Divider()
-            HStack(spacing: 8) {
-                Button("启动") { model.start(vm) }.disabled(model.busy || vm.status != "Stopped" || model.vmMounts[vm.name]?.isEmpty != false)
-                Button("终端") { model.terminal(vm) }.disabled(vm.status != "Running")
-                Button("停止") { model.stop(vm) }.disabled(model.busy || vm.status != "Running")
-                Button("挂载文件夹") { managingFolders = true }.disabled(model.busy || model.vmMounts[vm.name]?.isEmpty != false)
-                if !isBase {
-                    Button("刷新额度") { model.pollQuota(for: vm) }.disabled(vm.status != "Running" || model.quotaPolling.contains(vm.name))
-                }
-                Spacer()
-                Button("删除", role: .destructive) { deleting = true }.disabled(model.busy || vm.name == "base")
-            }.controlSize(.small)
         }
-        .padding(14)
-        .background(AgentTheme.panel, in: RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.06)))
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(AgentTheme.panel, in: RoundedRectangle(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.08)))
         .confirmationDialog("删除虚拟机 \(vm.name)？", isPresented: $deleting) {
             Button("删除虚拟机", role: .destructive) { model.remove(vm) }
         } message: { Text("此操作会删除虚拟磁盘中的文件。项目共享目录会保留。") }
@@ -1107,7 +1123,7 @@ struct MachinesView: View {
                 Text("总计 \(projects.count)")
                 Text("运行中 \(projects.filter { $0.status == "Running" }.count)")
                 Text("已停止 \(projects.filter { $0.status == "Stopped" }.count)")
-                Text("· 每 20 分钟自动轮询 Codex 额度")
+
                 Spacer()
                 Toggle("默认展开详情", isOn: $showVMDetails).toggleStyle(.checkbox)
             }.font(.caption).foregroundStyle(.secondary)
@@ -1129,10 +1145,13 @@ struct MachinesView: View {
                 }
                 .frame(maxWidth: .infinity, minHeight: 200)
             } else {
-                LazyVStack(alignment: .leading, spacing: 10) {
-                    if !projects.isEmpty {
-                        Text("项目虚拟机").font(.headline).padding(.top, 4)
-                        ForEach(projects) { vm in MachineRow(vm: vm, model: model) }
+                LazyVGrid(
+                    columns: [GridItem(.flexible(), spacing: 14), GridItem(.flexible(), spacing: 14)],
+                    alignment: .leading,
+                    spacing: 14
+                ) {
+                    ForEach(projects) { vm in
+                        MachineRow(vm: vm, model: model)
                     }
                 }
             }
@@ -1354,7 +1373,7 @@ struct WorkbenchSidebar: View {
 }
 
 struct ContentView: View {
-    @StateObject var model = Model()
+    @ObservedObject var model: Model
     @State private var section: WorkbenchSection = .machines
     var body: some View {
         HStack(spacing: 0) {
@@ -1380,6 +1399,52 @@ struct ContentView: View {
     }
 }
 
+private struct MenuBarControls: View {
+    @ObservedObject var model: Model
+    @Environment(\.openWindow) private var openWindow
+    private var projects: [VM] {
+        model.machines.filter { $0.name != "base" && $0.name != "base-building" }
+    }
+    var body: some View {
+        Button("打开 Agent VM", systemImage: "macwindow") {
+            openWindow(id: "main")
+            NSApp.activate(ignoringOtherApps: true)
+        }
+        Button("刷新虚拟机状态", systemImage: "arrow.clockwise") { model.refresh() }
+            .disabled(model.busy)
+        Divider()
+        if projects.isEmpty {
+            Text("暂无项目虚拟机")
+        } else {
+            ForEach(projects) { vm in
+                Menu {
+                    if vm.status == "Running" {
+                        Button("打开终端", systemImage: "terminal") { model.terminal(vm) }
+                        Button("停止", systemImage: "stop.fill") { model.stop(vm) }
+                            .disabled(model.busy)
+                    } else {
+                        Button("启动", systemImage: "play.fill") { model.start(vm) }
+                            .disabled(model.busy || vm.status != "Stopped" || model.vmMounts[vm.name]?.isEmpty != false)
+                    }
+                } label: {
+                    Label(model.displayName(for: vm), systemImage: vm.status == "Running" ? "circle.fill" : "circle")
+                }
+            }
+        }
+        Divider()
+        Button("退出 Agent VM", systemImage: "power") { NSApp.terminate(nil) }
+    }
+}
+
 @main struct AgentVMApp: App {
-    var body: some Scene { WindowGroup { ContentView() } }
+    @StateObject private var model = Model()
+    var body: some Scene {
+        WindowGroup("Agent VM", id: "main") {
+            ContentView(model: model)
+        }
+        MenuBarExtra("Agent VM", systemImage: "desktopcomputer") {
+            MenuBarControls(model: model)
+        }
+        .menuBarExtraStyle(.menu)
+    }
 }
