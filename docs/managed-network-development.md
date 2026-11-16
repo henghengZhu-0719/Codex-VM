@@ -12,7 +12,7 @@ This branch contains **work in progress**, not a verified safe VM network bounda
 ## Important limitations
 
 1. **Do not deploy this branch for security-sensitive workloads.** Guest isolation and real host packet capture have not been verified.
-2. The installed Go toolchain must satisfy `go.mod` (currently Go 1.26.10).
+2. The installed Go toolchain must satisfy `go.mod` (currently Go 1.26.11).
 3. The managed gate cannot open automatically. Host probes measure proxy tunneling, DoH and the closed gate, but guest boundary, UDP, IPv6 and exit consistency remain unknown. No incomplete report grants access.
 4. Legacy mode preserves the original behavior; merely setting environment proxy variables does not enforce full VM routing.
 5. DNS safety only covers the two hooked DNS handlers and has not been validated with host packet capture.

@@ -48,7 +48,7 @@
           # and nix prints the new one. release.sh refuses a release when
           # this checksum of `cat go.mod go.sum` is not the current one:
           # update it with the hash.
-          # go.mod+go.sum: 8512b2940ce855115dcf9e538cbff3df65ce25b2c288616e42a94831c8e3afe9
+          # go.mod+go.sum: da7858e61a1f174bd4821cb8e1d4ad68d1e1804f1cce1438299e8ae3ac1bcec7
           vendorHash = "sha256-zfAasYQEKqcrGi4OI3UKJyq3VoUCmNE5lU4JKPtJDmc=";
 
           subPackages = [ "cmd/agent-vm" ];
