@@ -26,6 +26,55 @@ struct ManagedFolder: Identifiable {
     var id: String { path + ":" + mode }
 }
 
+struct CodexWindowQuota: Codable {
+    let usedPercent: Int
+    let resetAfterSeconds: Int?
+    let resetAt: Int64?
+
+    enum CodingKeys: String, CodingKey {
+        case usedPercent = "used_percent"
+        case resetAfterSeconds = "reset_after_seconds"
+        case resetAt = "reset_at"
+    }
+
+    var remainingPercent: Int { max(0, min(100, 100 - usedPercent)) }
+}
+
+struct CodexQuotaStatus: Decodable {
+    let status: String
+    let planType: String?
+    let fiveHour: CodexWindowQuota?
+    let weekly: CodexWindowQuota?
+    let error: String?
+    let fetchedAt: Date?
+
+    enum CodingKeys: String, CodingKey {
+        case status, error
+        case planType = "plan_type"
+        case fiveHour = "five_hour"
+        case weekly
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        status = try c.decode(String.self, forKey: .status)
+        planType = try c.decodeIfPresent(String.self, forKey: .planType)
+        fiveHour = try c.decodeIfPresent(CodexWindowQuota.self, forKey: .fiveHour)
+        weekly = try c.decodeIfPresent(CodexWindowQuota.self, forKey: .weekly)
+        error = try c.decodeIfPresent(String.self, forKey: .error)
+        fetchedAt = Date()
+    }
+
+    init(status: String, planType: String? = nil, fiveHour: CodexWindowQuota? = nil, weekly: CodexWindowQuota? = nil, error: String? = nil, fetchedAt: Date? = Date()) {
+        self.status = status
+        self.planType = planType
+        self.fiveHour = fiveHour
+        self.weekly = weekly
+        self.error = error
+        self.fetchedAt = fetchedAt
+    }
+}
+
 @MainActor final class Model: ObservableObject {
     @Published var machines: [VM] = []
     @Published var vmMounts: [String: [ProjectMount]] = [:]
@@ -56,6 +105,11 @@ struct ManagedFolder: Identifiable {
     @Published var proxyConnections: [ProxyConnectionItem] = []
     @Published var proxyUploadTotal: Int64 = 0
     @Published var proxyDownloadTotal: Int64 = 0
+    @Published var vmAliases: [String: String] = UserDefaults.standard.dictionary(forKey: "vmAliases") as? [String: String] ?? [:]
+    @Published var vmQuotas: [String: CodexQuotaStatus] = [:]
+    @Published var quotaPolling: Set<String> = []
+    @Published var lastQuotaPollAt: Date?
+    private var quotaTimer: Timer?
     let executable: String
 
     init() {
@@ -63,6 +117,11 @@ struct ManagedFolder: Identifiable {
         executable = ProcessInfo.processInfo.environment["AGENT_VM_BINARY"] ?? (FileManager.default.isExecutableFile(atPath: bundled) ? bundled : Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("bin/agent-vm").path)
         refresh()
         refreshProxyStatus()
+        quotaTimer = Timer.scheduledTimer(withTimeInterval: 20 * 60, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.pollAllRunningQuotas()
+            }
+        }
     }
     func run(_ arguments: [String], cwd: String? = nil, input: String? = nil, progress: ((String) -> Void)? = nil, completion: @escaping (Int32, String) -> Void) {
         let path = executable
@@ -335,6 +394,9 @@ cat /var/lib/agent-vm-region/status
                     if code == 0, let data = text.data(using: .utf8), let mounts = try? JSONDecoder().decode([ProjectMount]?.self, from: data) {
                         self.vmMounts[vm.name] = mounts
                     }
+                }
+                if vm.status == "Running", vm.name != "base", vm.name != "base-building", self.vmQuotas[vm.name] == nil {
+                    self.pollQuota(for: vm)
                 }
             }
             self.refreshManagedFolders()
@@ -636,6 +698,123 @@ cat /var/lib/agent-vm-region/status
             self.proxyConnections = snap.connections ?? []
         }
     }
+
+    func displayName(for vm: VM) -> String {
+        if vm.name == "base" { return "基础模板" }
+        if vm.name == "base-building" { return "基础环境构建机" }
+        if let custom = vmAliases[vm.name]?.trimmingCharacters(in: .whitespacesAndNewlines), !custom.isEmpty {
+            return custom
+        }
+        return vm.name
+    }
+
+    func renameVM(_ vm: VM, to newName: String) {
+        let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty || trimmed == vm.name {
+            vmAliases.removeValue(forKey: vm.name)
+        } else {
+            vmAliases[vm.name] = trimmed
+        }
+        UserDefaults.standard.set(vmAliases, forKey: "vmAliases")
+    }
+
+    func pollAllRunningQuotas() {
+        for vm in machines where vm.status == "Running" && vm.name != "base" && vm.name != "base-building" {
+            pollQuota(for: vm)
+        }
+    }
+
+    func pollQuota(for vm: VM) {
+        guard vm.status == "Running", vm.name != "base", vm.name != "base-building" else { return }
+        guard !quotaPolling.contains(vm.name) else { return }
+        let state = ProcessInfo.processInfo.environment["AGENT_VM_STATE_DIR"] ?? NSHomeDirectory() + "/.agent-vm"
+        let lima = ProcessInfo.processInfo.environment["AGENT_VM_LIMA_HOME"] ?? state + "/lima"
+        let config = URL(fileURLWithPath: lima).appendingPathComponent(vm.name).appendingPathComponent("ssh.config").path
+        guard FileManager.default.fileExists(atPath: config) else { return }
+
+        quotaPolling.insert(vm.name)
+        let vmName = vm.name
+        let script = """
+import json, os, urllib.error, urllib.request
+p = os.path.expanduser("~/.codex/auth.json")
+if not os.path.exists(p):
+    print(json.dumps({"status": "not_logged_in"}))
+    raise SystemExit(0)
+try:
+    d = json.load(open(p))
+    tok = d.get("tokens", {}).get("access_token", "")
+    acc = d.get("tokens", {}).get("account_id", "")
+    if not tok:
+        print(json.dumps({"status": "not_logged_in"}))
+        raise SystemExit(0)
+    req = urllib.request.Request("https://chatgpt.com/backend-api/wham/usage", headers={
+        "Authorization": "Bearer " + tok,
+        "ChatGPT-Account-Id": acc,
+        "Accept": "application/json",
+        "User-Agent": "codex-cli/0.169.0",
+    })
+    with urllib.request.urlopen(req, timeout=12) as r:
+        u = json.loads(r.read().decode())
+    rl = u.get("rate_limit", {})
+    print(json.dumps({
+        "status": "ok",
+        "plan_type": u.get("plan_type"),
+        "five_hour": rl.get("primary_window"),
+        "weekly": rl.get("secondary_window"),
+    }))
+except urllib.error.HTTPError as e:
+    if e.code in (401, 403):
+        print(json.dumps({"status": "unauthorized", "error": f"Codex 登录已过期 (HTTP {e.code})"}))
+    else:
+        print(json.dumps({"status": "error", "error": f"HTTP {e.code}"}))
+except Exception as e:
+    print(json.dumps({"status": "error", "error": str(e)[:120]}))
+"""
+        DispatchQueue.global(qos: .utility).async {
+            let process = Process()
+            let outPipe = Pipe()
+            let errPipe = Pipe()
+            let inPipe = Pipe()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+            process.arguments = [
+                "-F", config,
+                "-o", "ForwardAgent=no",
+                "-o", "ForwardX11=no",
+                "-o", "BatchMode=yes",
+                "-o", "ConnectTimeout=5",
+                "lima-" + vmName,
+                "python3", "-"
+            ]
+            process.standardOutput = outPipe
+            process.standardError = errPipe
+            process.standardInput = inPipe
+            var result = CodexQuotaStatus(status: "error", error: "连接失败")
+            do {
+                try process.run()
+                try inPipe.fileHandleForWriting.write(contentsOf: Data(script.utf8))
+                try inPipe.fileHandleForWriting.close()
+                let data = outPipe.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+                if process.terminationStatus == 0,
+                   let line = (String(data: data, encoding: .utf8) ?? "").components(separatedBy: .newlines).last(where: { $0.contains("{") }),
+                   let jsonData = line.data(using: .utf8),
+                   let decoded = try? JSONDecoder().decode(CodexQuotaStatus.self, from: jsonData) {
+                    result = decoded
+                } else {
+                    let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+                    let errMsg = (String(data: errData, encoding: .utf8) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                    result = CodexQuotaStatus(status: "error", error: errMsg.isEmpty ? "无法查询 Codex 额度" : String(errMsg.prefix(120)))
+                }
+            } catch {
+                result = CodexQuotaStatus(status: "error", error: error.localizedDescription)
+            }
+            DispatchQueue.main.async {
+                self.quotaPolling.remove(vmName)
+                self.vmQuotas[vmName] = result
+                self.lastQuotaPollAt = Date()
+            }
+        }
+    }
 }
 
 private enum AgentTheme {
@@ -661,29 +840,75 @@ struct MachineRow: View {
     @State private var deleting = false
     @State private var managingFolders = false
     @State private var showDetails = false
+    @State private var renaming = false
+    @State private var renameDraft = ""
     @AppStorage("showVMDetails") private var showVMDetails = false
+    private var isBase: Bool { vm.name == "base" || vm.name == "base-building" }
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack(alignment: .top, spacing: 12) {
-                Image(systemName: vm.name == "base" || vm.name == "base-building" ? "internaldrive" : "desktopcomputer")
+                Image(systemName: isBase ? "internaldrive" : "desktopcomputer")
                     .font(.title3).foregroundStyle(AgentTheme.accent).frame(width: 34, height: 34)
                     .background(AgentTheme.accent.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
                 VStack(alignment: .leading, spacing: 4) {
-                    HStack {
-                        Text(vm.name == "base" ? "基础模板" : vm.name == "base-building" ? "基础环境构建机" : vm.name).font(.headline)
+                    HStack(spacing: 6) {
+                        Text(model.displayName(for: vm)).font(.headline)
+                        if !isBase {
+                            Button {
+                                renameDraft = model.vmAliases[vm.name] ?? ""
+                                renaming = true
+                            } label: {
+                                Image(systemName: "pencil")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.borderless)
+                            .help("修改虚拟机显示名称")
+                            .popover(isPresented: $renaming) {
+                                VStack(alignment: .leading, spacing: 10) {
+                                    Text("修改虚拟机名称").font(.headline)
+                                    Text("实例 ID：\(vm.name)").font(.caption).foregroundStyle(.secondary)
+                                    TextField("输入自定义名称", text: $renameDraft)
+                                        .textFieldStyle(.roundedBorder)
+                                        .frame(width: 240)
+                                    HStack {
+                                        Button("恢复默认") {
+                                            model.renameVM(vm, to: "")
+                                            renaming = false
+                                        }
+                                        Spacer()
+                                        Button("取消") { renaming = false }
+                                        Button("保存") {
+                                            model.renameVM(vm, to: renameDraft)
+                                            renaming = false
+                                        }
+                                        .buttonStyle(.borderedProminent)
+                                    }
+                                }
+                                .padding(14)
+                            }
+                        }
                         StatusBadge(status: vm.status)
                     }
-                    Text(vm.name == "base" || vm.name == "base-building" ? "用于创建项目虚拟机" : "项目虚拟机")
-                        .font(.caption).foregroundStyle(.secondary)
+                    if !isBase, let alias = model.vmAliases[vm.name], !alias.isEmpty {
+                        Text("项目虚拟机 · 实例 \(vm.name)").font(.caption).foregroundStyle(.secondary)
+                    } else {
+                        Text(isBase ? "用于创建项目虚拟机" : "项目虚拟机")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                 }
                 Spacer()
                 Button(showDetails ? "收起详情" : "查看详情") { showDetails.toggle() }
                     .buttonStyle(.borderless).disabled(showVMDetails)
             }
-            HStack(spacing: 20) {
+            HStack(alignment: .top, spacing: 20) {
                 resource("CPU", value: "\(vm.cpus) 核")
                 resource("内存", value: vm.memory)
                 resource("磁盘", value: vm.disk)
+                if !isBase {
+                    Divider().frame(height: 34)
+                    codexQuotaSummary
+                }
                 Spacer(minLength: 0)
             }
             if vm.name != "base" && vm.name != "base-building" {
@@ -720,6 +945,9 @@ struct MachineRow: View {
                 Button("终端") { model.terminal(vm) }.disabled(vm.status != "Running")
                 Button("停止") { model.stop(vm) }.disabled(model.busy || vm.status != "Running")
                 Button("挂载文件夹") { managingFolders = true }.disabled(model.busy || model.vmMounts[vm.name]?.isEmpty != false)
+                if !isBase {
+                    Button("刷新额度") { model.pollQuota(for: vm) }.disabled(vm.status != "Running" || model.quotaPolling.contains(vm.name))
+                }
                 Spacer()
                 Button("删除", role: .destructive) { deleting = true }.disabled(model.busy || vm.name == "base")
             }.controlSize(.small)
@@ -769,6 +997,67 @@ struct MachineRow: View {
             Text(value).textSelection(.enabled)
         }.font(.caption)
     }
+    @ViewBuilder
+    private var codexQuotaSummary: some View {
+        let polling = model.quotaPolling.contains(vm.name)
+        let quota = model.vmQuotas[vm.name]
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Text("Codex 额度").font(.caption).foregroundStyle(.secondary)
+                if let plan = quota?.planType, !plan.isEmpty {
+                    Text(plan.uppercased())
+                        .font(.caption2.weight(.semibold))
+                        .padding(.horizontal, 5).padding(.vertical, 1)
+                        .background(AgentTheme.accent.opacity(0.14), in: Capsule())
+                        .foregroundStyle(AgentTheme.accent)
+                }
+                if polling {
+                    ProgressView().controlSize(.mini)
+                }
+            }
+            if let quota {
+                if quota.status == "ok" {
+                    HStack(spacing: 14) {
+                        if let five = quota.fiveHour {
+                            quotaPill(label: "5小时", window: five)
+                        }
+                        if let wk = quota.weekly {
+                            quotaPill(label: "周额度", window: wk)
+                        }
+                    }
+                } else if quota.status == "not_logged_in" {
+                    Text("VM 内 Codex 未登录").font(.caption).foregroundStyle(.secondary)
+                } else {
+                    Text(quota.error ?? "额度查询失败").font(.caption).foregroundStyle(.orange).lineLimit(1)
+                }
+            } else {
+                Text(vm.status == "Running" ? "等待检测…" : "未运行").font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+    private func quotaPill(label: String, window: CodexWindowQuota) -> some View {
+        let rem = window.remainingPercent
+        let tint: Color = rem > 30 ? .green : rem > 10 ? .orange : .red
+        return VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 4) {
+                Text("\(label) 剩 \(rem)%").font(.caption.weight(.medium)).foregroundStyle(tint)
+                if let sec = window.resetAfterSeconds, sec > 0 {
+                    Text("(\(formatReset(sec)))").font(.caption2).foregroundStyle(.secondary)
+                }
+            }
+            ProgressView(value: Double(rem), total: 100)
+                .tint(tint)
+                .frame(width: 110)
+        }
+    }
+    private func formatReset(_ seconds: Int) -> String {
+        let d = seconds / 86400
+        let h = (seconds % 86400) / 3600
+        let m = (seconds % 3600) / 60
+        if d > 0 { return "\(d)d\(h)h后重置" }
+        if h > 0 { return "\(h)h\(m)m后重置" }
+        return "\(max(1, m))m后重置"
+    }
 }
 
 struct MachinesView: View {
@@ -802,6 +1091,8 @@ struct MachinesView: View {
                     Text("管理已有 Lima 实例并打开终端。").foregroundStyle(.secondary)
                 }
                 Spacer()
+                Button { model.pollAllRunningQuotas() } label: { Label("刷新额度", systemImage: "gauge.with.dots.needle.33percent") }
+                    .disabled(model.busy)
                 Button { model.refresh() } label: { Label("刷新", systemImage: "arrow.clockwise") }
                     .disabled(model.busy)
             }
@@ -809,6 +1100,7 @@ struct MachinesView: View {
                 Text("总计 \(projects.count)")
                 Text("运行中 \(projects.filter { $0.status == "Running" }.count)")
                 Text("已停止 \(projects.filter { $0.status == "Stopped" }.count)")
+                Text("· 每 20 分钟自动轮询 Codex 额度")
                 Spacer()
                 Toggle("默认展开详情", isOn: $showVMDetails).toggleStyle(.checkbox)
             }.font(.caption).foregroundStyle(.secondary)

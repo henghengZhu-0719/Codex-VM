@@ -16,7 +16,7 @@ xcrun swiftc -target arm64-apple-macos13 -module-cache-path "${AGENT_VM_SWIFT_MO
 cat > "$app/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict><key>CFBundleExecutable</key><string>AgentVM</string><key>CFBundleIdentifier</key><string>org.agentvm.desktop</string><key>CFBundleName</key><string>Agent VM</string><key>CFBundlePackageType</key><string>APPL</string><key>LSMinimumSystemVersion</key><string>13.0</string></dict></plist>
+<plist version="1.0"><dict><key>CFBundleExecutable</key><string>AgentVM</string><key>CFBundleIconFile</key><string>AppIcon</string><key>CFBundleIdentifier</key><string>org.agentvm.desktop</string><key>CFBundleName</key><string>Agent VM</string><key>CFBundlePackageType</key><string>APPL</string><key>LSMinimumSystemVersion</key><string>13.0</string></dict></plist>
 PLIST
 
 test -x "$root/_output/bin/agent-vm"
@@ -31,5 +31,8 @@ for mihomo_src in "$root/_output/bin/mihomo" "$root/_output/proxy-core/mihomo"; 
   fi
 done
 mkdir -p "$app/Contents/Resources"
+if [ -f "$root/native-macos/AppIcon.icns" ]; then
+  cp "$root/native-macos/AppIcon.icns" "$app/Contents/Resources/AppIcon.icns"
+fi
 codesign --force --sign - "$app"
 codesign --verify --verbose "$app"
