@@ -26,9 +26,11 @@ type Gate struct {
  expires time.Time
  timer *time.Timer
  connections map[*trackedConn]struct{}
+ pending map[uint64]map[uint64]context.CancelFunc
+ nextDial uint64
 }
 
-func New() *Gate { return &Gate{state: Closed, connections: make(map[*trackedConn]struct{})} }
+func New() *Gate { return &Gate{state: Closed, connections: make(map[*trackedConn]struct{}), pending: make(map[uint64]map[uint64]context.CancelFunc)} }
 
 func (g *Gate) Status() (State, uint64) {
  g.mu.Lock(); defer g.mu.Unlock()
@@ -73,19 +75,34 @@ func (g *Gate) Dial(ctx context.Context, dial func(context.Context)(net.Conn,err
  g.expireLocked()
  if g.state != Open { g.mu.Unlock(); return nil, ErrClosed }
  epoch := g.epoch
+ g.nextDial++
+ dialID:=g.nextDial
+ dialCtx,cancel:=context.WithCancel(ctx)
+ if g.pending[epoch]==nil {g.pending[epoch]=make(map[uint64]context.CancelFunc)}
+ g.pending[epoch][dialID]=cancel
  g.mu.Unlock()
- conn, err := dial(ctx)
- if err != nil { return nil,err }
+
+ // The upstream dialer must honor dialCtx; revocation cancels it even
+ // before the TCP connection has been registered as active.
+ conn,err:=dial(dialCtx)
  g.mu.Lock()
- defer g.mu.Unlock()
+ delete(g.pending[epoch],dialID)
+ if len(g.pending[epoch])==0 {delete(g.pending,epoch)}
  g.expireLocked()
- if g.state != Open || g.epoch != epoch || ctx.Err() != nil {
-  _ = conn.Close()
-  if ctx.Err() != nil { return nil,ctx.Err() }
-  return nil,ErrStale
+ valid:=g.state==Open && g.epoch==epoch && dialCtx.Err()==nil
+ if err!=nil || !valid {
+  g.mu.Unlock()
+  cancel()
+  if conn!=nil {_=conn.Close()}
+  if ctx.Err()!=nil {return nil,ctx.Err()}
+  if !valid{return nil,ErrStale}
+  return nil,err
  }
- t := &trackedConn{Conn:conn, gate:g, epoch:epoch}
+ if conn==nil {g.mu.Unlock();cancel();return nil,errors.New("netgate: dial returned nil connection")}
+ t:=&trackedConn{Conn:conn,gate:g,epoch:epoch}
  g.connections[t]=struct{}{}
+ g.mu.Unlock()
+ cancel()
  return t,nil
 }
 
@@ -94,6 +111,7 @@ func (g *Gate) expireLocked() {
 }
 func (g *Gate) revokeLocked() {
  if g.timer!=nil {g.timer.Stop();g.timer=nil}
+ for _,epochPending:=range g.pending {for _,cancel:=range epochPending {cancel()}}
  g.epoch++
  g.state = Closed
  g.expires = time.Time{}
