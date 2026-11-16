@@ -39,6 +39,9 @@ func TestControlRequiresAuthenticationAndNeverGrants(t *testing.T){
  if mode,err:=os.Stat(c.Record.Socket);err!=nil || mode.Mode().Perm()!=0600{
   t.Fatalf("socket mode: %v %v",mode,err)
  }
+ if mode,err:=os.Stat(filepath.Join(c.dir,"control.json"));err!=nil || mode.Mode().Perm()!=0600{
+  t.Fatalf("record mode: %v %v",mode,err)
+ }
  if status,_:=controlRequest(t,c,"GET","/status","");status!=http.StatusForbidden{t.Fatal(status)}
  if status,_:=controlRequest(t,c,"POST","/grant",c.Record.Token);status!=http.StatusNotFound{t.Fatal(status)}
  if status,_:=controlRequest(t,c,"POST","/check",c.Record.Token);status!=http.StatusOK{t.Fatal(status)}
