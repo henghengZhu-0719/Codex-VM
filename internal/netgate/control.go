@@ -48,6 +48,11 @@ func StartControl(parent string, gate *Gate) (*Control,error){
  var secret [32]byte
  if _,err:=rand.Read(secret[:]);err!=nil{listener.Close();cleanup();return nil,err}
  ctl:=&Control{Gate:gate,dir:dir,listener:listener,Record:ControlRecord{Socket:socket,Token:hex.EncodeToString(secret[:])}}
+ // Keep the bearer token in private host storage, never in a VM share.
+ record,err:=json.Marshal(ctl.Record)
+ if err!=nil{listener.Close();cleanup();return nil,err}
+ recordPath:=filepath.Join(dir,"control.json")
+ if err:=os.WriteFile(recordPath,record,0600);err!=nil{listener.Close();cleanup();return nil,err}
  srv:=&http.Server{ReadHeaderTimeout:3*time.Second,ReadTimeout:5*time.Second,WriteTimeout:5*time.Second,IdleTimeout:5*time.Second,MaxHeaderBytes:8192}
  srv.Handler=http.HandlerFunc(ctl.handle)
  ctl.server=srv
