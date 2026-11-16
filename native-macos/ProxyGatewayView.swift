@@ -353,58 +353,111 @@ struct ProxyGatewayView: View {
         }
     }
 
+    // This overview intentionally uses persisted status, not unsaved form fields.
     private var statusBanner: some View {
         let st = status
-        let modeText = st?.proxyMode == "mihomo" ? "内置 Mihomo 核心" : "自定义代理"
-        let endpointText = st?.displayProxyUrl ?? customProxyURL
-        let dnsText = st?.dnsUrl ?? dnsURL
-        let mihomoState = st == nil ? "读取中" : !st!.coreAvailable ? "核心缺失" : st!.running ? "核心运行中" : "核心已停止"
-        let gateSummary: String = {
-            let gates = st?.safeGates ?? []
-            if gates.isEmpty {
-                return (st?.managedEnabled ?? false) ? "暂无运行中的托管 VM" : "未开启托管模式"
-            }
-            return gates.map { "\($0.state.uppercased()) (Epoch \($0.epoch))" }.joined(separator: " · ")
+        let enabled = st?.useProxy ?? false
+        let mode = st?.proxyMode ?? "custom"
+        let route = st?.safeRoute ?? []
+        let sourceNodes = (st?.safeSources ?? []).flatMap { $0.safeNodes }
+        let routeNames = route.map { id in sourceNodes.first(where: { $0.id == id })?.name ?? id }
+        let routeText = routeNames.isEmpty ? "尚未选择出口节点" : routeNames.joined(separator: " → ")
+        let gateStates = st?.safeGates ?? []
+        let gateText: String = {
+            if st == nil { return "正在读取" }
+            if !enabled { return "代理已关闭" }
+            if st?.managedEnabled != true { return "未启用托管门禁" }
+            if gateStates.isEmpty { return "已配置 · 尚无运行中的托管 VM" }
+            return gateStates.map { $0.state.uppercased() }.joined(separator: " / ")
         }()
-        return VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 12) {
-                pill(title: "出口模式", value: (st?.useProxy ?? useProxy) ? modeText : "代理已关闭", tint: (st?.useProxy ?? useProxy) ? .green : .secondary)
-                pill(title: "Mihomo 核心", value: mihomoState, tint: (st?.running ?? false) ? .green : (st?.coreAvailable ?? false) ? .secondary : .orange)
-                pill(title: "托管门禁", value: gateSummary, tint: (st?.safeGates.isEmpty ?? true) ? .secondary : .blue)
+        let checks = st?.lastProbe?.report?.safeChecks ?? []
+        let hasFailed = checks.contains { $0.state == "failed" }
+        let hasUnknown = checks.contains { $0.state != "passed" }
+        let checkText: String = {
+            guard let probe = st?.lastProbe else { return "尚未执行自检" }
+            if hasFailed { return "有失败项 · 请查看报告" }
+            if !checks.isEmpty && !hasUnknown && probe.error == nil { return "上次报告：全部已列检查通过" }
+            if probe.error != nil { return "上次检查发生错误" }
+            return "结果未完全确认"
+        }()
+        return VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("当前配置总览").font(.headline)
+                    Text("展示已经保存的配置。修改下方表单后，需保存才会更新这里。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 Spacer()
+                Button("刷新状态", systemImage: "arrow.clockwise") {
+                    model.refreshProxyStatus { syncFieldsFromStatus() }
+                }
+                .controlSize(.small)
+                .disabled(model.proxyBusy)
             }
-            HStack(spacing: 24) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("当前代理地址").font(.caption).foregroundStyle(.secondary)
-                    Text(endpointText).font(.callout.monospaced()).textSelection(.enabled)
+            if st == nil {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("正在读取代理配置…").font(.callout).foregroundStyle(.secondary)
                 }
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("代理内 DoH 解析").font(.caption).foregroundStyle(.secondary)
-                    Text(dnsText).font(.callout.monospaced()).textSelection(.enabled)
+            } else {
+                LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
+                    overviewItem("代理方式", symbol: "network", section: .gateway,
+                                 value: !enabled ? "代理已关闭" : mode == "mihomo" ? "内置 Mihomo" : "自定义 HTTP / SOCKS5",
+                                 detail: !enabled ? "新启动的虚拟机不使用代理" : mode == "mihomo" ? (st!.running ? "核心运行中" : "核心未运行") : st!.customProxyUrl)
+                    overviewItem("节点与出口", symbol: "arrow.triangle.branch", section: mode == "mihomo" ? .route : .gateway,
+                                 value: !enabled ? "未启用" : mode == "mihomo" ? (route.isEmpty ? "未配置节点链路" : "已配置 \(route.count) 跳") : "使用外部代理",
+                                 detail: !enabled ? "—" : mode == "mihomo" ? routeText : st!.displayProxyUrl)
+                    overviewItem("DNS 解析", symbol: "globe", section: .security,
+                                 value: st!.dnsUrl.isEmpty ? "未配置 DoH" : "DoH 端点",
+                                 detail: st!.dnsUrl.isEmpty ? "请设置 DNS 地址" : st!.dnsUrl)
+                    overviewItem("网络门禁", symbol: "lock.shield", section: .security,
+                                 value: gateText,
+                                 detail: st!.managedEnabled && enabled ? "实验性 · 默认 Closed；未完成实机安全验证" : "不代表来宾流量已被强制隔离")
+                    overviewItem("最近自检", symbol: "checkmark.shield", section: .gate,
+                                 value: checkText,
+                                 detail: st!.lastProbe?.checkedAt ?? "尚无测试记录")
+                    overviewItem("探测出口 IP", symbol: "globe.americas", section: .gate,
+                                 value: st!.lastProbe?.exitIp ?? "尚未测得",
+                                 detail: "仅为上次探测结果，不保证当前连接出口相同")
                 }
-                if let exitIP = st?.lastProbe?.exitIp, !exitIP.isEmpty {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("最近探测出口 IP").font(.caption).foregroundStyle(.secondary)
-                        Text(exitIP).font(.callout.monospaced().weight(.semibold)).foregroundStyle(.green).textSelection(.enabled)
+                HStack {
+                    Text("可点击每项右侧的“配置”跳转到相应步骤。")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("运行安全自检", systemImage: "checkmark.shield") {
+                        tab = .gate
+                        model.runGateProbe()
                     }
+                    .disabled(model.proxyBusy || !enabled)
                 }
-                Spacer()
             }
         }
-        .padding(14)
+        .padding(16)
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.06)))
     }
 
-    private func pill(title: String, value: String, tint: Color) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(title).font(.caption2).foregroundStyle(.secondary)
-            Text(value)
-                .font(.caption.weight(.semibold))
-                .padding(.horizontal, 8).padding(.vertical, 3)
-                .background(tint.opacity(0.15), in: Capsule())
-                .foregroundStyle(tint)
+    private func overviewItem(_ title: String, symbol: String, section: ProxyTab,
+                              value: String, detail: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Label(title, systemImage: symbol)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 4)
+                Button("配置") { tab = section }
+                    .font(.caption)
+                    .buttonStyle(.borderless)
+            }
+            Text(value).font(.subheadline.weight(.semibold))
+                .lineLimit(2).textSelection(.enabled)
+            Text(detail).font(.caption).foregroundStyle(.secondary)
+                .lineLimit(2).truncationMode(.middle)
+                .help(detail).textSelection(.enabled)
         }
+        .frame(maxWidth: .infinity, minHeight: 82, alignment: .topLeading)
+        .padding(12)
+        .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 9))
     }
 
     private var gatewayTab: some View {
