@@ -4,7 +4,7 @@ on:
   push:
     branches:
       - feat/egress-gateway
-      - codex/egress-gateway-fixes
+      - feat/zhu
     paths:
       - "patches/**"
       - "flake.nix"
