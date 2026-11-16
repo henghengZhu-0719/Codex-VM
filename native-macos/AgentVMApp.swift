@@ -92,6 +92,7 @@ struct CodexQuotaStatus: Decodable {
     @Published var output = ""
     @Published var busy = false
     @Published var project = ""
+    @Published var newVMName = ""
     @Published var includeCodeServer = false
     @Published var rebuildBase = false
     @Published var reusedBase = false
@@ -346,13 +347,26 @@ printf 'AGENT_VM_REGION:'
 cat /var/lib/agent-vm-region/status
 """#
     func setup() {
-        buildStarted = true
         regionMessage = ""
         buildComplete = false
         buildStage = 0
         operationFailed = false
+        // Use a unique, ordinary host directory for VM identity, never the common share.
+        if project.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let root = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("AgentVM-Workspaces", isDirectory: true)
+            let identity = root.appendingPathComponent("vm-" + UUID().uuidString.lowercased(), isDirectory: true)
+            do {
+                try FileManager.default.createDirectory(at: identity, withIntermediateDirectories: true)
+                project = identity.path
+            } catch {
+                output = "无法创建虚拟机工作目录：" + error.localizedDescription
+                operationFailed = true
+                buildStarted = true
+                return
+            }
+        }
         let selectedProject = project.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !selectedProject.isEmpty else { output = "请选择项目文件夹。"; operationFailed = true; return }
+        buildStarted = true
         guard saveNetworkSettings(), prepareSharedFolder() else { return }
         if includeCodeServer && memory < 4 { memory = 4 }
         busy = true
@@ -376,6 +390,19 @@ cat /var/lib/agent-vm-region/status
                     self.buildComplete = true
                     self.rebuildBase = false
                     self.busy = false
+                    if selectedProject.hasPrefix(NSHomeDirectory() + "/AgentVM-Workspaces/") {
+                        let label = self.newVMName.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !label.isEmpty {
+                            self.run(["name", selectedProject]) { code, rawName in
+                                guard code == 0 else { return }
+                                let vmName = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+                                if !vmName.isEmpty {
+                                    self.vmAliases[vmName] = label
+                                    UserDefaults.standard.set(self.vmAliases, forKey: "vmAliases")
+                                }
+                            }
+                        }
+                    }
                     self.refresh()
                 }
             }
@@ -1362,6 +1389,7 @@ struct MachinesView: View {
         model.operationFailed = false
         model.confirmation = false
         model.project = ""
+        model.newVMName = ""
         showingCreate = true
     }
 }
@@ -1373,14 +1401,7 @@ struct WizardView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var showAdvanced = false
 
-    private let titles = ["选择项目", "环境配置", "确认创建"]
-    private var selectedProject: String { model.project.trimmingCharacters(in: .whitespacesAndNewlines) }
-    private var projectIsValid: Bool {
-        var isDirectory: ObjCBool = false
-        return !selectedProject.isEmpty &&
-            FileManager.default.fileExists(atPath: selectedProject, isDirectory: &isDirectory) &&
-            isDirectory.boolValue
-    }
+    private let titles = ["环境配置", "确认创建"]
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1429,8 +1450,7 @@ struct WizardView: View {
                         }
                         .padding(.bottom, 4)
                         switch model.step {
-                        case 0: projectSelection
-                        case 1: environmentOptions
+                        case 0: environmentOptions
                         default: confirmationSummary
                         }
                     }
@@ -1449,7 +1469,11 @@ struct WizardView: View {
                         Spacer()
                     } else {
                         Button(model.buildComplete ? "创建另一个" : "返回配置") {
-                            model.step = model.buildComplete ? 0 : 2
+                            model.step = model.buildComplete ? 0 : 1
+                            if model.buildComplete {
+                                model.project = ""
+                                model.newVMName = ""
+                            }
                             model.buildStarted = false
                             model.buildComplete = false
                         }
@@ -1470,11 +1494,11 @@ struct WizardView: View {
                     if model.step < titles.count - 1 {
                         Button("继续") { model.step += 1 }
                             .buttonStyle(.borderedProminent)
-                            .disabled(model.busy || (model.step == 0 && !projectIsValid))
+                            .disabled(model.busy)
                     } else {
                         Button("创建虚拟机") { model.confirmation = true }
                             .buttonStyle(.borderedProminent)
-                            .disabled(model.busy || !projectIsValid)
+                            .disabled(model.busy)
                     }
                 }
             }
@@ -1485,54 +1509,35 @@ struct WizardView: View {
         .confirmationDialog("创建或启动项目虚拟机？", isPresented: $model.confirmation) {
             Button("确认创建") { model.setup() }
         } message: {
-            Text("如果项目已有虚拟机，将启动原有实例。现有项目目录不会被删除。")
+            Text("创建独立虚拟机，并自动挂载 AgentVM-Shared 公共目录。")
         }
         .interactiveDismissDisabled(model.busy)
-    }
-
-    private var projectSelection: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            Text("选择需要隔离的项目").font(.title3.weight(.semibold))
-            Text("虚拟机与项目目录一一对应，代码保存在 Mac 上，开发工具运行在独立 Linux 环境中。")
-                .font(.callout).foregroundStyle(.secondary)
-
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(spacing: 12) {
-                    Image(systemName: "folder.fill")
-                        .font(.title2)
-                        .foregroundStyle(AgentTheme.accent)
-                        .frame(width: 40, height: 40)
-                        .background(AgentTheme.accent.opacity(0.1), in: RoundedRectangle(cornerRadius: 10))
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(selectedProject.isEmpty ? "尚未选择文件夹" : URL(fileURLWithPath: selectedProject).lastPathComponent)
-                            .font(.headline)
-                        Text(selectedProject.isEmpty ? "选择已有项目目录" : selectedProject)
-                            .font(.caption).foregroundStyle(.secondary)
-                            .lineLimit(2).truncationMode(.middle).textSelection(.enabled)
-                    }
-                    Spacer()
-                    Button("选择文件夹…") { model.chooseProject() }
-                        .buttonStyle(.bordered)
-                }
-                if !selectedProject.isEmpty && !projectIsValid {
-                    Label("请选择 Mac 上已存在的文件夹。", systemImage: "exclamationmark.triangle")
-                        .font(.caption).foregroundStyle(.orange)
-                }
-            }
-            .padding(18)
-            .background(AgentTheme.panel, in: RoundedRectangle(cornerRadius: 14))
-
-            Label("共享项目目录中的更改会直接写入 Mac。虚拟机中的额外磁盘数据独立保存。",
-                  systemImage: "info.circle")
-                .font(.caption).foregroundStyle(.secondary)
-        }
     }
 
     private var environmentOptions: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("配置开发环境").font(.title3.weight(.semibold))
-            Text("推荐默认设置。仅在需要更高性能或额外服务时调整。")
+            Text("默认使用 AgentVM-Shared，无需再次选择或挂载项目文件夹。")
                 .font(.callout).foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Image(systemName: "folder.fill").foregroundStyle(AgentTheme.accent)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("共享工作区").font(.subheadline.weight(.semibold))
+                        Text("~/AgentVM-Shared → /mnt/agent-vm-shared")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Label("自动挂载", systemImage: "checkmark.circle.fill")
+                        .font(.caption).foregroundStyle(.green)
+                }
+                TextField("虚拟机名称（可选，例如：开发环境 1）", text: $model.newVMName)
+                    .textFieldStyle(.roundedBorder)
+                Text("不填名称将自动生成实例名。所有虚拟机独立运行，但共享同一个工作目录。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            .padding(16)
+            .background(AgentTheme.panel, in: RoundedRectangle(cornerRadius: 14))
             VStack(alignment: .leading, spacing: 16) {
                 HStack {
                     Label("系统与工具", systemImage: "terminal")
@@ -1597,9 +1602,11 @@ struct WizardView: View {
             Text("检查信息无误后创建。系统会自动准备基础模板并启动项目环境。")
                 .font(.callout).foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: 0) {
-                summaryRow("项目", value: URL(fileURLWithPath: selectedProject).lastPathComponent)
+                summaryRow("名称", value: model.newVMName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "自动生成" : model.newVMName)
                 Divider()
-                summaryRow("路径", value: selectedProject)
+                summaryRow("共享目录", value: "~/AgentVM-Shared")
+                Divider()
+                summaryRow("VM 内路径", value: "/mnt/agent-vm-shared")
                 Divider()
                 summaryRow("系统", value: "Debian · Codex CLI")
                 Divider()
@@ -1613,7 +1620,7 @@ struct WizardView: View {
             }
             .padding(.horizontal, 18)
             .background(AgentTheme.panel, in: RoundedRectangle(cornerRadius: 14))
-            Label("若项目已关联虚拟机，将复用现有实例，不会覆盖原来的资源配置。",
+            Label("新建实例使用独立 ID；公共目录可以被多个虚拟机同时修改，请避免并发编辑同一个文件。",
                   systemImage: "info.circle")
                 .font(.caption).foregroundStyle(.secondary)
         }
@@ -1632,7 +1639,8 @@ struct WizardView: View {
         VStack(alignment: .leading, spacing: 18) {
             Text(model.buildComplete ? "虚拟机已就绪" : model.operationFailed ? "创建未完成" : "正在创建")
                 .font(.title3.weight(.semibold))
-            Text(model.project).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+            Text(model.newVMName.isEmpty ? "共享工作区 · AgentVM-Shared" : model.newVMName)
+                .font(.caption).foregroundStyle(.secondary)
             if model.busy { ProgressView().controlSize(.small) }
             VStack(alignment: .leading, spacing: 14) {
                 ForEach(Array(["准备基础环境", "启动基础虚拟机", "安装系统与开发工具", "启动项目虚拟机"].enumerated()), id: \.offset) { index, title in
