@@ -27,3 +27,26 @@ func TestLeaseClosesActiveConnectionWithoutStatusPolling(t *testing.T){
   select {case <-deadline:t.Fatal("lease did not close active connection");default:time.Sleep(time.Millisecond)}
  }
 }
+
+func TestRevocationCancelsInFlightDial(t *testing.T) {
+ g:=openGate(t)
+ entered:=make(chan struct{})
+ canceled:=make(chan struct{})
+ done:=make(chan error,1)
+ go func(){
+  _,err:=g.Dial(context.Background(),func(ctx context.Context)(net.Conn,error){
+   close(entered)
+   <-ctx.Done()
+   close(canceled)
+   return nil,ctx.Err()
+  })
+  done<-err
+ }()
+ <-entered
+ g.Revoke()
+ select {
+ case <-canceled:
+ case <-time.After(time.Second):t.Fatal("in-flight dial not canceled on revoke")
+ }
+ if err:=<-done;!errors.Is(err,ErrStale){t.Fatalf("expected stale authorization: %v",err)}
+}
