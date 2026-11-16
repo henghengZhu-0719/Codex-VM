@@ -35,3 +35,12 @@ func TestResolverRejectsNilQuestion(t *testing.T){
  _,err:=r.Exchange(context.Background(),nil)
  if err==nil || errors.Is(err,context.Canceled){t.Fatal(err)}
 }
+
+func TestMixedAAAAAndAQueryFailClosed(t *testing.T){
+ g,_:=New("http://127.0.0.1:18080",func(string,netip.AddrPort)bool{return true})
+ r,_:=NewResolver(g,"https://1.1.1.1/dns-query")
+ q:=new(dns.Msg)
+ q.SetQuestion("example.org.",dns.TypeAAAA)
+ q.Question=append(q.Question,dns.Question{Name:"example.org.",Qtype:dns.TypeA,Qclass:dns.ClassINET})
+ if _,err:=r.Exchange(context.Background(),q);err==nil{t.Fatal("mixed IPv6 query was accepted")}
+}
