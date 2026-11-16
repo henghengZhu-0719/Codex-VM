@@ -50,9 +50,13 @@ func (g *Gate) DialContext(ctx context.Context, network string, dst netip.AddrPo
  if err!=nil{return nil,fmt.Errorf("egress: upstream connection failed: %w",err)}
  // Context cancellation must interrupt a stalled proxy handshake, not only
  // the initial TCP dial. Stop the callback before returning a live tunnel.
- stopCancel:=context.AfterFunc(ctx,func(){_ = c.Close()})
+ cancelDone:=make(chan struct{})
+ stopCancel:=context.AfterFunc(ctx,func(){_ = c.Close();close(cancelDone)})
  keep:=false
- defer func(){stopCancel();if !keep {_=c.Close()}}()
+ defer func(){
+  if !stopCancel(){<-cancelDone}
+  if !keep {_=c.Close()}
+ }()
  if deadline,has:=ctx.Deadline();has{_ = c.SetDeadline(deadline)}
  var tunnelReader *bufio.Reader
  switch g.ProxyURL.Scheme{
