@@ -427,15 +427,22 @@ cat /var/lib/agent-vm-region/status
             "'" + value.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
         }
         do {
+            let safeName = vm.name
+                .replacingOccurrences(of: "/", with: "-")
+                .replacingOccurrences(of: ":", with: "-")
+                .trimmingCharacters(in: CharacterSet(charactersIn: "."))
+            let scriptName = safeName.isEmpty ? "Connect" : safeName
+            let title = String(vm.name.unicodeScalars.filter { $0.value >= 0x20 && $0.value != 0x7f })
             let directory = FileManager.default.temporaryDirectory.appendingPathComponent("agent-vm-terminal-" + UUID().uuidString, isDirectory: true)
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
-            let script = directory.appendingPathComponent("Connect.command")
+            let script = directory.appendingPathComponent("\(scriptName).command")
             var command = "exec /usr/bin/ssh -F \(quote(config)) -o ForwardAgent=no -o ForwardX11=no -tt \(quote("lima-" + vm.name))"
             if let projectPath = vmMounts[vm.name]?.first?.guestPath {
                 let remote = "cd -- " + quote(projectPath) + " && exec \"$SHELL\" -l"
                 command += " " + quote(remote)
             }
-            let contents = "#!/bin/sh\nrm -f -- \"$0\"\nrmdir -- \"$(dirname -- \"$0\")\" 2>/dev/null || true\n" + command + "\n"
+            let setTitle = title.isEmpty ? "" : "printf '\\033]0;%s\\007' \(quote(title))\n"
+            let contents = "#!/bin/sh\nrm -f -- \"$0\"\nrmdir -- \"$(dirname -- \"$0\")\" 2>/dev/null || true\n" + setTitle + command + "\n"
             try contents.write(to: script, atomically: true, encoding: .utf8)
             try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: script.path)
             let terminal = URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app")
