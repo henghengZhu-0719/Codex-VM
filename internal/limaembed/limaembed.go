@@ -60,7 +60,7 @@ func Run(args []string) bool {
 		usernet.Names, usernet.Answered = policy.Name, policy.Answered
 		dns.Names, dns.Answered = policy.Name, policy.Answered
 	}
-	// The user is asked before the VM changes a file their machine runs on
+	// Managed mode installs host-owned transport hooks and starts CLOSED.\n	// Initialization failures abort startup rather than fall back to legacy networking.\n	if configPath := managedNetworkRequested(); configPath != "" {\n		if _, err := installManagedNetwork(configPath, policy); err != nil {\n			logrus.Fatal(err)\n		}\n	}\n	// The user is asked before the VM changes a file their machine runs on
 	// its own (guard): the shares' SFTP server runs here.
 	g, err := guard.Load(string(st), args[len(args)-1])
 	if err != nil {
