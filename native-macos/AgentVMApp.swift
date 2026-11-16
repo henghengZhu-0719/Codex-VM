@@ -563,8 +563,10 @@ cat /var/lib/agent-vm-region/status
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
             let script = directory.appendingPathComponent("\(scriptName).command")
             var command = "exec /usr/bin/ssh -F \(quote(config)) -o ForwardAgent=no -o ForwardX11=no -tt \(quote("lima-" + vm.name))"
-            if let projectPath = vmMounts[vm.name]?.first?.guestPath {
-                let remote = "cd -- " + quote(projectPath) + " && exec \"$SHELL\" -l"
+            if let mount = vmMounts[vm.name]?.first {
+                let isStandalone = mount.location.hasPrefix(NSHomeDirectory() + "/AgentVM-Workspaces/")
+                let directory = isStandalone ? "/mnt/agent-vm-shared" : mount.guestPath
+                let remote = "cd -- " + quote(directory) + " && exec \"$SHELL\" -l"
                 command += " " + quote(remote)
             }
             let setTitle = title.isEmpty ? "" : "printf '\\033]0;%s\\007' \(quote(title))\n"
@@ -978,7 +980,8 @@ struct MachineRow: View {
     @AppStorage("showVMDetails") private var showVMDetails = false
     private var isBase: Bool { vm.name == "base" || vm.name == "base-building" }
     private var projectPath: String {
-        model.vmMounts[vm.name]?.first?.location ?? "尚未获取项目路径"
+        guard let path = model.vmMounts[vm.name]?.first?.location else { return "尚未获取挂载信息" }
+        return path.hasPrefix(NSHomeDirectory() + "/AgentVM-Workspaces/") ? "共享工作区 · AgentVM-Shared" : path
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
