@@ -1254,6 +1254,8 @@ struct MachinesView: View {
     @ObservedObject var model: Model
     @AppStorage("showVMDetails") private var showVMDetails = false
     @State private var showBaseInfo = false
+    @State private var showingCreate = false
+    var onProxy: () -> Void = {}
     private var projects: [VM] { model.machines.filter { $0.name != "base" && $0.name != "base-building" } }
     private var bases: [VM] { model.machines.filter { $0.name == "base" || $0.name == "base-building" } }
     var body: some View {
@@ -1281,6 +1283,19 @@ struct MachinesView: View {
                     Text("管理已有 Lima 实例并打开终端。").foregroundStyle(.secondary)
                 }
                 Spacer()
+                Button {
+                    model.step = 0
+                    model.buildStarted = false
+                    model.buildComplete = false
+                    model.operationFailed = false
+                    model.confirmation = false
+                    model.project = ""
+                    showingCreate = true
+                } label: {
+                    Label("新建", systemImage: "plus")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(model.busy)
                 Button { model.pollAllRunningQuotas() } label: { Label("刷新额度", systemImage: "gauge.with.dots.needle.33percent") }
                     .disabled(model.busy)
                 Button { model.refresh() } label: { Label("刷新", systemImage: "arrow.clockwise") }
@@ -1308,7 +1323,14 @@ struct MachinesView: View {
                 VStack(spacing: 10) {
                     Image(systemName: "desktopcomputer").font(.system(size: 36)).foregroundStyle(.secondary)
                     Text("暂无虚拟机").font(.title3.bold())
-                    Text("在「创建环境」中创建项目虚拟机。").foregroundStyle(.secondary)
+                    Text("点击右上角「新建」创建项目虚拟机。").foregroundStyle(.secondary)
+                    Button("新建虚拟机", systemImage: "plus") {
+                        model.step = 0
+                        model.buildStarted = false
+                        model.project = ""
+                        showingCreate = true
+                    }
+                    .buttonStyle(.borderedProminent)
                 }
                 .frame(maxWidth: .infinity, minHeight: 200)
             } else {
@@ -1324,6 +1346,17 @@ struct MachinesView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .sheet(isPresented: $showingCreate, onDismiss: {
+            model.refresh()
+        }) {
+            WizardView(model: model, onMachines: {
+                showingCreate = false
+                model.refresh()
+            }, onProxy: {
+                showingCreate = false
+                onProxy()
+            })
+        }
     }
 }
 
@@ -1331,169 +1364,311 @@ struct WizardView: View {
     @ObservedObject var model: Model
     var onMachines: () -> Void = {}
     var onProxy: () -> Void = {}
-    private let stepTitles = ["资源配置", "确认并开始"]
-    var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            if model.buildStarted {
-                buildProgress
-            } else {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("创建环境").font(.largeTitle.bold())
-                Text(stepTitles[model.step]).font(.title3).foregroundStyle(AgentTheme.accent)
-                ProgressView(value: Double(model.step + 1), total: 2).tint(AgentTheme.accent)
-            }
-            Group {
-                switch model.step {
-                case 0: configuration
-                default: confirmation
-                }
-            }
-            .frame(maxWidth: 560, alignment: .leading)
-            HStack {
-                Button("上一步") { model.step -= 1 }.disabled(model.step == 0 || model.busy)
-                Spacer()
-                if model.step < 1 {
-                    Button("下一步") { model.step += 1 }
-                        .buttonStyle(.borderedProminent)
-                        .tint(AgentTheme.accent)
-                        .disabled(model.busy)
-                }
-            }
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
+    @Environment(\.dismiss) private var dismiss
+    @State private var showAdvanced = false
+
+    private let titles = ["选择项目", "环境配置", "确认创建"]
+    private var selectedProject: String { model.project.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var projectIsValid: Bool {
+        var isDirectory: ObjCBool = false
+        return !selectedProject.isEmpty &&
+            FileManager.default.fileExists(atPath: selectedProject, isDirectory: &isDirectory) &&
+            isDirectory.boolValue
     }
-    private var buildProgress: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            Text(model.buildComplete ? "虚拟机已就绪" : model.operationFailed ? "创建未完成" : "正在创建虚拟机")
-                .font(.largeTitle.bold())
-            Text(model.project).foregroundStyle(.secondary).textSelection(.enabled)
-            if model.busy { ProgressView().controlSize(.small) }
-            VStack(alignment: .leading, spacing: 16) {
-                ForEach(Array(["准备基础环境", "启动基础虚拟机", "安装系统和应用", "启动项目虚拟机"].enumerated()), id: \.offset) { index, title in
-                    HStack(spacing: 12) {
-                        let finished = model.buildComplete || index < model.buildStage
-                        let current = index == model.buildStage && !model.buildComplete
-                        Image(systemName: finished ? "checkmark.circle.fill" : (current && model.operationFailed ? "xmark.circle.fill" : "circle"))
-                            .foregroundStyle(finished ? Color.green : (current && model.operationFailed ? Color.red : Color.secondary))
-                        Text(title).fontWeight(current ? .semibold : .regular)
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                Image(systemName: model.buildComplete ? "checkmark.circle.fill" : "desktopcomputer.and.arrow.down")
+                    .font(.system(size: 23, weight: .medium))
+                    .foregroundStyle(model.buildComplete ? Color.green : AgentTheme.accent)
+                    .frame(width: 44, height: 44)
+                    .background(AgentTheme.accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(model.buildStarted ? (model.buildComplete ? "创建完成" : "正在准备虚拟机") : "新建虚拟机")
+                        .font(.title2.bold())
+                    Text(model.buildStarted ? "可以查看各阶段的执行情况" : "为项目创建独立的开发环境")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                if !model.busy {
+                    Button("关闭") { dismiss() }.buttonStyle(.borderless)
+                        .accessibilityLabel("关闭创建窗口")
+                }
+            }
+            .padding(.horizontal, 26).padding(.top, 22).padding(.bottom, 18)
+
+            Divider()
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    if model.buildStarted {
+                        buildProgress
+                    } else {
+                        HStack(spacing: 8) {
+                            ForEach(0..<titles.count, id: \.self) { index in
+                                HStack(spacing: 6) {
+                                    Image(systemName: index < model.step ? "checkmark.circle.fill" :
+                                          index == model.step ? "circle.inset.filled" : "circle")
+                                        .foregroundStyle(index <= model.step ? AgentTheme.accent : Color.secondary)
+                                    Text(titles[index])
+                                        .font(.caption.weight(index == model.step ? .semibold : .regular))
+                                        .foregroundStyle(index == model.step ? Color.primary : Color.secondary)
+                                }
+                                if index < titles.count - 1 {
+                                    Rectangle().fill(Color.secondary.opacity(0.2))
+                                        .frame(height: 1).padding(.horizontal, 5)
+                                }
+                            }
+                        }
+                        .padding(.bottom, 4)
+                        switch model.step {
+                        case 0: projectSelection
+                        case 1: environmentOptions
+                        default: confirmationSummary
+                        }
+                    }
+                }
+                .padding(26)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            Divider()
+            HStack {
+                if model.buildStarted {
+                    if model.busy {
+                        ProgressView().controlSize(.small)
+                        Text("正在创建，请不要退出应用")
+                            .font(.caption).foregroundStyle(.secondary)
                         Spacer()
-                        Text(model.reusedBase && index < 3 ? "已复用" : finished ? "已完成" : current && model.operationFailed ? "失败" : current ? "进行中" : "等待中")
+                    } else {
+                        Button(model.buildComplete ? "创建另一个" : "返回配置") {
+                            model.step = model.buildComplete ? 0 : 2
+                            model.buildStarted = false
+                            model.buildComplete = false
+                        }
+                        Spacer()
+                        Button(model.buildComplete ? "完成" : "关闭") {
+                            dismiss()
+                            onMachines()
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                } else {
+                    Button("取消") { dismiss() }
+                    Spacer()
+                    if model.step > 0 {
+                        Button("上一步") { model.step -= 1 }
+                            .disabled(model.busy)
+                    }
+                    if model.step < titles.count - 1 {
+                        Button("继续") { model.step += 1 }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(model.busy || (model.step == 0 && !projectIsValid))
+                    } else {
+                        Button("创建虚拟机") { model.confirmation = true }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(model.busy || !projectIsValid)
+                    }
+                }
+            }
+            .controlSize(.large)
+            .padding(.horizontal, 26).padding(.vertical, 16)
+        }
+        .frame(width: 690, height: 620)
+        .confirmationDialog("创建或启动项目虚拟机？", isPresented: $model.confirmation) {
+            Button("确认创建") { model.setup() }
+        } message: {
+            Text("如果项目已有虚拟机，将启动原有实例。现有项目目录不会被删除。")
+        }
+        .interactiveDismissDisabled(model.busy)
+    }
+
+    private var projectSelection: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text("选择需要隔离的项目").font(.title3.weight(.semibold))
+            Text("虚拟机与项目目录一一对应，代码保存在 Mac 上，开发工具运行在独立 Linux 环境中。")
+                .font(.callout).foregroundStyle(.secondary)
+
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 12) {
+                    Image(systemName: "folder.fill")
+                        .font(.title2)
+                        .foregroundStyle(AgentTheme.accent)
+                        .frame(width: 40, height: 40)
+                        .background(AgentTheme.accent.opacity(0.1), in: RoundedRectangle(cornerRadius: 10))
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(selectedProject.isEmpty ? "尚未选择文件夹" : URL(fileURLWithPath: selectedProject).lastPathComponent)
+                            .font(.headline)
+                        Text(selectedProject.isEmpty ? "选择已有项目目录" : selectedProject)
+                            .font(.caption).foregroundStyle(.secondary)
+                            .lineLimit(2).truncationMode(.middle).textSelection(.enabled)
+                    }
+                    Spacer()
+                    Button("选择文件夹…") { model.chooseProject() }
+                        .buttonStyle(.bordered)
+                }
+                if !selectedProject.isEmpty && !projectIsValid {
+                    Label("请选择 Mac 上已存在的文件夹。", systemImage: "exclamationmark.triangle")
+                        .font(.caption).foregroundStyle(.orange)
+                }
+            }
+            .padding(18)
+            .background(AgentTheme.panel, in: RoundedRectangle(cornerRadius: 14))
+
+            Label("共享项目目录中的更改会直接写入 Mac。虚拟机中的额外磁盘数据独立保存。",
+                  systemImage: "info.circle")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    private var environmentOptions: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("配置开发环境").font(.title3.weight(.semibold))
+            Text("推荐默认设置。仅在需要更高性能或额外服务时调整。")
+                .font(.callout).foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 16) {
+                HStack {
+                    Label("系统与工具", systemImage: "terminal")
+                    Spacer()
+                    Text("Debian · Codex CLI").foregroundStyle(.secondary)
+                }
+                Divider()
+                Toggle(isOn: $model.includeCodeServer) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("安装浏览器编辑器")
+                        Text("code-server · 需要至少 4 GiB 内存").font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                .onChange(of: model.includeCodeServer) { enabled in
+                    if enabled && model.memory < 4 { model.memory = 4 }
+                }
+                Divider()
+                Toggle(isOn: $model.syncRegion) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("根据出口 IP 同步地区与时区")
+                        Text("虚拟机启动后更新，可能访问外部 IP 查询服务。").font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                .onChange(of: model.syncRegion) { UserDefaults.standard.set($0, forKey: "syncRegion") }
+            }
+            .padding(18)
+            .background(AgentTheme.panel, in: RoundedRectangle(cornerRadius: 14))
+
+            DisclosureGroup("高级设置", isExpanded: $showAdvanced) {
+                VStack(alignment: .leading, spacing: 14) {
+                    Stepper("CPU · \(model.cpus) 核", value: $model.cpus, in: 1...64)
+                    Stepper("内存 · \(model.memory) GiB", value: $model.memory,
+                            in: (model.includeCodeServer ? 4 : 1)...128)
+                    Stepper("磁盘 · \(model.disk) GiB", value: $model.disk, in: 10...1000, step: 10)
+                    Toggle("重新构建基础模板", isOn: $model.rebuildBase)
+                    Text("默认复用基础模板。上述资源用于新虚拟机，已有实例不会重新分配。重建模板不会替换已有虚拟机。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                .padding(.top, 12)
+            }
+            .padding(16)
+            .background(AgentTheme.panel, in: RoundedRectangle(cornerRadius: 14))
+
+            HStack(spacing: 8) {
+                Image(systemName: "network")
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("网络代理")
+                    Text(model.proxyStatus?.useProxy == true ? "使用当前保存的代理配置" : "未启用代理")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("代理设置…") { onProxy() }.buttonStyle(.borderless)
+            }
+            .padding(.horizontal, 14).padding(.vertical, 10)
+            .background(AgentTheme.panel, in: RoundedRectangle(cornerRadius: 12))
+        }
+    }
+
+    private var confirmationSummary: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("确认虚拟机配置").font(.title3.weight(.semibold))
+            Text("检查信息无误后创建。系统会自动准备基础模板并启动项目环境。")
+                .font(.callout).foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 0) {
+                summaryRow("项目", value: URL(fileURLWithPath: selectedProject).lastPathComponent)
+                Divider()
+                summaryRow("路径", value: selectedProject)
+                Divider()
+                summaryRow("系统", value: "Debian · Codex CLI")
+                Divider()
+                summaryRow("资源", value: "\(model.cpus) 核 CPU · \(model.memory) GiB 内存 · \(model.disk) GiB 磁盘")
+                Divider()
+                summaryRow("编辑器", value: model.includeCodeServer ? "安装 code-server" : "不安装")
+                Divider()
+                summaryRow("基础模板", value: model.rebuildBase ? "重新构建" : "优先复用")
+                Divider()
+                summaryRow("网络", value: model.proxyStatus?.useProxy == true ? "使用已保存的代理设置" : "不使用代理")
+            }
+            .padding(.horizontal, 18)
+            .background(AgentTheme.panel, in: RoundedRectangle(cornerRadius: 14))
+            Label("若项目已关联虚拟机，将复用现有实例，不会覆盖原来的资源配置。",
+                  systemImage: "info.circle")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    private func summaryRow(_ title: String, value: String) -> some View {
+        HStack(alignment: .top, spacing: 14) {
+            Text(title).foregroundStyle(.secondary).frame(width: 88, alignment: .leading)
+            Text(value).frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
+        }
+        .font(.callout)
+        .padding(.vertical, 12)
+    }
+
+    private var buildProgress: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text(model.buildComplete ? "虚拟机已就绪" : model.operationFailed ? "创建未完成" : "正在创建")
+                .font(.title3.weight(.semibold))
+            Text(model.project).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+            if model.busy { ProgressView().controlSize(.small) }
+            VStack(alignment: .leading, spacing: 14) {
+                ForEach(Array(["准备基础环境", "启动基础虚拟机", "安装系统与开发工具", "启动项目虚拟机"].enumerated()), id: \.offset) { index, title in
+                    HStack(spacing: 12) {
+                        let done = model.buildComplete || index < model.buildStage
+                        let active = index == model.buildStage && !model.buildComplete
+                        Image(systemName: done ? "checkmark.circle.fill" :
+                              (active && model.operationFailed ? "xmark.circle.fill" : "circle"))
+                            .foregroundStyle(done ? Color.green : (active && model.operationFailed ? Color.red : Color.secondary))
+                        Text(title).fontWeight(active ? .semibold : .regular)
+                        Spacer()
+                        Text(model.reusedBase && index < 3 ? "已复用" : done ? "已完成" :
+                             active && model.operationFailed ? "失败" : active ? "进行中" : "等待中")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
-            }.padding(20).background(AgentTheme.panel, in: RoundedRectangle(cornerRadius: 12))
+            }
+            .padding(18)
+            .background(AgentTheme.panel, in: RoundedRectangle(cornerRadius: 14))
             if !model.regionMessage.isEmpty && model.buildComplete {
                 Text(model.regionMessage).font(.caption).foregroundStyle(.secondary)
             }
             if model.operationFailed {
                 Text(model.errorSummary).font(.callout).foregroundStyle(.red).textSelection(.enabled)
-                Text("可检查网络或配置后返回重试。基础环境详细日志保存在 ~/.agent-vm/setup.log。")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-            if !model.busy {
-                HStack {
-                    Button(model.buildComplete ? "创建其他虚拟机" : "返回配置") { model.buildStarted = false }
-                    if model.buildComplete { Button("查看虚拟机", action: onMachines).buttonStyle(.borderedProminent) }
-                }
-            }
-        }.frame(maxWidth: 560, alignment: .leading)
-    }
-    private var configuration: some View {
-        Form {
-            Section("系统与应用") {
-                Text("Debian · Codex CLI（含 Node.js）").foregroundStyle(.secondary)
-                Toggle("重新构建基础模板", isOn: $model.rebuildBase)
-                Text("默认复用已有模板；首次创建或选择重新构建时安装下方应用。已有项目虚拟机不受影响。")
-                    .font(.caption).foregroundStyle(.secondary)
-                Toggle("安装 code-server", isOn: $model.includeCodeServer)
-                    .onChange(of: model.includeCodeServer) { on in
-                        if on && model.memory < 4 { model.memory = 4 }
-                    }
-                Stepper("CPU：\(model.cpus) 核", value: $model.cpus, in: 1...64)
-                Stepper("内存：\(model.memory) GiB", value: $model.memory, in: 1...128)
-                Stepper("磁盘：\(model.disk) GiB", value: $model.disk, in: 10...1000, step: 10)
-                Text("新虚拟机的磁盘不能小于基础模板。") .font(.caption).foregroundStyle(.secondary)
-            }
-            Section("项目文件夹") {
-                HStack {
-                    TextField("项目目录绝对路径", text: $model.project)
-                    Button("选择…") { model.chooseProject() }
-                }
-                Text("创建时将此文件夹映射到虚拟机。")
-                    .font(.caption).foregroundStyle(.secondary)
-                Text("共享文件夹：~/AgentVM-Shared → /mnt/agent-vm-shared（所有虚拟机可读写）")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-            Section("地区与语言") {
-                Toggle("根据出口 IP 自动同步时区、地区和语言", isOn: $model.syncRegion)
-                    .onChange(of: model.syncRegion) { UserDefaults.standard.set($0, forKey: "syncRegion") }
-                Text("启动后及运行期间定期通过 ipwho.is 查询；多语言地区使用默认语言。设置在下次启动虚拟机时应用。")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-            Section("网络") {
-                Toggle("启用代理（\(model.proxyStatus?.displayProxyUrl ?? "http://10.126.126.1:8787")）", isOn: $model.useProxy)
-                    .onChange(of: model.useProxy) { newValue in
-                        if let st = model.proxyStatus {
-                            model.saveProxyConfig(
-                                proxyMode: st.proxyMode,
-                                managedEnabled: st.managedEnabled,
-                                useProxy: newValue,
-                                customProxyURL: st.customProxyUrl,
-                                dnsURL: st.dnsUrl,
-                                port: st.port
-                            )
-                        } else {
-                            _ = model.saveNetworkSettings()
-                        }
-                    }
-                HStack {
-                    Text("DoH：\(model.proxyStatus?.dnsUrl ?? "https://1.1.1.1/dns-query") · \(model.proxyStatus?.managedEnabled == true ? "托管门禁已开启" : "常规模式")")
-                        .font(.caption).foregroundStyle(.secondary)
-                    Spacer()
-                    Button("打开代理与门禁设置…") { onProxy() }.controlSize(.small)
-                }
-                Text("更改代理后须重新启动已运行的虚拟机。")
-                    .font(.caption).foregroundStyle(.secondary)
+                Text("详细日志：~/.agent-vm/setup.log").font(.caption).foregroundStyle(.secondary)
             }
         }
-        .formStyle(.grouped)
-        .frame(maxWidth: 520)
-    }
-    private var confirmation: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("确认配置").font(.headline)
-            Text("新虚拟机：\(model.cpus) 核 · \(model.memory) GiB · \(model.disk) GiB；已有虚拟机保留原有配置。")
-            Text(model.rebuildBase ? "将重新构建模板：Codex\(model.includeCodeServer ? " · code-server" : "")。" : "优先复用已有模板；首次创建时安装 Codex\(model.includeCodeServer ? " · code-server" : "")。")
-            Text("项目文件夹：\(model.project)").textSelection(.enabled)
-            Button("创建虚拟机") { model.confirmation = true }
-                .buttonStyle(.borderedProminent)
-                .tint(AgentTheme.accent)
-                .disabled(model.project.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.busy)
-            Text("使用基础模板启动所选项目的虚拟机。若项目已有虚拟机，将启动已有虚拟机。\n项目目录不能包含正在运行的 Agent VM 程序。")
-                .font(.caption).foregroundStyle(.secondary)
-        }.confirmationDialog("创建或启动项目虚拟机？", isPresented: $model.confirmation) {
-            Button("确认创建") {
-                model.setup()
-            }
-        } message: { Text("现有项目虚拟机继续保留。后续新建项目使用新模板。") }
     }
 }
 
 enum WorkbenchSection: String, CaseIterable, Identifiable, Hashable {
-    case machines, setup, proxy
+    case machines, proxy
     var id: String { rawValue }
     var title: String {
         switch self {
         case .machines: return "虚拟机"
-        case .setup: return "创建环境"
         case .proxy: return "代理与门禁"
         }
     }
     var symbol: String {
         switch self {
         case .machines: return "desktopcomputer"
-        case .setup: return "plus.square.fill"
         case .proxy: return "network"
         }
     }
@@ -1550,8 +1725,7 @@ struct ContentView: View {
                 ScrollView {
                     Group {
                         switch section {
-                        case .machines: MachinesView(model: model)
-                        case .setup: WizardView(model: model, onMachines: { section = .machines }, onProxy: { section = .proxy })
+                        case .machines: MachinesView(model: model, onProxy: { section = .proxy })
                         case .proxy: ProxyGatewayView(model: model)
                         }
                     }
