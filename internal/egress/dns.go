@@ -50,14 +50,23 @@ func NewResolver(g *Gate, endpoint string) (*Resolver,error) {
 
 func (r *Resolver) Exchange(ctx context.Context,q *dns.Msg)(*dns.Msg,error){
  if q==nil || len(q.Question)==0 {return nil,errors.New("egress: empty DNS question")}
+ // Treat a batch consistently: no IPv6 answer should leak into
+ // an otherwise allowed A-query response from the same DNS packet.
+ allAAAA:=true
  for _,question:=range q.Question{
   name:=strings.ToLower(strings.TrimSuffix(question.Name,"."))
-  if question.Qtype==dns.TypeAAAA {
-   answer:=new(dns.Msg);answer.SetReply(q);return answer,nil
-  }
   if name=="localhost" || strings.HasSuffix(name,".localhost") || strings.HasSuffix(name,".local") || strings.HasSuffix(name,".internal"){
    answer:=new(dns.Msg);answer.SetRcode(q,dns.RcodeNameError);return answer,nil
   }
+  if question.Qtype!=dns.TypeAAAA{allAAAA=false}
+ }
+ if allAAAA{
+  answer:=new(dns.Msg);answer.SetReply(q);return answer,nil
+ }
+ // Mixed AAAA/non-AAAA queries cannot be forwarded unchanged while IPv6
+ // remains disabled. Refuse them instead of silently leaking AAAA answers.
+ for _,question:=range q.Question{
+  if question.Qtype==dns.TypeAAAA{return nil,errors.New("egress: mixed IPv6 DNS query denied")}
  }
  wire,err:=q.Pack();if err!=nil{return nil,err}
  ctx,cancel:=context.WithTimeout(ctx,20*time.Second);defer cancel()
