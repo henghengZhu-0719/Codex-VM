@@ -7,6 +7,9 @@ on:
       - codex/egress-gateway-fixes
     paths:
       - "patches/**"
+      - "flake.nix"
+      - "tests/**"
+      - "release.sh"
       - "go.mod"
       - "go.sum"
       - "internal/**"
