@@ -4,14 +4,16 @@ on:
   push:
     branches:
       - feat/egress-gateway
+      - codex/egress-gateway-fixes
     paths:
-      - "patches/lima/**"
-      - "patches/gvisor-tap-vsock/**"
+      - "patches/**"
+      - "third_party/SOURCES"
+      - "third_party/**"
       - "scripts/third-party-sync"
       - ".github/workflows/sync-network-patches.yml"
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: sync-network-patches-${{ github.ref }}
@@ -24,8 +26,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ github.ref }}
-          persist-credentials: true
+          ref: ${{ github.sha }}
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
           go-version-file: go.mod
@@ -41,14 +43,19 @@ jobs:
         run: go test . ./cmd/... ./internal/...
       - name: Test patched gVisor and Lima networking
         run: |
-          go test github.com/containers/gvisor-tap-vsock/pkg/services/dns
+          # Upstream DNS integration tests depend on public resolver results.
+          go test -run '^TestCage' github.com/containers/gvisor-tap-vsock/pkg/services/dns
           go test github.com/containers/gvisor-tap-vsock/pkg/services/forwarder
           go test github.com/lima-vm/lima/v2/pkg/networks/usernet
           go test github.com/lima-vm/lima/v2/pkg/hostagent/dns
+      - name: Package synchronized changes
+        run: |
+          git add -A third_party/
+          git diff --cached --binary > "$RUNNER_TEMP/third-party.patch"
       - uses: actions/upload-artifact@v4
         with:
           name: synced-third-party
-          path: third_party/
+          path: ${{ runner.temp }}/third-party.patch
           if-no-files-found: error
           retention-days: 2
 
@@ -63,15 +70,24 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ github.ref }}
+          ref: ${{ github.sha }}
           persist-credentials: false
       - uses: actions/download-artifact@v4
         with:
           name: synced-third-party
-          path: third_party/
+          path: ${{ runner.temp }}/sync
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
           go-version-file: go.mod
+      - name: Apply synchronized changes
+        shell: bash
+        run: |
+          if [ -s "$RUNNER_TEMP/sync/third-party.patch" ]; then
+            git apply --index "$RUNNER_TEMP/sync/third-party.patch"
+          fi
+      - name: QEMU
+        if: runner.os == 'Windows'
+        run: winget install -e --id SoftwareFreedomConservancy.QEMU --version 11.1.0 --silent --accept-package-agreements --accept-source-agreements
       - name: Build
         run: go build ./cmd/agent-vm
       - name: Vet
@@ -80,25 +96,27 @@ jobs:
         run: go test . ./cmd/... ./internal/...
 
   commit-sync:
+    permissions:
+      contents: write
     needs: [sync, platform-build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ github.ref }}
+          ref: ${{ github.sha }}
           persist-credentials: true
       - uses: actions/download-artifact@v4
         with:
           name: synced-third-party
-          path: third_party/
+          path: ${{ runner.temp }}/sync
       - name: Commit synchronized sources
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add third_party/
-          if git diff --cached --quiet; then
+          if [ ! -s "$RUNNER_TEMP/sync/third-party.patch" ]; then
             echo "third_party is already synchronized"
             exit 0
           fi
+          git apply --index "$RUNNER_TEMP/sync/third-party.patch"
           git commit -m "build: synchronize third-party network patches"
           git push origin HEAD:${GITHUB_REF_NAME}

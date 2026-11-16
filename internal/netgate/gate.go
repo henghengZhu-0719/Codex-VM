@@ -144,3 +144,10 @@ func (c *trackedConn) valid() bool {
 }
 func (c *trackedConn) Read(p []byte)(int,error){ if !c.valid(){return 0,ErrStale};return c.Conn.Read(p) }
 func (c *trackedConn) Write(p []byte)(int,error){ if !c.valid(){return 0,ErrStale};return c.Conn.Write(p) }
+
+// CloseWrite preserves TCP half-close through the authorization wrapper.
+func (c *trackedConn) CloseWrite() error {
+ if !c.valid(){return ErrStale}
+ if conn,ok:=c.Conn.(interface{CloseWrite() error});ok{return conn.CloseWrite()}
+ return errors.ErrUnsupported
+}

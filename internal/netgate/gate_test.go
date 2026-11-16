@@ -3,6 +3,7 @@ package netgate
 import (
  "context"
  "errors"
+ "io"
  "net"
  "testing"
  "time"
@@ -49,4 +50,27 @@ func TestRevocationCancelsInFlightDial(t *testing.T) {
  case <-time.After(time.Second):t.Fatal("in-flight dial not canceled on revoke")
  }
  if err:=<-done;!errors.Is(err,ErrStale){t.Fatalf("expected stale authorization: %v",err)}
+}
+
+func TestTrackedConnectionPreservesHalfClose(t *testing.T) {
+ listener,err:=net.Listen("tcp","127.0.0.1:0")
+ if err!=nil{t.Fatal(err)}
+ defer listener.Close()
+ gate:=openGate(t)
+ conn,err:=gate.Dial(context.Background(),func(ctx context.Context)(net.Conn,error){return (&net.Dialer{}).DialContext(ctx,"tcp",listener.Addr().String())})
+ if err!=nil{t.Fatal(err)}
+ defer conn.Close()
+ peer,err:=listener.Accept()
+ if err!=nil{t.Fatal(err)}
+ defer peer.Close()
+ if err:=peer.SetDeadline(time.Now().Add(time.Second));err!=nil{t.Fatal(err)}
+ if _,err:=conn.Write([]byte("request"));err!=nil{t.Fatal(err)}
+ halfClose,ok:=conn.(interface{CloseWrite() error})
+ if !ok{t.Fatal("tracked connection cannot half-close")}
+ if err:=halfClose.CloseWrite();err!=nil{t.Fatal(err)}
+ request,err:=io.ReadAll(peer)
+ if err!=nil || string(request)!="request"{t.Fatalf("request %q: %v",request,err)}
+ if _,err:=peer.Write([]byte("response"));err!=nil{t.Fatal(err)}
+ response:=make([]byte,len("response"))
+ if _,err:=io.ReadFull(conn,response);err!=nil || string(response)!="response"{t.Fatalf("response %q: %v",response,err)}
 }

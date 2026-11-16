@@ -29,9 +29,10 @@ type Control struct {
  listener net.Listener
  dir string
  Record ControlRecord
+ check func(context.Context,uint64) SafetyReport
 }
 
-func StartControl(parent string, gate *Gate) (*Control,error){
+func StartControl(parent string, gate *Gate, checks ...func(context.Context,uint64) SafetyReport) (*Control,error){
  if gate==nil{return nil,errors.New("netgate: nil gate")}
  if err:=os.MkdirAll(parent,0700);err!=nil{return nil,err}
  info,err:=os.Lstat(parent)
@@ -48,12 +49,13 @@ func StartControl(parent string, gate *Gate) (*Control,error){
  var secret [32]byte
  if _,err:=rand.Read(secret[:]);err!=nil{listener.Close();cleanup();return nil,err}
  ctl:=&Control{Gate:gate,dir:dir,listener:listener,Record:ControlRecord{Socket:socket,Token:hex.EncodeToString(secret[:])}}
+ if len(checks)>0 {ctl.check=checks[0]}
  // Keep the bearer token in private host storage, never in a VM share.
  record,err:=json.Marshal(ctl.Record)
  if err!=nil{listener.Close();cleanup();return nil,err}
  recordPath:=filepath.Join(dir,"control.json")
  if err:=os.WriteFile(recordPath,record,0600);err!=nil{listener.Close();cleanup();return nil,err}
- srv:=&http.Server{ReadHeaderTimeout:3*time.Second,ReadTimeout:5*time.Second,WriteTimeout:5*time.Second,IdleTimeout:5*time.Second,MaxHeaderBytes:8192}
+ srv:=&http.Server{ReadHeaderTimeout:3*time.Second,ReadTimeout:5*time.Second,WriteTimeout:30*time.Second,IdleTimeout:5*time.Second,MaxHeaderBytes:8192}
  srv.Handler=http.HandlerFunc(ctl.handle)
  ctl.server=srv
  go func(){_ = srv.Serve(listener)}()
@@ -79,6 +81,11 @@ func (c *Control) handle(w http.ResponseWriter,r *http.Request){
   _,_=io.WriteString(w,`{"state":"closed"}`)
  case r.Method=="POST" && r.URL.Path=="/check":
   epoch:=c.Gate.BeginCheck()
+  if c.check!=nil {
+   report:=c.check(r.Context(),epoch)
+   _=json.NewEncoder(w).Encode(report)
+   return
+  }
   _=json.NewEncoder(w).Encode(struct{
    State State `json:"state"`
    Epoch uint64 `json:"epoch"`

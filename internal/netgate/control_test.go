@@ -7,6 +7,7 @@ import (
  "net/http"
  "os"
  "path/filepath"
+ "runtime"
  "testing"
  "time"
 )
@@ -31,7 +32,10 @@ func controlRequest(t *testing.T,c *Control,method,path,token string)(int,map[st
 }
 
 func TestControlRequiresAuthenticationAndNeverGrants(t *testing.T){
- parent:=filepath.Join(t.TempDir(),"private")
+ if runtime.GOOS=="windows"{t.Skip("Unix permission checks do not establish a private control socket on Windows")}
+ parent,err:=os.MkdirTemp("","ngtest-")
+ if err!=nil{t.Fatal(err)}
+ t.Cleanup(func(){_ = os.RemoveAll(parent)})
  gate:=New()
  c,err:=StartControl(parent,gate)
  if err!=nil{t.Fatal(err)}
@@ -54,4 +58,21 @@ func TestControlRejectsWorldReadableParent(t *testing.T){
  parent:=filepath.Join(t.TempDir(),"bad")
  if err:=os.Mkdir(parent,0755);err!=nil{t.Fatal(err)}
  if _,err:=StartControl(parent,New());err==nil{t.Fatal("accepted public control directory")}
+}
+
+func TestControlCheckReturnsHostProbeReport(t *testing.T){
+ if runtime.GOOS=="windows"{t.Skip("Unix permission checks do not establish a private control socket on Windows")}
+ parent,err:=os.MkdirTemp("","ngtest-")
+ if err!=nil{t.Fatal(err)}
+ t.Cleanup(func(){_ = os.RemoveAll(parent)})
+ gate:=New()
+ ctl,err:=StartControl(parent,gate,func(ctx context.Context,epoch uint64) SafetyReport{
+  return SafetyReport{Policy:SafetyPolicyVersion,RunID:"run",Configuration:"config",CheckEpoch:epoch,CreatedAt:time.Now()}
+ })
+ if err!=nil{t.Fatal(err)}
+ defer ctl.Close()
+ status,data:=controlRequest(t,ctl,"POST","/check",ctl.Record.Token)
+ if status!=http.StatusOK || data["policy"]!=SafetyPolicyVersion || data["run_id"]!="run"{t.Fatalf("status=%d report=%v",status,data)}
+ state,epoch:=gate.Status()
+ if state!=Checking || data["check_epoch"]!=float64(epoch){t.Fatalf("state=%s epoch=%d report=%v",state,epoch,data)}
 }

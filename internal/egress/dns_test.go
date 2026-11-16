@@ -1,10 +1,17 @@
 package egress
 
 import (
+ "bufio"
  "context"
  "errors"
+ "io"
+ "net"
+ "net/http"
  "net/netip"
  "testing"
+ "time"
+
+ "github.com/sylvinus/agent-vm/internal/netgate"
 
  "github.com/miekg/dns"
 )
@@ -43,4 +50,35 @@ func TestMixedAAAAAndAQueryFailClosed(t *testing.T){
  q.SetQuestion("example.org.",dns.TypeAAAA)
  q.Question=append(q.Question,dns.Question{Name:"example.org.",Qtype:dns.TypeA,Qclass:dns.ClassINET})
  if _,err:=r.Exchange(context.Background(),q);err==nil{t.Fatal("mixed IPv6 query was accepted")}
+}
+
+func TestResolverRevocationClosesInFlightTunnel(t *testing.T) {
+ gate:=netgate.New()
+ epoch:=gate.BeginCheck()
+ if err:=gate.Authorize(epoch,time.Minute);err!=nil{t.Fatal(err)}
+ proxy,_:=New("http://127.0.0.1:18080",func(string,netip.AddrPort)bool{return true})
+ connected:=make(chan struct{})
+ closed:=make(chan struct{})
+ proxy.DialProxy=func(ctx context.Context,network,address string)(net.Conn,error){
+  client,server:=net.Pipe()
+  go func(){
+   defer close(closed)
+   defer server.Close()
+   req,err:=http.ReadRequest(bufio.NewReader(server))
+   if err!=nil{return}
+   if req.Method!="CONNECT"{return}
+   if _,err:=io.WriteString(server,"HTTP/1.1 200 Connection Established\r\n\r\n");err!=nil{return}
+   close(connected)
+   _,_=io.Copy(io.Discard,server)
+  }()
+  return client,nil
+ }
+ resolver,err:=NewResolverWithTracker(proxy,"https://1.1.1.1/dns-query",gate.Dial)
+ if err!=nil{t.Fatal(err)}
+ done:=make(chan error,1)
+ go func(){q:=new(dns.Msg);q.SetQuestion("example.org.",dns.TypeA);_,err:=resolver.Exchange(context.Background(),q);done<-err}()
+ select{case <-connected:case <-time.After(5*time.Second):t.Fatal("proxy tunnel did not connect")}
+ gate.Revoke()
+ select{case <-closed:case <-time.After(5*time.Second):t.Fatal("revocation did not close DNS tunnel")}
+ select{case err:=<-done:if err==nil{t.Fatal("DNS request succeeded after revocation")};case <-time.After(5*time.Second):t.Fatal("DNS request did not stop")}
 }

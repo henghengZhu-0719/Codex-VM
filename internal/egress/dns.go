@@ -23,7 +23,14 @@ type Resolver struct {
  client *http.Client
 }
 
+// TrackDial associates each DoH connection with its authorization lifetime.
+type TrackDial func(context.Context, func(context.Context) (net.Conn, error)) (net.Conn, error)
+
 func NewResolver(g *Gate, endpoint string) (*Resolver,error) {
+ return NewResolverWithTracker(g, endpoint, nil)
+}
+
+func NewResolverWithTracker(g *Gate, endpoint string, track TrackDial) (*Resolver,error) {
  if g==nil || g.ProxyURL==nil {return nil,ErrNoProxy}
  u,err:=url.Parse(endpoint)
  if err!=nil || u==nil || u.Scheme!="https" || u.User!=nil || u.Hostname()=="" || u.Fragment!="" {
@@ -41,7 +48,9 @@ func NewResolver(g *Gate, endpoint string) (*Resolver,error) {
    host,port,err:=net.SplitHostPort(address)
    if err!=nil || host!=u.Hostname() || port!="443" {return nil,ErrDenied}
    dst:=netip.AddrPortFrom(ip.Unmap(),443)
-   return g.DialContext(ctx,"tcp",dst)
+   dial:=func(ctx context.Context)(net.Conn,error){return g.DialContext(ctx,"tcp",dst)}
+   if track!=nil{return track(ctx,dial)}
+   return dial(ctx)
   },
  }
  client:=&http.Client{Timeout:20*time.Second,Transport:tr,CheckRedirect:func(*http.Request,[]*http.Request)error{return errors.New("egress: DoH redirects refused")}}
@@ -72,7 +81,9 @@ func (r *Resolver) Exchange(ctx context.Context,q *dns.Msg)(*dns.Msg,error){
  ctx,cancel:=context.WithTimeout(ctx,20*time.Second);defer cancel()
  for attempt:=0;attempt<3;attempt++{
   attemptCtx,done:=context.WithTimeout(ctx,6*time.Second)
-  answer,retry,err:=r.exchangeOnce(attemptCtx,q,wire)
+  var answer *dns.Msg
+  var retry bool
+  answer,retry,err=r.exchangeOnce(attemptCtx,q,wire)
   done()
   if err==nil || !retry{return answer,err}
   if ctx.Err()!=nil{return nil,ctx.Err()}

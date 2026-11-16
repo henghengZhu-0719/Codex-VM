@@ -65,11 +65,11 @@ func Run(args []string) bool {
 	// Initialization failures abort startup rather than fall back to legacy networking.
 	var stopManagedNetwork func()
 	if configPath := managedNetworkRequested(); configPath != "" {
-		gate, err := installManagedNetwork(configPath, policy)
+		gate, check, err := installManagedNetwork(configPath, policy, args[len(args)-1])
 		if err != nil {
 			logrus.Fatal(err)
 		}
-		control, err := netgate.StartControl(filepath.Join(string(st), ".netgate-private"), gate)
+		control, err := netgate.StartControl(filepath.Join(string(st), ".netgate-private"), gate, check)
 		if err != nil {
 			logrus.Fatal(err)
 		}

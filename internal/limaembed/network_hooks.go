@@ -44,8 +44,8 @@ func loadManagedNetworkConfig(path string)(managedNetworkConfig,error){
 // installManagedNetwork is called before HostAgent starts the guest.
 // It deliberately keeps the gate CLOSED: only a trusted host-side safety
 // checker/control socket (future phase) may authorize an epoch.
-func installManagedNetwork(path string, policy *netguard.Policy)(*netgate.Gate,error){
- cfg,err:=loadManagedNetworkConfig(filepath.Clean(path));if err!=nil{return nil,err}
+func installManagedNetwork(path string, policy *netguard.Policy, instance string)(*netgate.Gate,func(context.Context,uint64) netgate.SafetyReport,error){
+ cfg,err:=loadManagedNetworkConfig(filepath.Clean(path));if err!=nil{return nil,nil,err}
  // No ordinary netguard allow rule may widen a managed proxy guest's access
  // to host/private addresses or to UDP.
  defaultPolicy:=&netguard.Policy{}
@@ -55,9 +55,9 @@ func installManagedNetwork(path string, policy *netguard.Policy)(*netgate.Gate,e
   if !addr.IsGlobalUnicast() || addr.IsPrivate() || addr.IsLoopback() || addr.IsLinkLocalUnicast(){return false}
   return defaultPolicy.Allows("tcp",dst) && policy.Allows("tcp",dst)
  }
- dialer,err:=egress.New(cfg.ProxyURL,public);if err!=nil{return nil,err}
- resolver,err:=egress.NewResolver(dialer,cfg.DNSURL);if err!=nil{return nil,err}
+ dialer,err:=egress.New(cfg.ProxyURL,public);if err!=nil{return nil,nil,err}
  gate:=netgate.New()
+ resolver,err:=egress.NewResolverWithTracker(dialer,cfg.DNSURL,gate.Dial);if err!=nil{return nil,nil,err}
  usernet.Outbound=func(network string,dst netip.AddrPort)bool{
   state,_:=gate.Status()
   return state==netgate.Open && public(network,dst)
@@ -80,7 +80,8 @@ func installManagedNetwork(path string, policy *netguard.Policy)(*netgate.Gate,e
  limadns.Exchange=exchange
  usernet.Names=nil;usernet.Answered=nil
  limadns.Names=nil;limadns.Answered=nil
- return gate,nil
+ check,err:=newSafetyProbe(cfg,policy,gate,dialer,instance);if err!=nil{return nil,nil,err}
+ return gate,check,nil
 }
 
 // ManagedNetworkRequested returns true only when a config path is explicitly
