@@ -175,14 +175,16 @@ struct FlatProxyNode: Identifiable {
 }
 
 private enum ProxyTab: String, CaseIterable, Identifiable {
-    case gateway, sources, gate, diagnostics
+    case gateway, sources, route, security, gate, diagnostics
     var id: String { rawValue }
     var title: String {
         switch self {
-        case .gateway: return "网关与节点"
-        case .sources: return "订阅与导入"
-        case .gate: return "门禁与自检"
-        case .diagnostics: return "连接与诊断"
+        case .gateway: return "1 代理方式"
+        case .sources: return "2 节点来源"
+        case .route: return "3 出口链路"
+        case .security: return "4 DNS 与安全"
+        case .gate: return "5 自检"
+        case .diagnostics: return "连接监控"
         }
     }
 }
@@ -274,7 +276,7 @@ struct ProxyGatewayView: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            .frame(maxWidth: 520)
+            .frame(maxWidth: .infinity)
 
             if !model.proxyError.isEmpty {
                 HStack(spacing: 8) {
@@ -299,6 +301,20 @@ struct ProxyGatewayView: View {
                 gatewayTab
             case .sources:
                 sourcesTab
+                if proxyMode != "mihomo" || !useProxy {
+                    Text("当前不使用 Mihomo 节点。可返回代理方式，或直接继续 DNS 与安全配置。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                HStack {
+                    Button("上一步：代理方式") { tab = .gateway }
+                    Spacer()
+                    Button("下一步：选择出口") { tab = .route }
+                        .disabled(allNodes.isEmpty || proxyMode != "mihomo" || !useProxy)
+                }
+            case .route:
+                routeTab
+            case .security:
+                securityTab
             case .gate:
                 gateTab
             case .diagnostics:
@@ -392,78 +408,66 @@ struct ProxyGatewayView: View {
     }
 
     private var gatewayTab: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            // 1. Egress + DoH + Gate Configuration
+        VStack(alignment: .leading, spacing: 14) {
+            stepHeading(1, "选择代理方式", "先确认使用哪一种出口方式，保存后再进行后续配置。")
             VStack(alignment: .leading, spacing: 14) {
-                Text("出站网关与 DoH 设置").font(.headline)
                 Picker("代理模式", selection: $proxyMode) {
-                    Text("自定义 HTTP / SOCKS5 代理").tag("custom")
-                    Text("内置 Mihomo 代理核心").tag("mihomo")
+                    Text("使用已有 HTTP / SOCKS5 代理").tag("custom")
+                    Text("使用内置 Mihomo 节点").tag("mihomo")
                 }
                 .pickerStyle(.radioGroup)
                 .horizontalRadioGroupLayout()
-
-                Toggle("对新建/启动的虚拟机启用此代理", isOn: $useProxy)
-
-                if proxyMode == "custom" {
+                Toggle("对新建或启动的虚拟机使用代理", isOn: $useProxy)
+                if !useProxy {
+                    Label("代理已关闭。保存后不再对新启动的虚拟机应用该出口。", systemImage: "info.circle")
+                        .foregroundStyle(.secondary).font(.caption)
+                } else if proxyMode == "custom" {
+                    Text("代理服务器地址").font(.subheadline.weight(.semibold))
+                    TextField("http://10.126.126.1:8787", text: $customProxyURL)
+                        .textFieldStyle(.roundedBorder)
                     HStack {
-                        Text("自定义代理地址").frame(width: 120, alignment: .leading)
-                        TextField("http://10.126.126.1:8787 或 socks5://127.0.0.1:7890", text: $customProxyURL)
-                            .textFieldStyle(.roundedBorder)
-                        Button("10.126.126.1:8787") { customProxyURL = "http://10.126.126.1:8787" }.controlSize(.small)
-                        Button("127.0.0.1:7890") { customProxyURL = "http://127.0.0.1:7890" }.controlSize(.small)
-                    }
-                    Text("Egress 强制要求数字 IPv4 + 端口（禁止域名），避免触发宿主机系统 DNS。")
+                        Button("10.126.126.1:8787") { customProxyURL = "http://10.126.126.1:8787" }
+                        Button("127.0.0.1:7890") { customProxyURL = "http://127.0.0.1:7890" }
+                    }.controlSize(.small)
+                    Text("填写数字 IPv4 和端口，避免宿主机 DNS 查询引起泄漏。")
                         .font(.caption).foregroundStyle(.secondary)
                 } else {
-                    HStack {
-                        Text("本地混合监听端口").frame(width: 120, alignment: .leading)
-                        TextField("17896", text: $mihomoPort)
-                            .textFieldStyle(.roundedBorder)
-                            .frame(width: 110)
-                        Text("绑定 127.0.0.1，仅宿主 Egress 拨号器携带随机密钥访问。")
-                            .font(.caption).foregroundStyle(.secondary)
+                    Text("Mihomo 本机监听端口").font(.subheadline.weight(.semibold))
+                    TextField("17896", text: $mihomoPort)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 130)
+                    Text("Mihomo 监听 127.0.0.1。下一步导入节点，然后配置出口。")
+                        .font(.caption).foregroundStyle(.secondary)
+                    if status?.coreAvailable == false {
+                        Label("当前未检测到 Mihomo 核心，请在启动节点链路前安装。", systemImage: "exclamationmark.triangle")
+                            .foregroundStyle(.orange).font(.caption)
                     }
                 }
-
-                HStack {
-                    Text("DoH 解析端点").frame(width: 120, alignment: .leading)
-                    TextField("https://1.1.1.1/dns-query", text: $dnsURL)
-                        .textFieldStyle(.roundedBorder)
-                    Button("1.1.1.1") { dnsURL = "https://1.1.1.1/dns-query" }.controlSize(.small)
-                    Button("223.5.5.5") { dnsURL = "https://223.5.5.5/dns-query" }.controlSize(.small)
-                    Button("8.8.8.8") { dnsURL = "https://8.8.8.8/dns-query" }.controlSize(.small)
-                }
-                Text("需使用带路径的 IPv4 HTTPS 字面量（例如 https://1.1.1.1/dns-query），所有来宾 DNS 均在代理隧道内通过 DoH 完成。")
-                    .font(.caption).foregroundStyle(.secondary)
-
                 Divider()
-
-                Toggle("启用托管网络与 Fail-Closed 连接门禁（实验性 / 开发联调）", isOn: $managedEnabled)
-                Text("开启后启动 VM 会注入 AGENT_VM_MANAGED_NETWORK_CONFIG，在宿主侧安装 gVisor/Lima 强制代理与 DoH 钩子，并创建私有 Netgate 控制 Socket。注意：当前门禁默认保持 Closed（待实机边界测量完善），仅用于自检探测与隔离联调。")
-                    .font(.caption).foregroundStyle(.secondary)
-
                 HStack {
-                    Button("保存网关配置") {
-                        saveGatewayConfig()
+                    Spacer()
+                    Button("保存并继续") {
+                        saveGatewayConfig {
+                            tab = useProxy && proxyMode == "mihomo" ? .sources : .security
+                        }
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(model.proxyBusy)
-                    Spacer()
-                    if let path = status?.managedConfigPath {
-                        Text("托管配置：\(path)").font(.caption2).foregroundStyle(.secondary).textSelection(.enabled)
-                    }
+                    .disabled(model.proxyBusy || (useProxy && proxyMode == "custom" && customProxyURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) || (useProxy && proxyMode == "mihomo" && (Int(mihomoPort) ?? 0) <= 0))
                 }
             }
             .padding(16)
             .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
-            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.06)))
+        }
+    }
 
+    private var routeTab: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            stepHeading(3, "选择出口节点", "选择最终出口，必要时添加中转；应用节点后会启动或重启 Mihomo。")
             // 2. Mihomo Core + Route Chain + Node List
             VStack(alignment: .leading, spacing: 14) {
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Mihomo 核心与代理链路").font(.headline)
+                        Text("选择节点和出口链路").font(.headline)
                         if let ver = status?.coreVersion, !ver.isEmpty {
                             Text(ver).font(.caption).foregroundStyle(.secondary)
                         } else if status?.coreAvailable == false {
@@ -530,6 +534,7 @@ struct ProxyGatewayView: View {
                                 model.applyProxyRoute(route: activeRoute, port: port) {
                                     routeDraft = nil
                                     syncFieldsFromStatus()
+                                    if model.proxyError.isEmpty { tab = .security }
                                 }
                             }
                             .buttonStyle(.borderedProminent)
@@ -559,15 +564,15 @@ struct ProxyGatewayView: View {
                         Label("全部测速", systemImage: "speedometer")
                     }
                     .disabled(model.proxyBusy || status?.running != true || allNodes.isEmpty)
-                    Button("导入订阅 / 添加节点") { tab = .sources }
+                    Button("管理节点来源") { tab = .sources }
                 }
 
                 if allNodes.isEmpty {
                     VStack(spacing: 8) {
                         Text("暂无代理节点").font(.headline)
-                        Text("前往「订阅与导入」导入 Clash/Mihomo YAML 订阅链接、本地配置或手动添加节点。")
+                        Text("先在上一步导入订阅或添加节点，才能选择出口。")
                             .font(.caption).foregroundStyle(.secondary)
-                        Button("添加第一份节点来源") { tab = .sources }
+                        Button("返回添加节点") { tab = .sources }
                     }
                     .frame(maxWidth: .infinity, minHeight: 120)
                 } else {
@@ -584,6 +589,60 @@ struct ProxyGatewayView: View {
             .padding(16)
             .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
             .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.06)))
+
+            HStack {
+                Button("上一步：管理节点") { tab = .sources }
+                Spacer()
+                Button("下一步：DNS 与安全") { tab = .security }
+                    .disabled(!routeValid || status?.running != true)
+            }
+        }
+    }
+
+    private var securityTab: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            stepHeading(4, "DNS 与网络隔离", "先配置代理内 DNS，再选择隔离门禁。配置保存后进行出口和安全自检。")
+            VStack(alignment: .leading, spacing: 14) {
+                Text("代理内 DoH 解析").font(.subheadline.weight(.semibold))
+                TextField("https://1.1.1.1/dns-query", text: $dnsURL)
+                    .textFieldStyle(.roundedBorder)
+                HStack(spacing: 10) {
+                    Button("Cloudflare") { dnsURL = "https://1.1.1.1/dns-query" }
+                    Button("AliDNS") { dnsURL = "https://223.5.5.5/dns-query" }
+                    Button("Google") { dnsURL = "https://8.8.8.8/dns-query" }
+                }.controlSize(.small)
+                Text("使用数字 IPv4 的 HTTPS DoH 地址，并填写 /dns-query 等完整路径；实际 DNS 解析由代理隧道承载。")
+                    .font(.caption).foregroundStyle(.secondary)
+                Divider()
+                Toggle("启用托管网络和 Fail-Closed 门禁（实验性）", isOn: $managedEnabled)
+                    .disabled(!useProxy)
+                Text("托管模式会启用 gVisor/Lima 强制转发、DoH 钩子和私有 Netgate。当前门禁默认 Closed，仅用于隔离联调；并不表示已经通过全部实机安全测试。")
+                    .font(.caption).foregroundStyle(.secondary)
+                if let path = status?.managedConfigPath, !path.isEmpty {
+                    Text("托管配置：\(path)").font(.caption2).foregroundStyle(.secondary).textSelection(.enabled)
+                }
+                Divider()
+                HStack {
+                    Button(proxyMode == "mihomo" && useProxy ? "上一步：节点链路" : "上一步：代理方式") {
+                        tab = proxyMode == "mihomo" && useProxy ? .route : .gateway
+                    }
+                    Spacer()
+                    Button("保存并进入安全自检") {
+                        saveGatewayConfig { tab = .gate }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(model.proxyBusy || !dnsURL.hasPrefix("https://"))
+                }
+            }
+            .padding(16)
+            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
+        }
+    }
+
+    private func stepHeading(_ index: Int, _ title: String, _ subtitle: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("步骤 \(index) · \(title)").font(.title3.bold())
+            Text(subtitle).font(.callout).foregroundStyle(.secondary)
         }
     }
 
@@ -979,17 +1038,20 @@ struct ProxyGatewayView: View {
         mihomoPort = String(st.port)
     }
 
-    private func saveGatewayConfig() {
+    private func saveGatewayConfig(onSuccess: (() -> Void)? = nil) {
         let portVal = Int(mihomoPort) ?? 17896
         model.saveProxyConfig(
             proxyMode: proxyMode,
-            managedEnabled: managedEnabled,
+            managedEnabled: managedEnabled && useProxy,
             useProxy: useProxy,
             customProxyURL: customProxyURL,
             dnsURL: dnsURL,
             port: portVal
         ) {
             syncFieldsFromStatus()
+            if model.proxyError.isEmpty {
+                onSuccess?()
+            }
         }
     }
 
