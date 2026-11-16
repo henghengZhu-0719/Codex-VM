@@ -9,6 +9,7 @@ import (
  "net/netip"
  "strings"
  "testing"
+ "time"
 )
 func TestMissingProxy(t *testing.T){if _,err:=New("",nil);!errors.Is(err,ErrNoProxy){t.Fatal(err)}}
 func TestUnsupportedScheme(t *testing.T){if _,err:=New("ftp://127.0.0.1:1080",nil);err==nil{t.Fatal("expected error")}}
@@ -52,4 +53,31 @@ func TestRevokedDuringHandshake(t *testing.T){
  }()
  _,err:=g.DialContext(context.Background(),"tcp",netip.MustParseAddrPort("1.1.1.1:443"))
  if !errors.Is(err,ErrDenied){t.Fatal(err)}
+}
+
+func TestCancelledHTTPConnectHandshakeReturnsWithoutFallback(t *testing.T){
+ g,_:=New("http://127.0.0.1:1080",func(string,netip.AddrPort)bool{return true})
+ client,upstream:=net.Pipe()
+ defer upstream.Close()
+ g.DialProxy=func(context.Context,string,string)(net.Conn,error){return client,nil}
+ ctx,cancel:=context.WithCancel(context.Background())
+ done:=make(chan error,1)
+ go func(){
+  _,err:=g.DialContext(ctx,"tcp",netip.MustParseAddrPort("1.1.1.1:443"))
+  done<-err
+ }()
+ // Read headers but never respond; cancel while waiting for CONNECT status.
+ rd:=bufio.NewReader(upstream)
+ for {
+  line,err:=rd.ReadString('\n')
+  if err!=nil{t.Fatal(err)}
+  if line=="\r\n"{break}
+ }
+ cancel()
+ select {
+ case err:=<-done:
+  if err==nil{t.Fatal("cancelled handshake unexpectedly succeeded")}
+ case <-time.After(time.Second):
+  t.Fatal("cancelled proxy handshake did not stop")
+ }
 }
