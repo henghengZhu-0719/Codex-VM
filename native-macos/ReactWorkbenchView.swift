@@ -110,10 +110,14 @@ struct ReactWorkbenchView: NSViewRepresentable {
             guard ready, let web else { return }
             let vms = model.machines.map { vm -> [String: Any] in
                 let project = model.vmMounts[vm.name]?.first?.location ?? ""
+                let guestMounts = (model.vmMounts[vm.name] ?? []).map { m in
+                    ["location": m.location, "guestPath": m.guestPath, "writable": m.writable] as [String: Any]
+                }
                 return [
                     "name":vm.name, "displayName":model.displayName(for: vm),
                     "status":vm.status, "cpus":vm.cpus, "memory":vm.memory, "disk":vm.disk,
-                    "projectPath":project, "standalone":project.hasPrefix(NSHomeDirectory() + "/AgentVM-Workspaces/")
+                    "projectPath":project, "standalone":project.hasPrefix(NSHomeDirectory() + "/AgentVM-Workspaces/"),
+                    "guestMounts":guestMounts
                 ]
             }
             var usage: [String:[String:Double]] = [:]
@@ -140,7 +144,12 @@ struct ReactWorkbenchView: NSViewRepresentable {
                     ["id":$0.id, "host":$0.host, "port":$0.port,
                      "network":$0.network, "upload":$0.upload, "download":$0.download] as [String:Any]
                 },
-                "proxyUploadTotal":model.proxyUploadTotal, "proxyDownloadTotal":model.proxyDownloadTotal
+                "proxyUploadTotal":model.proxyUploadTotal, "proxyDownloadTotal":model.proxyDownloadTotal,
+                "codex":[
+                    "runningVM":model.codexRunningVM ?? "",
+                    "threads":model.codexThreadIds,
+                    "messages":model.codexMessages
+                ]
             ]
             if let p = model.proxyStatus { data["proxy"] = proxyData(p) }
             guard JSONSerialization.isValidJSONObject(data),
@@ -274,6 +283,26 @@ struct ReactWorkbenchView: NSViewRepresentable {
                       let label = payload["label"] as? String, label.count <= 80,
                       !label.unicodeScalars.contains(where: { $0.value < 0x20 }) else { break }
                 model.renameVM(vm, to:label)
+            case "codexRun":
+                guard let vmName = payload["vm"] as? String,
+                      let vm = model.machines.first(where: { $0.name == vmName && $0.status == "Running" }),
+                      let prompt = payload["prompt"] as? String,
+                      !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { break }
+                let workdir = payload["workdir"] as? String ?? "/mnt/agent-vm-shared"
+                let mode = payload["mode"] as? String ?? "default"
+                let resume = payload["resume"] as? Bool ?? true
+                model.runCodex(vm: vm, workdir: workdir, prompt: prompt, mode: mode, resume: resume)
+            case "codexStop":
+                model.stopCodex()
+            case "codexClear":
+                if let vmName = payload["vm"] as? String {
+                    model.clearCodexSession(vmName: vmName)
+                }
+            case "codexTerminal":
+                if let vmName = payload["vm"] as? String,
+                   let vm = model.machines.first(where: { $0.name == vmName && $0.status == "Running" }) {
+                    model.resumeSession(vm, agent: "codex")
+                }
             case "doctor":
                 model.doctor()
             case "openShared":

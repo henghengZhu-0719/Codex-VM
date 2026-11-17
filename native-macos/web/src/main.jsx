@@ -1,6 +1,6 @@
 import React, {useEffect,useMemo,useState,useRef} from 'react';
 import {createRoot} from 'react-dom/client';
-import {Monitor,Network,ChartNoAxesCombined,Settings2,Plus,Play,Square,Terminal,RefreshCw,MoreHorizontal,ShieldCheck,ShieldAlert,Activity,HardDrive,Cloud,FolderOpen,Clock3,ArrowRight,Power,Search,AlertTriangle,CheckCircle2,LoaderCircle} from 'lucide-react';
+import {Monitor,Network,ChartNoAxesCombined,Settings2,Plus,Play,Square,Terminal,RefreshCw,MoreHorizontal,ShieldCheck,ShieldAlert,Activity,HardDrive,Cloud,FolderOpen,Clock3,ArrowRight,Power,Search,AlertTriangle,CheckCircle2,LoaderCircle,Sparkles,Send,RotateCcw,PanelLeft} from 'lucide-react';
 import './style.css';
 
 const bridge = (action, payload = {}) => {
@@ -8,8 +8,8 @@ const bridge = (action, payload = {}) => {
   if (!host) { console.info('Preview mode: ', action); return; }
   host.postMessage({action, payload});
 };
-const blank = {vms:[], busy:false, proxy:null, quotas:{}, usage:{}, editors:{}, mounts:{}, error:'', proxyError:'', proxyMessage:'', buildStarted:false, buildComplete:false, buildStage:0};
-const tabs = [{id:'vms',label:'虚拟机',icon:Monitor},{id:'proxy',label:'网络代理',icon:Network},{id:'quota',label:'AI 额度',icon:ChartNoAxesCombined},{id:'settings',label:'设置',icon:Settings2}];
+const blank = {vms:[], busy:false, proxy:null, quotas:{}, usage:{}, editors:{}, mounts:{}, codex:{runningVM:'', threads:{}, messages:{}}, error:'', proxyError:'', proxyMessage:'', buildStarted:false, buildComplete:false, buildStage:0};
+const tabs = [{id:'vms',label:'虚拟机',icon:Monitor},{id:'codex',label:'Codex',icon:Sparkles},{id:'proxy',label:'网络代理',icon:Network},{id:'quota',label:'AI 额度',icon:ChartNoAxesCombined},{id:'settings',label:'设置',icon:Settings2}];
 function IconButton({title,children,onClick,disabled=false,danger=false}) {return <button className={'icon-button '+(danger?'danger':'')} title={title} aria-label={title} onClick={onClick} disabled={disabled}>{children}</button>;}
 function MoreMenu({children}) {
   const menu = useRef(null);
@@ -62,10 +62,29 @@ function formatSubUsage(usage) {
   return parts.length ? parts.join(' · ') : usage;
 }
 function QuotaBar({label,window:win}) {const left=win ? Math.max(0,Math.min(100,100-(win.used_percent??100))):null;return <div className="quota-bar"><div className="flex-between"><span>{label}</span><strong>{left===null?'未知':left+'%'}</strong></div><div className="bar"><div style={{width:(left??0)+'%'}} className={left!==null&&left<=15?'low':''}/></div><small>{win?.reset_after_seconds ? '约 '+Math.ceil(win.reset_after_seconds/3600)+' 小时后重置':''}</small></div>;}
+function QuotaChip({label,win}) {
+  const left=win ? Math.max(0,Math.min(100,100-(win.used_percent??100))) : null;
+  const tone=left===null?'':left<=15?'low':left<=35?'mid':'ok';
+  return <div className={'quota-chip '+tone}><div className="quota-chip-top"><span>{label}</span><strong>{left===null?'—':left+'%'}</strong></div><div className="quota-chip-bar"><div style={{width:(left??0)+'%'}}/></div></div>;
+}
+function RichText({text}) {
+  if (!text) return null;
+  const parts = text.split(/(```[\s\S]*?```)/g);
+  return <div className="codex-answer">{parts.map((part, idx) => {
+    if (part.startsWith('```') && part.endsWith('```')) {
+      const inner = part.slice(3, -3).replace(/^\w*\n/, '');
+      return <pre key={idx} className="codex-codeblock"><code>{inner}</code></pre>;
+    }
+    const inline = part.split(/(`[^`\n]+`)/g);
+    return <span key={idx}>{inline.map((seg, j) => seg.startsWith('`') && seg.endsWith('`')
+      ? <code key={j} className="codex-inline-code">{seg.slice(1, -1)}</code>
+      : seg)}</span>;
+  })}</div>;
+}
 function VMCard({vm,state,select}) {const running=vm.status==='Running';const editor=state.editors?.[vm.name];const quota=state.quotas[vm.name];const usage=state.usage[vm.name];const name=vm.displayName||vm.name;return <article className="vm-card">
 <div className="vm-head"><div className="vm-glyph"><Monitor size={20}/></div><div className="vm-name"><strong title={name}>{name}</strong><span>{vm.standalone?'共享工作区':vm.projectPath||'项目环境'}</span></div><div className={'status '+(running?'running':'')}><span className="status-dot"/>{running?'运行中':vm.status==='Stopped'?'已停止':vm.status}</div></div>
 <div className="metrics"><div><span>CPU</span><strong>{running&&usage?usage.cpu.toFixed(1)+'%':'—'}</strong></div><div><span>内存</span><strong>{running&&usage?Math.round(usage.used)+' / '+Math.round(usage.total)+' MB':'—'}</strong></div></div>
-<div className="quota-inline"><span>Codex 额度</span><div>{quota?.status==='ok' ? <><span>5h {quota.five_hour ? Math.max(0,Math.min(100,100-quota.five_hour.used_percent))+'%' : '—'}</span><span>7d {quota.weekly ? Math.max(0,Math.min(100,100-quota.weekly.used_percent))+'%' : '—'}</span></>:<span className="muted">{running?'暂无数据':'启动后查询'}</span>}</div></div>
+<div className="quota-inline"><span>Codex 额度</span><div className="quota-chips">{quota?.status==='ok' ? <><QuotaChip label="5h" win={quota.five_hour}/><QuotaChip label="7d" win={quota.weekly}/></>:<span className="muted">{running?'暂无数据':'启动后查询'}</span>}</div></div>
 {running&&<div className="web-code-row"><span>Web Code</span>{editor?.status==='ready'?<><button className="web-code-link" onClick={()=>bridge('codeOpen',{name:vm.name})}>{editor.url}</button></>:editor?.status==='error'?<button className="web-code-retry" title={editor.error} onClick={()=>bridge('codeRetry',{name:vm.name})}>重试</button>:<span className="muted">启动中…</span>}</div>}
 <div className="card-actions"><button className="secondary" onClick={()=>bridge('terminal',{name:vm.name})} disabled={!running}><Terminal size={15}/> 终端</button><button className="secondary" onClick={()=>bridge('resume',{name:vm.name,agent:'codex'})} disabled={!running}><Clock3 size={15}/> 恢复会话</button><div className="flex-fill"/><MoreMenu><button disabled={!running||editor?.status!=='ready'} onClick={()=>bridge('codeOpen',{name:vm.name})}>打开 Web Code</button><button disabled={!running} onClick={()=>bridge('resume',{name:vm.name,agent:'claude'})}>恢复 Claude 会话</button><button onClick={()=>select({type:'rename',vm})}>修改名称</button><button onClick={()=>select({type:'mounts',vm})}>管理共享文件夹</button><button onClick={()=>bridge('quota',{name:vm.name})} disabled={!running}>刷新额度</button><button className="danger-text" onClick={()=>select({type:'delete',vm})} disabled={running}>删除虚拟机</button></MoreMenu><IconButton title={running?'停止虚拟机':'启动虚拟机'} disabled={state.busy||(!running&&vm.status!=='Stopped')} onClick={()=>select({type:running?'stop':'start',vm})}>{running?<Square size={16}/>:<Play size={16}/>}</IconButton></div>
 </article>}
@@ -84,11 +103,58 @@ function App(){
   const [nodeFilter,setNodeFilter]=useState('');
   const [showAllNodes,setShowAllNodes]=useState(false);
   const [nodesExpanded,setNodesExpanded]=useState(false);
+  const [codexVM,setCodexVM]=useState('');
+  const [codexWorkdir,setCodexWorkdir]=useState('/mnt/agent-vm-shared');
+  const [codexCustomDir,setCodexCustomDir]=useState(false);
+  const [codexMode,setCodexMode]=useState('default');
+  const [codexPrompt,setCodexPrompt]=useState('');
+  const [sidebarCollapsed,setSidebarCollapsed]=useState(()=>{try{return localStorage.getItem('agentvm.sidebarCollapsed')==='1';}catch{return false;}});
+  const toggleSidebar=()=>setSidebarCollapsed(v=>{const n=!v;try{localStorage.setItem('agentvm.sidebarCollapsed',n?'1':'0');}catch{}return n;});
+  const codexEndRef=useRef(null);
   useEffect(()=>{window.agentVMReceive = obj=>setState(old=>({...old,...obj}));bridge('ready');return ()=>{delete window.agentVMReceive}},[]);
   useEffect(()=>{if(state.proxy && !proxyDirty)setProxyForm({proxy_mode:state.proxy.proxy_mode,managed_enabled:state.proxy.managed_enabled,use_proxy:state.proxy.use_proxy,custom_proxy_url:state.proxy.custom_proxy_url,dns_url:state.proxy.dns_url,port:state.proxy.port})},[state.proxy,proxyDirty]);
   const vms=useMemo(()=>state.vms.filter(v=>v.name!=='base'&&v.name!=='base-building'),[state.vms]);
   const visible=vms.filter(v=>(v.displayName||v.name).toLowerCase().includes(filter.toLowerCase()));
   const running=vms.filter(v=>v.status==='Running');
+  useEffect(()=>{
+    if(running.length && (!codexVM || !running.some(v=>v.name===codexVM))) {
+      setCodexVM(running[0].name);
+    }
+  },[running,codexVM]);
+  const codexState=state.codex||{runningVM:'',threads:{},messages:{}};
+  const codexMsgs=codexState.messages?.[codexVM]||[];
+  const codexThread=codexState.threads?.[codexVM]||'';
+  const codexBusy=!!codexState.runningVM;
+  const selectedCodexVM=running.find(v=>v.name===codexVM)||null;
+  const codexDirOptions=useMemo(()=>{
+    const seen=new Set();
+    const list=[];
+    const add=(path,label)=>{if(!path||seen.has(path))return;seen.add(path);list.push({path,label});};
+    for(const m of (selectedCodexVM?.guestMounts||[])){
+      const gp=m.guestPath||m.location;
+      if(!gp) continue;
+      if(gp==='/mnt/agent-vm-shared'){
+        add(gp,'共享目录 (/mnt/agent-vm-shared)');
+      }else{
+        const base=(m.location||gp).split('/').filter(Boolean).pop()||gp;
+        add(gp,`${base} (${gp} · ${m.writable?'读写':'只读'})`);
+      }
+    }
+    add('/mnt/agent-vm-shared','共享目录 (/mnt/agent-vm-shared)');
+    return list;
+  },[selectedCodexVM]);
+  useEffect(()=>{
+    if(!codexCustomDir && codexDirOptions.length && !codexDirOptions.some(o=>o.path===codexWorkdir)){
+      setCodexWorkdir(codexDirOptions[0].path);
+    }
+  },[codexDirOptions,codexCustomDir,codexWorkdir]);
+  useEffect(()=>{if(page==='codex') codexEndRef.current?.scrollIntoView({behavior:'smooth'});},[page,codexMsgs.length,codexBusy]);
+  const sendCodex=()=>{
+    const text=codexPrompt.trim();
+    if(!text||!codexVM||codexBusy) return;
+    setCodexPrompt('');
+    bridge('codexRun',{vm:codexVM,workdir:codexWorkdir,prompt:text,mode:codexMode,resume:true});
+  };
   const proxy=state.proxy;
   const nodes=useMemo(()=>(proxy?.sources||[]).flatMap(s=>(s.nodes||[]).map(n=>({...n,source:s.name}))),[proxy?.sources]);
   const activeNodeId=proxy?.route?.[0]||proxy?.selected||'';
@@ -105,16 +171,68 @@ function App(){
   const confirm=()=>{if(modal?.type==='stop'||modal?.type==='delete')bridge(modal.type,{name:modal.vm.name});if(modal?.type==='deleteSource')bridge('proxySourceDelete',{id:modal.source.id});if(modal?.type==='closeGate')bridge('proxyGateClose');setModal(null)};
   const submitCreate=()=>{bridge('create',{...create});setModal({type:'creating'})};
   return <div className="layout">
-  <aside className="sidebar"><div className="brand"><div className="brand-icon"><Monitor size={19}/></div><div className="brand-text"><strong>Agent VM</strong><span>DESKTOP</span></div></div>
-  <div className="nav-label">工作空间</div><nav>{tabs.map(t=><button key={t.id} className={'nav-item '+(page===t.id?'selected':'')} onClick={()=>setPage(t.id)}><t.icon size={17}/>{t.label}{t.id==='vms'&&<span className="nav-count">{vms.length}</span>}</button>)}</nav>
+  <aside className={'sidebar'+(sidebarCollapsed?' collapsed':'')}><div className="brand"><div className="brand-icon"><Monitor size={19}/></div><div className="brand-text"><strong>Agent VM</strong><span>DESKTOP</span></div></div>
+  <div className="nav-label">工作空间</div><nav>{tabs.map(t=><button key={t.id} title={t.label} className={'nav-item '+(page===t.id?'selected':'')} onClick={()=>setPage(t.id)}><t.icon size={17}/><span className="nav-text">{t.label}</span>{t.id==='vms'&&<span className="nav-count">{vms.length}</span>}</button>)}</nav>
   <div className="sidebar-bottom"><div className="sidebar-separator"/><div className="small-label">运行概览</div><div className="side-status"><span className="status-dot active"/><span>{running.length} 台虚拟机运行中</span></div><div className="side-status"><span className={'status-dot '+(proxy?.use_proxy?'active':'')}/><span>代理 {proxy?.use_proxy?'已配置':'未启用'}</span></div><button className="sidebar-refresh" onClick={()=>bridge('refresh')}><RefreshCw size={14}/> 刷新状态</button></div></aside>
-  <main className="main"><div className="topbar"><div className="breadcrumbs">工作空间 <span>/</span> {tabs.find(x=>x.id===page)?.label}</div><div className="top-right"><span className="live-marker"><span className="status-dot active"/> 本地运行</span><IconButton title="刷新当前页面" disabled={state.busy||state.proxyBusy} onClick={()=>bridge(refreshAction)}><RefreshCw size={15} className={state.busy||state.proxyBusy?'spin':''}/></IconButton></div></div>
-  <div className="content">
+  <main className="main"><div className="topbar"><div className="top-left"><IconButton title={sidebarCollapsed?'展开侧边栏':'收起侧边栏'} onClick={toggleSidebar}><PanelLeft size={16}/></IconButton><div className="breadcrumbs">工作空间 <span>/</span> {tabs.find(x=>x.id===page)?.label}</div></div><div className="top-right"><span className="live-marker"><span className="status-dot active"/> 本地运行</span><IconButton title="刷新当前页面" disabled={state.busy||state.proxyBusy} onClick={()=>bridge(refreshAction)}><RefreshCw size={15} className={state.busy||state.proxyBusy?'spin':''}/></IconButton></div></div>
+  <div className={'content'+(page==='codex'?' codex-content':'')}>
   {page==='vms'&&<><SectionTitle title="虚拟机" sub="隔离运行 AI Agent，统一管理资源、会话与项目环境。"><button className="primary" onClick={()=>setModal({type:'create'})}><Plus size={17}/> 新建虚拟机</button></SectionTitle>
   <div className="stat-grid"><div className="stat"><span>虚拟机总数</span><strong>{vms.length}</strong><small>已创建实例</small></div><div className="stat"><span>正在运行</span><strong>{running.length}</strong><small>活跃工作环境</small></div><div className="stat"><span>已停止</span><strong>{vms.length-running.length}</strong><small>不运行来宾进程</small></div></div>
   <div className="section-row"><h2>所有虚拟机 <span>{visible.length}</span></h2><label className="search"><Search size={15}/><input value={filter} onChange={e=>setFilter(e.target.value)} placeholder="搜索虚拟机"/></label></div>
   {visible.length?<div className="vm-grid">{visible.map(v=><VMCard key={v.name} vm={v} state={state} select={({type,vm})=>{if(type==='rename'){setRenameText(v.displayName===v.name?'':v.displayName);setModal({type,vm})}else if(type==='mounts'){setModal({type,vm})}else act(type,vm)}}/>)}</div>:<div className="empty"><Monitor size={30}/><strong>暂无匹配的虚拟机</strong><span>点击「新建虚拟机」开始创建。</span></div>}
   {state.buildStarted&&<div className="notice"><LoaderCircle size={16}/> {state.buildComplete?'创建完成':'正在准备虚拟机 · 阶段 '+state.buildStage}</div>}</>}
+  {page==='codex'&&<div className="codex-page">
+  <div className="codex-header">
+    <div><h1>Codex 工作台</h1><p>在运行中的虚拟机内直接执行任务、查看命令与文件变更</p></div>
+    <div className="heading-actions">
+      <button className="secondary" disabled={!codexVM||codexBusy||codexMsgs.length===0} onClick={()=>bridge('codexClear',{vm:codexVM})}><RotateCcw size={14}/> 新对话</button>
+      <button className="secondary" disabled={!codexVM} onClick={()=>bridge('codexTerminal',{vm:codexVM})}><Terminal size={14}/> 终端接管</button>
+    </div>
+  </div>
+  {running.length===0?<div className="empty" style={{flex:1}}><Sparkles size={30}/><strong>暂无运行中的虚拟机</strong><span>请先在「虚拟机」页面启动至少一台虚拟机。</span><button className="primary" onClick={()=>setPage('vms')}>前往虚拟机列表</button></div>:
+  <div className="codex-shell">
+    <div className="codex-toolbar">
+      <label className="codex-pill"><Monitor size={13}/><select value={codexVM} onChange={e=>{setCodexVM(e.target.value);setCodexCustomDir(false);}} disabled={codexBusy}>{running.map(v=><option key={v.name} value={v.name}>{v.displayName||v.name}</option>)}</select></label>
+      <label className="codex-pill codex-pill-grow"><FolderOpen size={13}/><select value={codexCustomDir?'__custom__':codexWorkdir} onChange={e=>{if(e.target.value==='__custom__'){setCodexCustomDir(true);}else{setCodexCustomDir(false);setCodexWorkdir(e.target.value);}}} disabled={codexBusy}>{codexDirOptions.map(o=><option key={o.path} value={o.path}>{o.label}</option>)}<option value="__custom__">自定义路径…</option></select></label>
+      {codexCustomDir&&<input className="codex-custom-input" value={codexWorkdir} onChange={e=>setCodexWorkdir(e.target.value)} placeholder="/mnt/agent-vm-shared/..." disabled={codexBusy}/>}
+      <label className="codex-pill"><ShieldCheck size={13}/><select value={codexMode} onChange={e=>setCodexMode(e.target.value)} disabled={codexBusy}><option value="default">VM 默认配置</option><option value="full-auto">自动沙盒</option><option value="read-only">只读模式</option><option value="bypass">完全放行</option></select></label>
+    </div>
+    <div className="codex-feed">
+      {codexMsgs.length===0&&<div className="codex-empty">
+        <div className="codex-empty-badge"><Sparkles size={22}/></div>
+        <strong>在虚拟机中运行 Codex</strong>
+        <span>当前目标：{selectedCodexVM?.displayName||codexVM} · {codexWorkdir||'/mnt/agent-vm-shared'}</span>
+      </div>}
+      {codexMsgs.map(m=><div key={m.id} className={'codex-msg '+m.role}>
+        {m.role==='user'?<div className="codex-bubble-user">{m.text}</div>:
+        <div className="codex-turn-ai">
+          <div className="codex-ai-head"><span className="codex-ai-avatar"><Sparkles size={12}/></span><strong>Codex</strong>{m.status==='running'&&<span className="codex-ai-live"><LoaderCircle size={12} className="spin"/> 执行中</span>}</div>
+          {(m.items||[]).length>0&&<div className="codex-steps">{m.items.map(it=><details key={it.id} className="codex-step" open={it.status==='in_progress'}>
+            <summary>
+              <span className={'codex-step-tag '+(it.type||'')}>{it.type==='reasoning'?'思考':it.type==='command_execution'?'命令':it.type==='file_change'?'文件':it.type||'步骤'}</span>
+              <span className="codex-step-title">{it.command||it.text?.slice(0,80)||(it.changes?`${it.changes.length} 个文件变更`:it.type)}</span>
+              {it.exit_code!==undefined&&<small className={it.exit_code===0?'ok':'bad'}>exit {it.exit_code}</small>}
+              {it.status==='in_progress'&&<LoaderCircle size={13} className="spin"/>}
+            </summary>
+            {it.text&&<pre className="codex-step-body">{it.text}</pre>}
+            {it.output&&<pre className="codex-step-body">{it.output}</pre>}
+            {it.changes&&<div className="codex-changes">{it.changes.map((c,i)=><div key={i}><code>{c.kind}</code> {c.path}</div>)}</div>}
+          </details>)}</div>}
+          {m.text&&<RichText text={m.text}/>}
+          {m.error&&<div className="notice error" style={{margin:'4px 0 0'}}><AlertTriangle size={15}/>{m.error}</div>}
+          {m.usage&&<div className="codex-usage">Token · 输入 {m.usage.input_tokens||0} · 缓存 {m.usage.cached_input_tokens||0} · 输出 {m.usage.output_tokens||0}</div>}
+        </div>}
+      </div>)}
+      <div ref={codexEndRef}/>
+    </div>
+    <div className="codex-composer">
+      <textarea rows={2} value={codexPrompt} onChange={e=>setCodexPrompt(e.target.value)} onKeyDown={e=>{if(e.key==='Enter'&&!e.shiftKey&&!e.nativeEvent.isComposing){e.preventDefault();sendCodex();}}} placeholder="向虚拟机里的 Codex 发送任务指令…（Enter 发送，Shift+Enter 换行）"/>
+      <div className="codex-composer-foot">
+        <span className="codex-session-pill">{codexThread?`继续会话 · ${codexThread.slice(0,8)}`:'新会话'}</span>
+        {codexBusy?<button className="danger-button" onClick={()=>bridge('codexStop')}><Square size={13}/> 停止</button>:<button className="primary" disabled={!codexPrompt.trim()} onClick={sendCodex}><Send size={13}/> 发送</button>}
+      </div>
+    </div>
+  </div>}</div>}
   {page==='quota'&&<><SectionTitle title="AI 额度" sub="查看每台运行中虚拟机的 Codex 额度和重置状态。"><button className="secondary" onClick={()=>bridge('refreshQuotas')}><RefreshCw size={16}/> 刷新额度</button></SectionTitle>
   <div className="info-strip"><Activity size={17}/> 数据从各虚拟机内部查询；登录状态、网络和服务限制可能影响结果。</div>
   <div className="quota-grid">{vms.map(vm=>{const q=state.quotas[vm.name];return <section className="panel" key={vm.name}><div className="flex-between"><strong>{vm.displayName||vm.name}</strong><span className="muted">{q?.plan_type?.toUpperCase()||'Codex'}</span></div>{q?.status==='ok'?<><QuotaBar label="5 小时窗口" window={q.five_hour}/><QuotaBar label="每周窗口" window={q.weekly}/><p className="muted text-xs">查询于 {q.fetchedAt||'最近一次刷新'}</p></>:<p className="muted">{q?.error|| (vm.status==='Running'?'正在等待额度数据':'虚拟机已停止')}</p>}<button className="small-button" disabled={vm.status!=='Running'} onClick={()=>bridge('quota',{name:vm.name})}><RefreshCw size={13}/> 刷新该实例</button></section>})}</div></>}

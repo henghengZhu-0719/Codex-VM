@@ -124,6 +124,10 @@ struct CodexQuotaStatus: Decodable {
     @Published var quotaPolling: Set<String> = []
     @Published var lastQuotaPollAt: Date?
     @Published var codeEditors: [String: CodeEditorState] = [:]
+    @Published var codexRunningVM: String? = nil
+    @Published var codexThreadIds: [String: String] = [:]
+    @Published var codexMessages: [String: [[String: Any]]] = [:]
+    private var codexProcess: Process?
     private let codeEditorManager = CodeEditorManager()
     private var terminationObserver: NSObjectProtocol?
     private var quotaTimer: Timer?
@@ -136,7 +140,10 @@ struct CodexQuotaStatus: Decodable {
         executable = ProcessInfo.processInfo.environment["AGENT_VM_BINARY"] ?? (FileManager.default.isExecutableFile(atPath: bundled) ? bundled : Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("bin/agent-vm").path)
         codeEditorManager.onChange = { [weak self] states in self?.codeEditors = states }
         terminationObserver = NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.codeEditorManager.stopAll() }
+            MainActor.assumeIsolated {
+                self?.codeEditorManager.stopAll()
+                self?.stopCodex()
+            }
         }
         refresh()
         refreshProxyStatus()
@@ -574,6 +581,231 @@ cat /var/lib/agent-vm-region/status
     func resumeSession(_ vm: VM, agent: String) {
         guard vm.status == "Running", ["codex", "claude"].contains(agent) else { return }
         terminal(vm, resumeAgent: agent)
+    }
+    func stopCodex() {
+        if let proc = codexProcess, proc.isRunning {
+            proc.terminate()
+        }
+        codexProcess = nil
+        codexRunningVM = nil
+    }
+    func clearCodexSession(vmName: String) {
+        guard codexRunningVM != vmName else { return }
+        codexThreadIds.removeValue(forKey: vmName)
+        codexMessages.removeValue(forKey: vmName)
+    }
+    func runCodex(vm: VM, workdir: String, prompt: String, mode: String, resume: Bool) {
+        let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard vm.status == "Running", !trimmed.isEmpty, codexRunningVM == nil else { return }
+        let state = ProcessInfo.processInfo.environment["AGENT_VM_STATE_DIR"] ?? NSHomeDirectory() + "/.agent-vm"
+        let lima = ProcessInfo.processInfo.environment["AGENT_VM_LIMA_HOME"] ?? state + "/lima"
+        let config = URL(fileURLWithPath: lima).appendingPathComponent(vm.name).appendingPathComponent("ssh.config").path
+        guard FileManager.default.fileExists(atPath: config) else {
+            operationFailed = true
+            output = "找不到该虚拟机的 SSH 配置，请启动虚拟机后刷新。"
+            return
+        }
+        func quote(_ value: String) -> String {
+            "'" + value.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
+        }
+        let targetDir = workdir.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "/mnt/agent-vm-shared" : workdir.trimmingCharacters(in: .whitespacesAndNewlines)
+        let modeFlags: String
+        switch mode {
+        case "full-auto": modeFlags = "--full-auto"
+        case "read-only": modeFlags = "-s read-only"
+        case "bypass": modeFlags = "--dangerously-bypass-approvals-and-sandbox"
+        default: modeFlags = ""
+        }
+        let threadId = resume ? (codexThreadIds[vm.name] ?? "") : ""
+        let codexCmd: String
+        if !threadId.isEmpty {
+            codexCmd = "codex exec resume \(quote(threadId)) --json --skip-git-repo-check \(modeFlags) -"
+        } else {
+            codexCmd = "codex exec --json --skip-git-repo-check \(modeFlags) -"
+        }
+        let remoteCmd = "cd -- \(quote(targetDir)) && exec zsh -lc \(quote(codexCmd))"
+
+        let userMsgId = UUID().uuidString
+        let assistantMsgId = UUID().uuidString
+        var list = codexMessages[vm.name] ?? []
+        list.append(["id": userMsgId, "role": "user", "text": trimmed, "status": "done"])
+        list.append(["id": assistantMsgId, "role": "assistant", "text": "", "items": [[String: Any]](), "status": "running"])
+        codexMessages[vm.name] = list
+        codexRunningVM = vm.name
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+        process.arguments = ["-F", config, "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
+                             "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=3",
+                             "lima-" + vm.name, remoteCmd]
+        let stdinPipe = Pipe()
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.standardInput = stdinPipe
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+        codexProcess = process
+
+        final class StreamBuffers: @unchecked Sendable {
+            let lock = NSLock()
+            var out = Data()
+            var err = Data()
+        }
+        let buffers = StreamBuffers()
+
+        stdoutPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let chunk = handle.availableData
+            if chunk.isEmpty {
+                handle.readabilityHandler = nil
+                return
+            }
+            buffers.lock.lock()
+            buffers.out.append(chunk)
+            var lines: [String] = []
+            while let nl = buffers.out.firstIndex(of: 0x0a) {
+                let lineData = buffers.out.subdata(in: buffers.out.startIndex..<nl)
+                buffers.out.removeSubrange(buffers.out.startIndex...nl)
+                if let line = String(data: lineData, encoding: .utf8), !line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    lines.append(line)
+                }
+            }
+            buffers.lock.unlock()
+            if !lines.isEmpty {
+                DispatchQueue.main.async {
+                    for line in lines {
+                        self?.applyCodexEventLine(vmName: vm.name, assistantMsgId: assistantMsgId, line: line)
+                    }
+                }
+            }
+        }
+
+        stderrPipe.fileHandleForReading.readabilityHandler = { handle in
+            let chunk = handle.availableData
+            if chunk.isEmpty {
+                handle.readabilityHandler = nil
+                return
+            }
+            buffers.lock.lock()
+            buffers.err.append(chunk)
+            buffers.lock.unlock()
+        }
+
+        process.terminationHandler = { [weak self] proc in
+            stdoutPipe.fileHandleForReading.readabilityHandler = nil
+            stderrPipe.fileHandleForReading.readabilityHandler = nil
+            buffers.lock.lock()
+            let remOut = buffers.out
+            let remErr = buffers.err
+            buffers.out.removeAll()
+            buffers.err.removeAll()
+            buffers.lock.unlock()
+
+            let tailLines = (String(data: remOut, encoding: .utf8) ?? "")
+                .components(separatedBy: .newlines)
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            let stderrText = (String(data: remErr, encoding: .utf8) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+
+            DispatchQueue.main.async {
+                guard let self else { return }
+                for line in tailLines {
+                    self.applyCodexEventLine(vmName: vm.name, assistantMsgId: assistantMsgId, line: line)
+                }
+                self.finishCodexMessage(vmName: vm.name, assistantMsgId: assistantMsgId, status: proc.terminationStatus, stderrText: stderrText)
+                if self.codexProcess === proc {
+                    self.codexProcess = nil
+                }
+                if self.codexRunningVM == vm.name {
+                    self.codexRunningVM = nil
+                }
+            }
+        }
+
+        do {
+            try process.run()
+            if let inputData = (trimmed + "\n").data(using: .utf8) {
+                stdinPipe.fileHandleForWriting.write(inputData)
+            }
+            try? stdinPipe.fileHandleForWriting.close()
+        } catch {
+            stdoutPipe.fileHandleForReading.readabilityHandler = nil
+            stderrPipe.fileHandleForReading.readabilityHandler = nil
+            codexProcess = nil
+            codexRunningVM = nil
+            finishCodexMessage(vmName: vm.name, assistantMsgId: assistantMsgId, status: 1, stderrText: "无法启动 SSH 进程：\(error.localizedDescription)")
+        }
+    }
+    private func applyCodexEventLine(vmName: String, assistantMsgId: String, line: String) {
+        guard let data = line.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let type = obj["type"] as? String else { return }
+        if type == "thread.started", let tid = obj["thread_id"] as? String, !tid.isEmpty {
+            codexThreadIds[vmName] = tid
+            return
+        }
+        guard var list = codexMessages[vmName],
+              let idx = list.firstIndex(where: { ($0["id"] as? String) == assistantMsgId }) else { return }
+        var msg = list[idx]
+
+        if type == "item.started" || type == "item.updated" || type == "item.completed",
+           let item = obj["item"] as? [String: Any] {
+            let itemType = item["type"] as? String ?? ""
+            if itemType == "agent_message" {
+                let text = item["text"] as? String ?? ""
+                if !text.isEmpty {
+                    msg["text"] = text
+                }
+            } else {
+                var items = msg["items"] as? [[String: Any]] ?? []
+                let itemId = item["id"] as? String ?? UUID().uuidString
+                var entry: [String: Any] = ["id": itemId, "type": itemType]
+                if let status = item["status"] as? String { entry["status"] = status }
+                if let text = item["text"] as? String { entry["text"] = text }
+                if let cmd = item["command"] as? String { entry["command"] = cmd }
+                if let out = item["aggregated_output"] as? String {
+                    entry["output"] = out.count > 4000 ? String(out.suffix(4000)) : out
+                }
+                if let exitCode = item["exit_code"] as? Int { entry["exit_code"] = exitCode }
+                if let changes = item["changes"] as? [[String: Any]] {
+                    entry["changes"] = changes.compactMap { c -> [String: String]? in
+                        guard let p = c["path"] as? String else { return nil }
+                        return ["path": p, "kind": (c["kind"] as? String) ?? "modify"]
+                    }
+                }
+                if let existing = items.firstIndex(where: { ($0["id"] as? String) == itemId }) {
+                    items[existing] = entry
+                } else {
+                    items.append(entry)
+                }
+                msg["items"] = items
+            }
+        } else if type == "turn.completed", let usage = obj["usage"] as? [String: Any] {
+            msg["usage"] = usage
+        } else if type == "turn.failed" || type == "error" {
+            let errObj = obj["error"] as? [String: Any]
+            let errMsg = (errObj?["message"] as? String) ?? (obj["message"] as? String) ?? "执行失败"
+            msg["error"] = errMsg
+            msg["status"] = "error"
+        }
+        list[idx] = msg
+        codexMessages[vmName] = list
+    }
+    private func finishCodexMessage(vmName: String, assistantMsgId: String, status: Int32, stderrText: String) {
+        guard var list = codexMessages[vmName],
+              let idx = list.firstIndex(where: { ($0["id"] as? String) == assistantMsgId }) else { return }
+        var msg = list[idx]
+        if status != 0 {
+            if (msg["error"] as? String ?? "").isEmpty {
+                msg["error"] = stderrText.isEmpty ? "Codex 退出码：\(status)" : stderrText
+            }
+            if (msg["status"] as? String) == "running" {
+                msg["status"] = "error"
+            }
+        } else if (msg["status"] as? String) == "running" {
+            msg["status"] = "done"
+        }
+        list[idx] = msg
+        codexMessages[vmName] = list
     }
     func terminal(_ vm: VM, resumeAgent: String? = nil) {
         let state = ProcessInfo.processInfo.environment["AGENT_VM_STATE_DIR"] ?? NSHomeDirectory() + "/.agent-vm"
