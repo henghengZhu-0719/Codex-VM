@@ -39,6 +39,7 @@ type ProbeResult struct {
 	ExitIP        string                `json:"exit_ip,omitempty"`
 	ExitIPError   string                `json:"exit_ip_error,omitempty"`
 	GateTriggered bool                  `json:"gate_triggered"`
+	GateCheckError string              `json:"gate_check_error,omitempty"`
 	Report        *netgate.SafetyReport `json:"report,omitempty"`
 	Error         string                `json:"error,omitempty"`
 }
@@ -202,7 +203,10 @@ func RunProbe(ctx context.Context, stateDir string, s Store) (ProbeResult, error
 		return res, err
 	}
 
-	reports, _ := TriggerGateCheck(ctx, stateDir)
+	reports, gateErr := TriggerGateCheck(ctx, stateDir)
+	if gateErr != nil {
+		res.GateCheckError = gateErr.Error()
+	}
 	if len(reports) > 0 {
 		rep := reports[0]
 		res.GateTriggered = true
