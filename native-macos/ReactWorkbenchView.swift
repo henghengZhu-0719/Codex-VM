@@ -36,6 +36,7 @@ struct ReactWorkbenchView: NSViewRepresentable {
         private weak var web: WKWebView?
         private var observation: AnyCancellable?
         private var ready = false
+        private let allowedRoot = Bundle.main.resourceURL?.appendingPathComponent("web", isDirectory: true).standardizedFileURL.path ?? ""
 
         init(model: Model) {
             self.model = model
@@ -52,7 +53,10 @@ struct ReactWorkbenchView: NSViewRepresentable {
                      decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
             // Never permit a remote page to load into this privileged bridge.
             let url = navigationAction.request.url
-            decisionHandler(url?.isFileURL == true || url?.scheme == "about" ? .allow : .cancel)
+            let local = url?.isFileURL == true &&
+                !allowedRoot.isEmpty &&
+                (url?.standardizedFileURL.path.hasPrefix(allowedRoot + "/") == true)
+            decisionHandler(local || url?.absoluteString == "about:blank" ? .allow : .cancel)
         }
 
         private func windowData(_ q: CodexWindowQuota?) -> [String: Any]? {
@@ -140,7 +144,10 @@ struct ReactWorkbenchView: NSViewRepresentable {
 
         func userContentController(_ userContentController: WKUserContentController,
                                    didReceive message: WKScriptMessage) {
-            guard message.name == "agentVM", let dict = message.body as? [String:Any],
+            guard message.frameInfo.isMainFrame,
+                  message.frameInfo.request.url?.isFileURL == true,
+                  message.frameInfo.request.url?.standardizedFileURL.path.hasPrefix(allowedRoot + "/") == true,
+                  message.name == "agentVM", let dict = message.body as? [String:Any],
                   let action = dict["action"] as? String else { return }
             let payload = dict["payload"] as? [String:Any] ?? [:]
             DispatchQueue.main.async { [weak self] in self?.handle(action, payload) }
