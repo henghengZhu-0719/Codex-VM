@@ -36,6 +36,14 @@ make
 
 本项目依赖 `third_party/` 中的本地补丁，请从源码构建，不能通过 `go install ...@latest` 构建。上游安装脚本和软件包提供的是上游版本，本仓库新增功能请使用这里的源码。
 
+## macOS 桌面界面（React + SwiftUI）
+
+主窗口采用 SwiftUI + WKWebView 原生外壳，内部由 React 实现虚拟机卡片、AI 额度、代理与设置页面；菜单栏由 SwiftUI 原生管理。底层 Go/Lima 虚拟机核心保持不变。视觉设计采用 [awesome-design-md](https://github.com/VoltAgent/awesome-design-md) 中 Apple 与 Linear 的设计原则。
+
+需要 **Node.js 22** 来构建 React 静态资源。运行中的 App 不需要 Node、Vite 服务或浏览器网络依赖。
+
+详细架构、构建方法与安全边界见 [React 桌面迁移说明](docs/react-desktop-migration.md)。
+
 ## macOS 客户端
 
 在 Apple Silicon Mac 上，从仓库根目录运行：
