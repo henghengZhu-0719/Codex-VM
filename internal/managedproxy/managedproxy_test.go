@@ -2,6 +2,7 @@ package managedproxy
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -240,4 +241,34 @@ func TestHostDownloadClientRejectsNonHTTPS(t *testing.T) {
 		t.Fatal("expected http subscription URL to be rejected")
 	}
 	_ = http.StatusOK
+}
+
+func TestTriggerGateCheckReportsUnreachableControls(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix socket control")
+	}
+	stateDir := t.TempDir()
+	dir := filepath.Join(stateDir, ".netgate-private", "netgate-unreachable")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// The record is discoverable, but no host control server is listening.
+	rec := netgate.ControlRecord{
+		Socket: filepath.Join(dir, "missing.sock"),
+		Token:  "test-token",
+	}
+	data, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "control.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reports, err := TriggerGateCheck(context.Background(), stateDir)
+	if err == nil || !strings.Contains(err.Error(), "netgate-unreachable") {
+		t.Fatalf("expected actionable gate-control error, got %v", err)
+	}
+	if len(reports) != 0 {
+		t.Fatalf("unexpected reports: %+v", reports)
+	}
 }
