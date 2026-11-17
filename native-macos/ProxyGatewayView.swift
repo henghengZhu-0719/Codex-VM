@@ -1057,7 +1057,7 @@ struct ProxyGatewayView: View {
                     }
 
                     if let error = probe.gateCheckError {
-                        Label("无法检查全部虚拟机网络门禁：\\(error)", systemImage: "exclamationmark.triangle.fill")
+                        Label("无法检查全部虚拟机网络门禁：\(error)", systemImage: "exclamationmark.triangle.fill")
                             .font(.caption).foregroundStyle(.red)
                             .textSelection(.enabled)
                     }
