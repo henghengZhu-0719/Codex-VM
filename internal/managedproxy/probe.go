@@ -138,13 +138,16 @@ func DiscoverGateControls(ctx context.Context, stateDir string) []GateInstance {
 func TriggerGateCheck(ctx context.Context, stateDir string) ([]netgate.SafetyReport, error) {
 	records := loadGateRecords(stateDir)
 	var reports []netgate.SafetyReport
+	var failures []error
 	for _, item := range records {
 		var rep netgate.SafetyReport
-		if err := callGateControl(ctx, item.rec, http.MethodPost, "/check", &rep); err == nil {
-			reports = append(reports, rep)
+		if err := callGateControl(ctx, item.rec, http.MethodPost, "/check", &rep); err != nil {
+			failures = append(failures, fmt.Errorf("%s: %w", filepath.Base(item.dir), err))
+			continue
 		}
+		reports = append(reports, rep)
 	}
-	return reports, nil
+	return reports, errors.Join(failures...)
 }
 
 func CloseAllGates(ctx context.Context, stateDir string) (int, error) {
