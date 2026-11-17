@@ -570,21 +570,16 @@ cat /var/lib/agent-vm-region/status
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
             let script = directory.appendingPathComponent("\(scriptName).command")
             var command = "exec /usr/bin/ssh -F \(quote(config)) -o ForwardAgent=no -o ForwardX11=no -tt \(quote("lima-" + vm.name))"
-            if let mount = vmMounts[vm.name]?.first {
-                let isStandalone = mount.location.hasPrefix(NSHomeDirectory() + "/AgentVM-Workspaces/")
-                let directory = isStandalone ? "/mnt/agent-vm-shared" : mount.guestPath
-                var remote: String
-                if let agent = resumeAgent, ["codex", "claude"].contains(agent) {
-                    // The VM always provides bash. -l loads the agent's login PATH,
-                    // -i preserves the interactive session chooser inside Terminal.
-                    remote = "cd -- " + quote(directory) + " && exec bash -lic " + quote(agent + " resume")
-                    if agent == "claude" {
-                        remote = "cd -- " + quote(directory) + " && exec bash -lic " + quote("claude --resume")
-                    }
-                } else {
-                    remote = "cd -- " + quote(directory) + " && exec \"$SHELL\" -l"
-                }
+            let mount = vmMounts[vm.name]?.first
+            let isStandalone = mount?.location.hasPrefix(NSHomeDirectory() + "/AgentVM-Workspaces/") == true
+            let guestDir = isStandalone ? "/mnt/agent-vm-shared" : (mount?.guestPath ?? "/mnt/agent-vm-shared")
+            if let agent = resumeAgent, ["codex", "claude"].contains(agent) {
+                // The CLI presents its own history selector. No live process is attached.
+                let resumeCommand = agent == "codex" ? "codex resume" : "claude --resume"
+                let remote = "cd -- " + quote(guestDir) + " && exec bash -lic " + quote(resumeCommand)
                 command += " " + quote(remote)
+            } else if mount != nil {
+                command += " " + quote("cd -- " + quote(guestDir) + " && exec \"$SHELL\" -l")
             }
             let setTitle = title.isEmpty ? "" : "printf '\\033]0;%s\\007' \(quote(title))\n"
             let contents = "#!/bin/sh\nrm -f -- \"$0\"\nrmdir -- \"$(dirname -- \"$0\")\" 2>/dev/null || true\n" + setTitle + command + "\n"
