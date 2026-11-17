@@ -48,6 +48,7 @@ struct CodexWindowQuota: Codable {
     }
 
     var remainingPercent: Int { max(0, min(100, 100 - usedPercent)) }
+    var isLow: Bool { remainingPercent <= 15 }
 }
 
 struct CodexQuotaStatus: Decodable {
@@ -541,7 +542,13 @@ cat /var/lib/agent-vm-region/status
         }
         managedFolders = folders
     }
-    func terminal(_ vm: VM) {
+    // Resume uses the agent's interactive history picker; never attaches to an
+    // unknown live process or guesses a session ID.
+    func resumeSession(_ vm: VM, agent: String) {
+        guard vm.status == "Running", ["codex", "claude"].contains(agent) else { return }
+        terminal(vm, resumeAgent: agent)
+    }
+    func terminal(_ vm: VM, resumeAgent: String? = nil) {
         let state = ProcessInfo.processInfo.environment["AGENT_VM_STATE_DIR"] ?? NSHomeDirectory() + "/.agent-vm"
         let lima = ProcessInfo.processInfo.environment["AGENT_VM_LIMA_HOME"] ?? state + "/lima"
         let config = URL(fileURLWithPath: lima).appendingPathComponent(vm.name).appendingPathComponent("ssh.config").path
@@ -566,7 +573,17 @@ cat /var/lib/agent-vm-region/status
             if let mount = vmMounts[vm.name]?.first {
                 let isStandalone = mount.location.hasPrefix(NSHomeDirectory() + "/AgentVM-Workspaces/")
                 let directory = isStandalone ? "/mnt/agent-vm-shared" : mount.guestPath
-                let remote = "cd -- " + quote(directory) + " && exec \"$SHELL\" -l"
+                var remote: String
+                if let agent = resumeAgent, ["codex", "claude"].contains(agent) {
+                    // The VM always provides bash. -l loads the agent's login PATH,
+                    // -i preserves the interactive session chooser inside Terminal.
+                    remote = "cd -- " + quote(directory) + " && exec bash -lic " + quote(agent + " resume")
+                    if agent == "claude" {
+                        remote = "cd -- " + quote(directory) + " && exec bash -lic " + quote("claude --resume")
+                    }
+                } else {
+                    remote = "cd -- " + quote(directory) + " && exec \"$SHELL\" -l"
+                }
                 command += " " + quote(remote)
             }
             let setTitle = title.isEmpty ? "" : "printf '\\033]0;%s\\007' \(quote(title))\n"
@@ -1063,6 +1080,12 @@ struct MachineRow: View {
                         Menu {
                             if vm.status == "Running" {
                                 Button("打开终端", systemImage: "terminal") { model.terminal(vm) }
+                                if !isBase {
+                                    Menu("恢复历史 AI 会话", systemImage: "clock.arrow.circlepath") {
+                                        Button("Codex…") { model.resumeSession(vm, agent: "codex") }
+                                        Button("Claude Code…") { model.resumeSession(vm, agent: "claude") }
+                                    }
+                                }
                                 Button("停止虚拟机", systemImage: "stop.fill") { model.stop(vm) }
                                     .disabled(model.busy)
                                 Divider()
@@ -1248,6 +1271,13 @@ struct MachineRow: View {
                             quotaPill(label: "每周", window: wk)
                         }
                     }
+                    if quota.fiveHour?.isLow == true || quota.weekly?.isLow == true {
+                        Label("额度偏低，请留意重置时间", systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption2).foregroundStyle(.orange)
+                    }
+                    if quota.fiveHour == nil && quota.weekly == nil {
+                        Text("服务未返回额度窗口").font(.caption2).foregroundStyle(.secondary)
+                    }
                 } else if quota.status == "not_logged_in" {
                     Text("VM 内 Codex 未登录").font(.caption).foregroundStyle(.secondary)
                 } else {
@@ -1256,6 +1286,11 @@ struct MachineRow: View {
             } else {
                 Text(vm.status == "Running" ? "正在获取额度…" : "启动后获取额度")
                     .font(.caption).foregroundStyle(.secondary)
+            }
+            if let fetched = quota?.fetchedAt {
+                Text("查询于 " + fetched.formatted(date: .omitted, time: .shortened) +
+                     (Date().timeIntervalSince(fetched) > 25 * 60 ? " · 数据可能已过期" : ""))
+                    .font(.caption2).foregroundStyle(.tertiary)
             }
         }
     }
@@ -1774,13 +1809,20 @@ private struct MenuBarControls: View {
     private var projects: [VM] {
         model.machines.filter { $0.name != "base" && $0.name != "base-building" }
     }
+    private var active: [VM] { projects.filter { $0.status == "Running" } }
     var body: some View {
+        Text("运行中 \(active.count) / \(projects.count) 台虚拟机")
         Button("打开 Agent VM", systemImage: "macwindow") {
             openWindow(id: "main")
             NSApp.activate(ignoringOtherApps: true)
         }
         Button("刷新虚拟机状态", systemImage: "arrow.clockwise") { model.refresh() }
             .disabled(model.busy)
+        Button("刷新 AI 额度", systemImage: "sparkles") { model.pollAllRunningQuotas() }
+            .disabled(active.isEmpty)
+        if let proxy = model.proxyStatus {
+            Text("代理：" + (proxy.useProxy ? (proxy.proxyMode == "mihomo" ? "Mihomo" : "自定义代理") : "未启用"))
+        }
         Divider()
         if projects.isEmpty {
             Text("暂无项目虚拟机")
@@ -1788,7 +1830,21 @@ private struct MenuBarControls: View {
             ForEach(projects) { vm in
                 Menu {
                     if vm.status == "Running" {
+                        if let quota = model.vmQuotas[vm.name], quota.status == "ok" {
+                            if let five = quota.fiveHour {
+                                Text("Codex 5 小时剩余 \(five.remainingPercent)%")
+                            }
+                            if let weekly = quota.weekly {
+                                Text("Codex 每周剩余 \(weekly.remainingPercent)%")
+                            }
+                        }
                         Button("打开终端", systemImage: "terminal") { model.terminal(vm) }
+                        Menu("恢复历史 AI 会话", systemImage: "clock.arrow.circlepath") {
+                            Button("Codex…") { model.resumeSession(vm, agent: "codex") }
+                            Button("Claude Code…") { model.resumeSession(vm, agent: "claude") }
+                        }
+                        Button("刷新 Codex 额度", systemImage: "arrow.clockwise") { model.pollQuota(for: vm) }
+                            .disabled(model.quotaPolling.contains(vm.name))
                         Button("停止", systemImage: "stop.fill") { model.stop(vm) }
                             .disabled(model.busy)
                     } else {
