@@ -1162,12 +1162,23 @@ struct MachineRow: View {
             Label("停止时不采集资源", systemImage: "pause.circle")
                 .font(.caption).foregroundStyle(.secondary)
         } else if let usage = model.vmUsage[vm.name] {
-            HStack(alignment: .top, spacing: 14) {
-                usageMeter(title: "CPU", value: String(format: "%.1f%%", usage.cpuPercent),
-                           percent: usage.cpuPercent, tint: .green)
-                usageMeter(title: "内存",
-                           value: String(format: "%.0f / %.0f MB", usage.usedMemoryMB, usage.totalMemoryMB),
-                           percent: usage.memoryPercent, tint: .blue)
+            VStack(alignment: .leading, spacing: 7) {
+                HStack(alignment: .top, spacing: 14) {
+                    usageMeter(title: "CPU", value: String(format: "%.1f%%", usage.cpuPercent),
+                               percent: usage.cpuPercent, tint: usage.cpuPercent >= 90 ? .orange : .green)
+                    usageMeter(title: "内存",
+                               value: String(format: "%.0f / %.0f MB", usage.usedMemoryMB, usage.totalMemoryMB),
+                               percent: usage.memoryPercent, tint: usage.memoryPercent >= 85 ? .orange : .blue)
+                }
+                if usage.memoryPercent >= 85 {
+                    Label("来宾内存使用较高。建议先检查运行进程；调整 VM 配额需要停止虚拟机。",
+                          systemImage: "exclamationmark.triangle")
+                        .font(.caption2).foregroundStyle(.orange)
+                } else if usage.cpuPercent >= 90 {
+                    Label("来宾 CPU 使用较高；此处显示的是虚拟机内部负载，不是 Mac 整机占用。",
+                          systemImage: "info.circle")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
             }
         } else {
             HStack(spacing: 6) {
