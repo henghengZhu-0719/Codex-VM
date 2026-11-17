@@ -12,7 +12,14 @@ printf '// duplicate module map masked for this build\n' > "$cache/empty.modulem
 cat > "$cache/overlay.yaml" <<OVERLAY
 { 'version': 0, 'roots': [ { 'type': 'file', 'name': '/Library/Developer/CommandLineTools/usr/include/swift/bridging.modulemap', 'external-contents': '$cache/empty.modulemap' } ] }
 OVERLAY
-xcrun swiftc -target arm64-apple-macos13 -module-cache-path "${AGENT_VM_SWIFT_MODULE_CACHE:-$cache/modules}" -vfsoverlay "$cache/overlay.yaml" -parse-as-library "$root/native-macos/AgentVMApp.swift" "$root/native-macos/ProxyGatewayView.swift" -o "$app/Contents/MacOS/AgentVM" -framework SwiftUI -framework AppKit
+# Build a static, offline frontend: the running app never starts a Vite server.
+web="$root/native-macos/web"
+if [ ! -d "$web/node_modules" ]; then
+  (cd "$web" && npm install --no-audit --no-fund)
+fi
+(cd "$web" && npm run build)
+test -f "$web/dist/index.html"
+xcrun swiftc -target arm64-apple-macos13 -module-cache-path "${AGENT_VM_SWIFT_MODULE_CACHE:-$cache/modules}" -vfsoverlay "$cache/overlay.yaml" -parse-as-library "$root/native-macos/AgentVMApp.swift" "$root/native-macos/ProxyGatewayView.swift" "$root/native-macos/ReactWorkbenchView.swift" -o "$app/Contents/MacOS/AgentVM" -framework SwiftUI -framework AppKit -framework WebKit -framework Combine
 cat > "$app/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -31,6 +38,8 @@ for mihomo_src in "$root/_output/bin/mihomo" "$root/_output/proxy-core/mihomo"; 
   fi
 done
 mkdir -p "$app/Contents/Resources"
+rm -rf "$app/Contents/Resources/web"
+cp -R "$web/dist" "$app/Contents/Resources/web"
 if [ -f "$root/native-macos/AppIcon.icns" ]; then
   cp "$root/native-macos/AppIcon.icns" "$app/Contents/Resources/AppIcon.icns"
 fi
