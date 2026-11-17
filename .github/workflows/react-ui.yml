@@ -1,0 +1,31 @@
+name: react-ui
+on:
+  push:
+    paths:
+      - 'native-macos/web/**'
+      - '.github/workflows/react-ui.yml'
+  pull_request:
+    paths:
+      - 'native-macos/web/**'
+      - '.github/workflows/react-ui.yml'
+permissions:
+  contents: read
+concurrency:
+  group: react-ui-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install dependencies
+        working-directory: native-macos/web
+        run: npm install --no-audit --no-fund
+      - name: Build static React desktop UI
+        working-directory: native-macos/web
+        run: npm run build
+      - name: Check bundle entry point
+        run: test -s native-macos/web/dist/index.html
