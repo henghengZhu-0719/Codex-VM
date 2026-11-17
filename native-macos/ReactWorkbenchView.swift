@@ -218,6 +218,10 @@ struct ReactWorkbenchView: NSViewRepresentable {
                 model.stopProxyCore()
             case "proxyProbe":
                 model.runGateProbe()
+            case "mount":
+                if let vm = existingVM(payload), !model.busy {
+                    model.addFolder(vm, writable:payload["writable"] as? Bool ?? true)
+                }
             case "doctor":
                 model.doctor()
             case "openShared":
