@@ -1860,7 +1860,8 @@ private struct MenuBarControls: View {
     @StateObject private var model = Model()
     var body: some Scene {
         WindowGroup("Agent VM", id: "main") {
-            ContentView(model: model)
+            ReactWorkbenchView(model: model)
+                .frame(minWidth: 920, minHeight: 640)
         }
         MenuBarExtra("Agent VM", systemImage: "desktopcomputer") {
             MenuBarControls(model: model)
