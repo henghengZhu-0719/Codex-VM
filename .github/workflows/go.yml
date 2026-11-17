@@ -77,6 +77,11 @@ jobs:
         if: runner.os != 'Windows'
         run: make agent-vm
 
+      # Compile the native SwiftUI frontend as part of CI, not just the Go CLI.
+      - name: Build native macOS app
+        if: runner.os == 'macOS'
+        run: sh native-macos/build.sh
+
       # No make there: built without the embedded files, whose tests skip.
       - name: Build
         if: runner.os == 'Windows'
