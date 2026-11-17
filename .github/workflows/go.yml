@@ -77,6 +77,12 @@ jobs:
         if: runner.os != 'Windows'
         run: make agent-vm
 
+      # React desktop asset pipeline requires a recent Node runtime.
+      - uses: actions/setup-node@v4
+        if: runner.os == 'macOS'
+        with:
+          node-version: '22'
+
       # Compile the native SwiftUI frontend as part of CI, not just the Go CLI.
       - name: Build native macOS app
         if: runner.os == 'macOS'
