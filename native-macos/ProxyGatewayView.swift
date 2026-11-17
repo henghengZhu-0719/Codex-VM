@@ -83,6 +83,7 @@ struct ProbeResultItem: Decodable {
     let exitIp: String?
     let exitIpError: String?
     let gateTriggered: Bool
+    let gateCheckError: String?
     let report: SafetyReportItem?
     let error: String?
 
@@ -94,6 +95,7 @@ struct ProbeResultItem: Decodable {
         case exitIp = "exit_ip"
         case exitIpError = "exit_ip_error"
         case gateTriggered = "gate_triggered"
+        case gateCheckError = "gate_check_error"
     }
 }
 
@@ -406,7 +408,7 @@ struct ProxyGatewayView: View {
         let checkText: String = {
             guard let probe = st?.lastProbe else { return "尚未执行自检" }
             if hasFailed { return "有失败项 · 请查看报告" }
-            if probe.error != nil { return "上次检查发生错误" }
+            if probe.error != nil || probe.gateCheckError != nil { return "门禁通信或自检发生错误 · 请查看报告" }
             if !checks.isEmpty && !hasUnknown { return "上次报告：已列检查通过（非完整安全保证）" }
             return "结果未完全确认"
         }()
@@ -1052,6 +1054,17 @@ struct ProxyGatewayView: View {
                                     .font(.caption.monospaced()).textSelection(.enabled)
                             }
                         }
+                    }
+
+                    if let error = probe.gateCheckError {
+                        Label("无法检查全部虚拟机网络门禁：\\(error)", systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption).foregroundStyle(.red)
+                            .textSelection(.enabled)
+                    }
+                    if let error = probe.error {
+                        Label(error, systemImage: "xmark.octagon.fill")
+                            .font(.caption).foregroundStyle(.red)
+                            .textSelection(.enabled)
                     }
 
                     if let checks = probe.report?.safeChecks, !checks.isEmpty {
