@@ -1858,10 +1858,17 @@ private struct MenuBarControls: View {
 
 @main struct AgentVMApp: App {
     @StateObject private var model = Model()
+    @Environment(\.scenePhase) private var scenePhase
     var body: some Scene {
         WindowGroup("Agent VM", id: "main") {
             ReactWorkbenchView(model: model)
                 .frame(minWidth: 920, minHeight: 640)
+                .onChange(of: scenePhase) { phase in
+                    if phase == .active {
+                        model.refresh()
+                        model.refreshProxyStatus()
+                    }
+                }
         }
         MenuBarExtra("Agent VM", systemImage: "desktopcomputer") {
             MenuBarControls(model: model)
