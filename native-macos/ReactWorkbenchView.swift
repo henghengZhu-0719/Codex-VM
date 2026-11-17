@@ -18,7 +18,6 @@ struct ReactWorkbenchView: NSViewRepresentable {
         config.preferences.javaScriptCanOpenWindowsAutomatically = false
         let web = WKWebView(frame: .zero, configuration: config)
         web.navigationDelegate = context.coordinator
-        web.setValue(false, forKey: "drawsBackground")
         context.coordinator.attach(web)
         if let root = Bundle.main.url(forResource: "index", withExtension: "html", subdirectory: "web") {
             web.loadFileURL(root, allowingReadAccessTo: root.deletingLastPathComponent())
