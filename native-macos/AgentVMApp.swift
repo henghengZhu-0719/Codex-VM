@@ -94,7 +94,7 @@ struct CodexQuotaStatus: Decodable {
     @Published var busy = false
     @Published var project = ""
     @Published var newVMName = ""
-    @Published var includeCodeServer = false
+    @Published var includeCodeServer = true
     @Published var rebuildBase = false
     @Published var reusedBase = false
     @Published var useProxy = UserDefaults.standard.object(forKey: "useProxy") as? Bool ?? true
@@ -123,6 +123,9 @@ struct CodexQuotaStatus: Decodable {
     @Published var usageErrors: Set<String> = []
     @Published var quotaPolling: Set<String> = []
     @Published var lastQuotaPollAt: Date?
+    @Published var codeEditors: [String: CodeEditorState] = [:]
+    private let codeEditorManager = CodeEditorManager()
+    private var terminationObserver: NSObjectProtocol?
     private var quotaTimer: Timer?
     private var usageTimer: Timer?
     private var usagePolling: Set<String> = []
@@ -131,6 +134,10 @@ struct CodexQuotaStatus: Decodable {
     init() {
         let bundled = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/agent-vm").path
         executable = ProcessInfo.processInfo.environment["AGENT_VM_BINARY"] ?? (FileManager.default.isExecutableFile(atPath: bundled) ? bundled : Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("bin/agent-vm").path)
+        codeEditorManager.onChange = { [weak self] states in self?.codeEditors = states }
+        terminationObserver = NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.codeEditorManager.stopAll() }
+        }
         refresh()
         refreshProxyStatus()
         quotaTimer = Timer.scheduledTimer(withTimeInterval: 20 * 60, repeats: true) { [weak self] _ in
@@ -141,6 +148,7 @@ struct CodexQuotaStatus: Decodable {
         usageTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.pollRunningUsage()
+                self?.refreshCodeEditors()
             }
         }
     }
@@ -437,6 +445,7 @@ cat /var/lib/agent-vm-region/status
                 return VM(name: parts[0], status: parts[1], ssh: parts[2], vmType: parts[3], arch: parts[4], cpus: parts[5], memory: parts[6], disk: parts[7])
             }
             let runningNames = Set(self.machines.filter { $0.status == "Running" }.map(\.name))
+            self.codeEditorManager.retain(runningNames)
             self.vmUsage = self.vmUsage.filter { runningNames.contains($0.key) }
             self.usageErrors = self.usageErrors.filter { runningNames.contains($0) }
             self.pollRunningUsage()
@@ -444,6 +453,7 @@ cat /var/lib/agent-vm-region/status
                 self.run(["vm-mounts", vm.name]) { code, text in
                     if code == 0, let data = text.data(using: .utf8), let mounts = try? JSONDecoder().decode([ProjectMount]?.self, from: data) {
                         self.vmMounts[vm.name] = mounts
+                        self.prepareCodeEditor(vm)
                     }
                 }
                 if vm.status == "Running", vm.name != "base", vm.name != "base-building", self.vmQuotas[vm.name] == nil {
@@ -452,6 +462,23 @@ cat /var/lib/agent-vm-region/status
             }
             self.refreshManagedFolders()
         }
+    }
+    func refreshCodeEditors() {
+        for vm in machines where vm.status == "Running" { prepareCodeEditor(vm) }
+    }
+    func prepareCodeEditor(_ vm: VM, retry: Bool = false) {
+        guard vm.status == "Running", vm.name != "base", vm.name != "base-building",
+              let mount = vmMounts[vm.name]?.first else { return }
+        let state = ProcessInfo.processInfo.environment["AGENT_VM_STATE_DIR"] ?? NSHomeDirectory() + "/.agent-vm"
+        let lima = ProcessInfo.processInfo.environment["AGENT_VM_LIMA_HOME"] ?? state + "/lima"
+        let config = URL(fileURLWithPath: lima).appendingPathComponent(vm.name).appendingPathComponent("ssh.config").path
+        let directory = mount.location.hasPrefix(NSHomeDirectory() + "/AgentVM-Workspaces/") ? "/mnt/agent-vm-shared" : mount.guestPath
+        codeEditorManager.ensure(name: vm.name, config: config, directory: directory, retry: retry)
+    }
+    func openCodeEditor(_ vm: VM) {
+        guard vm.status == "Running", let editor = codeEditors[vm.name], editor.status == "ready",
+              let url = URL(string: editor.url) else { prepareCodeEditor(vm, retry: true); return }
+        NSWorkspace.shared.open(url)
     }
     func pollRunningUsage() {
         for vm in machines where vm.status == "Running" && vm.name != "base" && vm.name != "base-building" {

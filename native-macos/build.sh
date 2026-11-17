@@ -19,7 +19,7 @@ if [ ! -d "$web/node_modules" ]; then
 fi
 (cd "$web" && npm run build)
 test -f "$web/dist/index.html"
-xcrun swiftc -target arm64-apple-macos13 -module-cache-path "${AGENT_VM_SWIFT_MODULE_CACHE:-$cache/modules}" -vfsoverlay "$cache/overlay.yaml" -parse-as-library "$root/native-macos/AgentVMApp.swift" "$root/native-macos/ProxyGatewayView.swift" "$root/native-macos/ReactWorkbenchView.swift" -o "$app/Contents/MacOS/AgentVM" -framework SwiftUI -framework AppKit -framework WebKit -framework Combine
+xcrun swiftc -target arm64-apple-macos13 -module-cache-path "${AGENT_VM_SWIFT_MODULE_CACHE:-$cache/modules}" -vfsoverlay "$cache/overlay.yaml" -parse-as-library "$root/native-macos/AgentVMApp.swift" "$root/native-macos/ProxyGatewayView.swift" "$root/native-macos/ReactWorkbenchView.swift" "$root/native-macos/CodeEditor.swift" -o "$app/Contents/MacOS/AgentVM" -framework SwiftUI -framework AppKit -framework WebKit -framework Combine
 cat > "$app/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

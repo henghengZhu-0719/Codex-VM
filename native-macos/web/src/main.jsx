@@ -1,4 +1,4 @@
-import React, {useEffect,useMemo,useState} from 'react';
+import React, {useEffect,useMemo,useState,useRef} from 'react';
 import {createRoot} from 'react-dom/client';
 import {Monitor,Network,ChartNoAxesCombined,Settings2,Plus,Play,Square,Terminal,RefreshCw,MoreHorizontal,ShieldCheck,ShieldAlert,Activity,HardDrive,Cloud,FolderOpen,Clock3,ArrowRight,Power,Search,AlertTriangle,CheckCircle2,LoaderCircle} from 'lucide-react';
 import './style.css';
@@ -8,16 +8,42 @@ const bridge = (action, payload = {}) => {
   if (!host) { console.info('Preview mode: ', action); return; }
   host.postMessage({action, payload});
 };
-const blank = {vms:[], busy:false, proxy:null, quotas:{}, usage:{}, mounts:{}, error:'', proxyError:'', proxyMessage:'', buildStarted:false, buildComplete:false, buildStage:0};
+const blank = {vms:[], busy:false, proxy:null, quotas:{}, usage:{}, editors:{}, mounts:{}, error:'', proxyError:'', proxyMessage:'', buildStarted:false, buildComplete:false, buildStage:0};
 const tabs = [{id:'vms',label:'虚拟机',icon:Monitor},{id:'proxy',label:'网络代理',icon:Network},{id:'quota',label:'AI 额度',icon:ChartNoAxesCombined},{id:'settings',label:'设置',icon:Settings2}];
 function IconButton({title,children,onClick,disabled=false,danger=false}) {return <button className={'icon-button '+(danger?'danger':'')} title={title} aria-label={title} onClick={onClick} disabled={disabled}>{children}</button>;}
+function MoreMenu({children}) {
+  const menu = useRef(null);
+  useEffect(() => {
+    const closeOutside = event => {
+      if (menu.current?.open && !menu.current.contains(event.target)) menu.current.open = false;
+    };
+    const closeEscape = event => {
+      if (event.key === 'Escape' && menu.current?.open) {
+        menu.current.open = false;
+        menu.current.querySelector('summary')?.focus();
+      }
+    };
+    document.addEventListener('pointerdown', closeOutside, true);
+    document.addEventListener('keydown', closeEscape);
+    return () => {
+      document.removeEventListener('pointerdown', closeOutside, true);
+      document.removeEventListener('keydown', closeEscape);
+    };
+  }, []);
+  const closeAction = event => {
+    const button = event.target.closest('button');
+    if (button && !button.disabled) menu.current.open = false;
+  };
+  return <details ref={menu} className="card-more"><summary title="更多操作" aria-label="更多操作"><MoreHorizontal size={17}/></summary><div className="more-menu" onClick={closeAction}>{children}</div></details>;
+}
 function KV({name,value}) {return <div className="key-value"><span>{name}</span><strong>{value??'—'}</strong></div>;}
 function QuotaBar({label,window:win}) {const left=win ? Math.max(0,Math.min(100,100-(win.used_percent??100))):null;return <div className="quota-bar"><div className="flex-between"><span>{label}</span><strong>{left===null?'未知':left+'%'}</strong></div><div className="bar"><div style={{width:(left??0)+'%'}} className={left!==null&&left<=15?'low':''}/></div><small>{win?.reset_after_seconds ? '约 '+Math.ceil(win.reset_after_seconds/3600)+' 小时后重置':''}</small></div>;}
-function VMCard({vm,state,select}) {const running=vm.status==='Running';const quota=state.quotas[vm.name];const usage=state.usage[vm.name];const name=vm.displayName||vm.name;return <article className="vm-card">
+function VMCard({vm,state,select}) {const running=vm.status==='Running';const editor=state.editors?.[vm.name];const quota=state.quotas[vm.name];const usage=state.usage[vm.name];const name=vm.displayName||vm.name;return <article className="vm-card">
 <div className="vm-head"><div className="vm-glyph"><Monitor size={20}/></div><div className="vm-name"><strong title={name}>{name}</strong><span>{vm.standalone?'共享工作区':vm.projectPath||'项目环境'}</span></div><div className={'status '+(running?'running':'')}><span className="status-dot"/>{running?'运行中':vm.status==='Stopped'?'已停止':vm.status}</div></div>
 <div className="metrics"><div><span>CPU</span><strong>{running&&usage?usage.cpu.toFixed(1)+'%':'—'}</strong></div><div><span>内存</span><strong>{running&&usage?Math.round(usage.used)+' / '+Math.round(usage.total)+' MB':'—'}</strong></div></div>
 <div className="quota-inline"><span>Codex 额度</span><div>{quota?.status==='ok' ? <><span>5h {quota.five_hour ? Math.max(0,Math.min(100,100-quota.five_hour.used_percent))+'%' : '—'}</span><span>7d {quota.weekly ? Math.max(0,Math.min(100,100-quota.weekly.used_percent))+'%' : '—'}</span></>:<span className="muted">{running?'暂无数据':'启动后查询'}</span>}</div></div>
-<div className="card-actions"><button className="secondary" onClick={()=>bridge('terminal',{name:vm.name})} disabled={!running}><Terminal size={15}/> 终端</button><button className="secondary" onClick={()=>bridge('resume',{name:vm.name,agent:'codex'})} disabled={!running}><Clock3 size={15}/> 恢复会话</button><div className="flex-fill"/><details className="card-more"><summary title="更多操作" aria-label="更多操作"><MoreHorizontal size={17}/></summary><div className="more-menu"><button disabled={!running} onClick={()=>bridge('resume',{name:vm.name,agent:'claude'})}>恢复 Claude 会话</button><button onClick={()=>select({type:'rename',vm})}>修改名称</button><button onClick={()=>select({type:'mounts',vm})}>管理共享文件夹</button><button onClick={()=>bridge('quota',{name:vm.name})} disabled={!running}>刷新额度</button><button className="danger-text" onClick={()=>select({type:'delete',vm})} disabled={running}>删除虚拟机</button></div></details><IconButton title={running?'停止虚拟机':'启动虚拟机'} disabled={state.busy||(!running&&vm.status!=='Stopped')} onClick={()=>select({type:running?'stop':'start',vm})}>{running?<Square size={16}/>:<Play size={16}/>}</IconButton></div>
+{running&&<div className="web-code-row"><span>Web Code</span>{editor?.status==='ready'?<><button className="web-code-link" onClick={()=>bridge('codeOpen',{name:vm.name})}>{editor.url}</button></>:editor?.status==='error'?<button className="web-code-retry" title={editor.error} onClick={()=>bridge('codeRetry',{name:vm.name})}>重试</button>:<span className="muted">启动中…</span>}</div>}
+<div className="card-actions"><button className="secondary" onClick={()=>bridge('terminal',{name:vm.name})} disabled={!running}><Terminal size={15}/> 终端</button><button className="secondary" onClick={()=>bridge('resume',{name:vm.name,agent:'codex'})} disabled={!running}><Clock3 size={15}/> 恢复会话</button><div className="flex-fill"/><MoreMenu><button disabled={!running||editor?.status!=='ready'} onClick={()=>bridge('codeOpen',{name:vm.name})}>打开 Web Code</button><button disabled={!running} onClick={()=>bridge('resume',{name:vm.name,agent:'claude'})}>恢复 Claude 会话</button><button onClick={()=>select({type:'rename',vm})}>修改名称</button><button onClick={()=>select({type:'mounts',vm})}>管理共享文件夹</button><button onClick={()=>bridge('quota',{name:vm.name})} disabled={!running}>刷新额度</button><button className="danger-text" onClick={()=>select({type:'delete',vm})} disabled={running}>删除虚拟机</button></MoreMenu><IconButton title={running?'停止虚拟机':'启动虚拟机'} disabled={state.busy||(!running&&vm.status!=='Stopped')} onClick={()=>select({type:running?'stop':'start',vm})}>{running?<Square size={16}/>:<Play size={16}/>}</IconButton></div>
 </article>}
 function SectionTitle({title,sub,children}) {return <div className="heading"><div><h1>{title}</h1><p>{sub}</p></div><div className="heading-actions">{children}</div></div>}
 function App(){
@@ -25,7 +51,7 @@ function App(){
   const [page,setPage]=useState('vms');
   const [modal,setModal]=useState(null);
   const [filter,setFilter]=useState('');
-  const [create,setCreate]=useState({name:'',cpus:2,memory:4,disk:20,codeServer:false});
+  const [create,setCreate]=useState({name:'',cpus:2,memory:4,disk:20,codeServer:true});
   const [proxyForm,setProxyForm]=useState(null);
   const [proxyDirty,setProxyDirty]=useState(false);
   const [manual,setManual]=useState({name:'',type:'socks5',server:'',port:1080,username:'',password:''});

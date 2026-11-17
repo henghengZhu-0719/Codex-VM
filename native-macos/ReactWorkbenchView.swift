@@ -127,6 +127,9 @@ struct ReactWorkbenchView: NSViewRepresentable {
                 mounts[name] = entries.map { ["path":$0.path, "mode":$0.mode] }
             }
             var data: [String:Any] = [
+                "editors":model.codeEditors.mapValues { editor in
+                    ["status":editor.status,"url":editor.url,"localURL":editor.localURL,"lanURL":editor.lanURL,"error":editor.error]
+                },
                 "vms":vms, "usage":usage, "quotas":quota, "mounts":mounts,
                 "busy":model.busy, "proxyBusy":model.proxyBusy,
                 "error":model.operationFailed ? model.errorSummary : "",
@@ -178,6 +181,10 @@ struct ReactWorkbenchView: NSViewRepresentable {
                 if let vm = existingVM(payload) { model.pollQuota(for: vm) }
             case "terminal":
                 if let vm = existingVM(payload), vm.status == "Running" { model.terminal(vm) }
+            case "codeOpen":
+                if let vm = existingVM(payload) { model.openCodeEditor(vm) }
+            case "codeRetry":
+                if let vm = existingVM(payload) { model.prepareCodeEditor(vm, retry: true) }
             case "resume":
                 if let vm = existingVM(payload), let agent = payload["agent"] as? String {
                     model.resumeSession(vm, agent: agent)
@@ -199,7 +206,7 @@ struct ReactWorkbenchView: NSViewRepresentable {
                 model.cpus = cpus
                 model.memory = memory
                 model.disk = disk
-                model.includeCodeServer = payload["codeServer"] as? Bool ?? false
+                model.includeCodeServer = payload["codeServer"] as? Bool ?? true
                 model.rebuildBase = false
                 model.setup()
             case "proxyRefresh":
