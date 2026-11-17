@@ -78,11 +78,12 @@ struct ReactWorkbenchView: NSViewRepresentable {
                 "proxy_mode":p.proxyMode, "managed_enabled":p.managedEnabled,
                 "use_proxy":p.useProxy, "custom_proxy_url":p.customProxyUrl,
                 "dns_url":p.dnsUrl, "port":p.port,
-                "running":p.running, "selected":p.selected,
+                "running":p.running, "selected":p.selected, "route":p.safeRoute,
                 "core_available":p.coreAvailable,
                 "sources":p.safeSources.map { s -> [String: Any] in
                     ["id":s.id,"name":s.name,"updated_at":s.updatedAt,
-                     "nodes":s.safeNodes.map { n in ["id":n.id,"name":n.name,"type":n.type] }]
+                     "nodes":s.safeNodes.map { n in ["id":n.id,"name":n.name,"type":n.type] },
+                     "error":s.error ?? "", "usage":s.usage ?? "", "remote":s.remote]
                 },
                 "gates":p.safeGates.map { ["state":$0.state,"dir":$0.dir] }
             ]
@@ -123,7 +124,12 @@ struct ReactWorkbenchView: NSViewRepresentable {
                 "error":model.operationFailed ? model.errorSummary : "",
                 "proxyError":model.proxyError, "proxyMessage":model.proxyMessage,
                 "buildStarted":model.buildStarted, "buildComplete":model.buildComplete,
-                "buildStage":model.buildStage
+                "buildStage":model.buildStage,
+                "proxyConnections":model.proxyConnections.map {
+                    ["id":$0.id, "host":$0.host, "port":$0.port,
+                     "network":$0.network, "upload":$0.upload, "download":$0.download] as [String:Any]
+                },
+                "proxyUploadTotal":model.proxyUploadTotal, "proxyDownloadTotal":model.proxyDownloadTotal
             ]
             if let p = model.proxyStatus { data["proxy"] = proxyData(p) }
             guard JSONSerialization.isValidJSONObject(data),
@@ -214,6 +220,23 @@ struct ReactWorkbenchView: NSViewRepresentable {
                       let proxy = model.proxyStatus,
                       proxy.safeSources.contains(where: { $0.safeNodes.contains(where: { $0.id == node }) }) else { break }
                 model.applyProxyRoute(route:[node],port:proxy.port)
+            case "proxySourceRefresh":
+                if let id = payload["id"] as? String,
+                   model.proxyStatus?.safeSources.contains(where: { $0.id == id }) == true {
+                    model.refreshSubscription(id:id,hostDownload:true)
+                }
+            case "proxySourceDelete":
+                if let id = payload["id"] as? String,
+                   model.proxyStatus?.safeSources.contains(where: { $0.id == id }) == true {
+                    model.deleteSource(id:id)
+                }
+            case "proxyDelay":
+                let id = payload["id"] as? String
+                model.measureDelay(nodeID:id)
+            case "proxyGateClose":
+                model.closeGate()
+            case "proxyConnections":
+                model.refreshConnections()
             case "proxyStop":
                 model.stopProxyCore()
             case "proxyProbe":
