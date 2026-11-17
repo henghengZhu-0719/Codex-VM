@@ -122,8 +122,12 @@ struct ReactWorkbenchView: NSViewRepresentable {
             }
             var quota: [String:[String:Any]] = [:]
             for (name,q) in model.vmQuotas { quota[name] = quotaData(q) }
+            var mounts: [String:[[String:Any]]] = [:]
+            for (name, entries) in model.managedFolders {
+                mounts[name] = entries.map { ["path":$0.path, "mode":$0.mode] }
+            }
             var data: [String:Any] = [
-                "vms":vms, "usage":usage, "quotas":quota,
+                "vms":vms, "usage":usage, "quotas":quota, "mounts":mounts,
                 "busy":model.busy, "proxyBusy":model.proxyBusy,
                 "error":model.operationFailed ? model.errorSummary : "",
                 "proxyError":model.proxyError, "proxyMessage":model.proxyMessage,
@@ -252,6 +256,17 @@ struct ReactWorkbenchView: NSViewRepresentable {
                 if let vm = existingVM(payload), !model.busy {
                     model.addFolder(vm, writable:payload["writable"] as? Bool ?? true)
                 }
+            case "removeMount":
+                guard !model.busy, let vm = existingVM(payload),
+                      let path = payload["path"] as? String,
+                      let mode = payload["mode"] as? String, ["ro","rw"].contains(mode),
+                      model.managedFolders[vm.name]?.contains(where: { $0.path == path && $0.mode == mode }) == true else { break }
+                model.changeFolder(vm, action:"remove", path:path, mode:mode)
+            case "rename":
+                guard let vm = existingVM(payload),
+                      let label = payload["label"] as? String, label.count <= 80,
+                      !label.unicodeScalars.contains(where: { $0.value < 0x20 }) else { break }
+                model.renameVM(vm, to:label)
             case "doctor":
                 model.doctor()
             case "openShared":
