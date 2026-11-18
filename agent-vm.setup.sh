@@ -46,6 +46,7 @@ INSTALL_OPENCODE="${AGENT_VM_INSTALL_OPENCODE:-1}"
 INSTALL_CODEX="${AGENT_VM_INSTALL_CODEX:-1}"
 INSTALL_VIBE="${AGENT_VM_INSTALL_VIBE:-1}"
 INSTALL_PI="${AGENT_VM_INSTALL_PI:-0}"
+INSTALL_AGY="${AGENT_VM_INSTALL_AGY:-0}"
 INSTALL_CODE_SERVER="${AGENT_VM_INSTALL_CODE_SERVER:-0}"
 # Each agent's code-server extension, which brings its own copy of the agent.
 INSTALL_CODE_CLAUDE="${AGENT_VM_INSTALL_CODE_CLAUDE:-0}"
@@ -325,6 +326,11 @@ if [[ "$INSTALL_PI" == "1" ]]; then
 }
 JSON
   fi
+fi
+
+if [[ "$INSTALL_AGY" == "1" ]]; then
+  echo "Installing Antigravity CLI (agy)..."
+  curl -fsSL https://antigravity.google/cli/install.sh | bash
 fi
 
 # A top-level TOML key as the first line of <file>, where the tables the MCP

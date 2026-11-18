@@ -94,6 +94,10 @@ struct CodexQuotaStatus: Decodable {
     @Published var busy = false
     @Published var project = ""
     @Published var newVMName = ""
+    @Published var includeCodex = true
+    @Published var includeClaude = false
+    @Published var includeBrowser = false
+    @Published var includeAgy = false
     @Published var includeCodeServer = true
     @Published var rebuildBase = false
     @Published var reusedBase = false
@@ -118,17 +122,44 @@ struct CodexQuotaStatus: Decodable {
     @Published var proxyUploadTotal: Int64 = 0
     @Published var proxyDownloadTotal: Int64 = 0
     @Published var vmAliases: [String: String] = UserDefaults.standard.dictionary(forKey: "vmAliases") as? [String: String] ?? [:]
+    @Published var vmProxyRoutes: [String: String] = UserDefaults.standard.dictionary(forKey: "vmProxyRoutes") as? [String: String] ?? [:]
     @Published var vmQuotas: [String: CodexQuotaStatus] = [:]
     @Published var vmUsage: [String: VMUsage] = [:]
+    @Published var vmAgents: [String: [String]] = [:]
     @Published var usageErrors: Set<String> = []
     @Published var quotaPolling: Set<String> = []
     @Published var lastQuotaPollAt: Date?
     @Published var codeEditors: [String: CodeEditorState] = [:]
-    @Published var codexRunningVM: String? = nil
-    @Published var codexThreadIds: [String: String] = [:]
-    @Published var codexMessages: [String: [[String: Any]]] = [:]
-    private var codexProcess: Process?
+    @Published var linuxBrowsers: [String: LinuxBrowserState] = [:]
+    @Published var activeBrowserVM: String = ""
+    @Published var browserSlot: CGRect = .zero
+    @Published var browserSlotVisible: Bool = false
+    @Published var browserReloadToken: Int = 0
+    @Published var browserShortcutSignal: [String: Any] = [:]
+    @Published var chatRevision: Int = 0
+    @Published var runningSessions: Set<String> = []
+    @Published var runningSessionVMs: [String: String] = [:]
+    @Published var stagedAttachments: [String: [[String: Any]]] = [:]
+    @Published var gitDiffState: [String: Any] = [:]
+    @Published var toasts: [[String: Any]] = []
+    @Published var requestedPage: [String: Any] = [:]
+    @Published var remoteWorkbenchEnabled: Bool = UserDefaults.standard.bool(forKey: "remoteWorkbenchEnabled")
+    @Published var remoteWorkbenchPort: Int = {
+        let p = UserDefaults.standard.integer(forKey: "remoteWorkbenchPort")
+        return (1024...65535).contains(p) ? p : 18080
+    }()
+    @Published var remoteWorkbenchToken: String = {
+        let t = UserDefaults.standard.string(forKey: "remoteWorkbenchToken") ?? ""
+        return t.isEmpty ? "Zhuyq020110" : t
+    }()
+    @Published var remoteWorkbenchError: String = ""
+    let remoteWorkbenchServer = RemoteWorkbenchServer()
+    let chatStore = AgentChatStore()
+    private var codexProcesses: [String: Process] = [:]
+    private var stoppedSessions: Set<String> = []
+    private var vmMihomoProcesses: [String: Process] = [:]
     private let codeEditorManager = CodeEditorManager()
+    private let linuxBrowserManager = LinuxBrowserManager()
     private var terminationObserver: NSObjectProtocol?
     private var quotaTimer: Timer?
     private var usageTimer: Timer?
@@ -139,10 +170,27 @@ struct CodexQuotaStatus: Decodable {
         let bundled = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/agent-vm").path
         executable = ProcessInfo.processInfo.environment["AGENT_VM_BINARY"] ?? (FileManager.default.isExecutableFile(atPath: bundled) ? bundled : Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("bin/agent-vm").path)
         codeEditorManager.onChange = { [weak self] states in self?.codeEditors = states }
+        linuxBrowserManager.onChange = { [weak self] states in self?.linuxBrowsers = states }
+        linuxBrowserManager.onOpen = { [weak self] vmName, _ in
+            self?.activeBrowserVM = vmName
+        }
+        remoteWorkbenchServer.onError = { [weak self] err in
+            self?.remoteWorkbenchError = err
+        }
+        if remoteWorkbenchToken.isEmpty {
+            remoteWorkbenchToken = Self.generateToken()
+            UserDefaults.standard.set(remoteWorkbenchToken, forKey: "remoteWorkbenchToken")
+        }
+        if remoteWorkbenchEnabled {
+            remoteWorkbenchServer.start(port: UInt16(remoteWorkbenchPort), token: remoteWorkbenchToken)
+        }
         terminationObserver = NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated {
                 self?.codeEditorManager.stopAll()
-                self?.stopCodex()
+                self?.stopAllVMMihomo()
+                self?.stopAllAgents()
+                self?.chatStore.flushAll()
+                self?.remoteWorkbenchServer.stop()
             }
         }
         refresh()
@@ -159,7 +207,7 @@ struct CodexQuotaStatus: Decodable {
             }
         }
     }
-    func run(_ arguments: [String], cwd: String? = nil, input: String? = nil, progress: ((String) -> Void)? = nil, completion: @escaping (Int32, String) -> Void) {
+    func run(_ arguments: [String], cwd: String? = nil, input: String? = nil, vmName: String? = nil, progress: ((String) -> Void)? = nil, completion: @escaping (Int32, String) -> Void) {
         let path = executable
         var environment = ProcessInfo.processInfo.environment
         let activeUseProxy = proxyStatus?.useProxy ?? useProxy
@@ -176,7 +224,12 @@ struct CodexQuotaStatus: Decodable {
             environment["no_proxy"] = "localhost,127.0.0.1,::1"
         }
         if arguments.first != "proxy", managedMode, let st = proxyStatus, !st.managedConfigPath.isEmpty {
-            environment["AGENT_VM_MANAGED_NETWORK_CONFIG"] = st.managedConfigPath
+            if let vmName, let customNode = vmProxyRoutes[vmName], !customNode.isEmpty, proxyMode == "mihomo",
+               let customCfg = prepareVMManagedNetworkConfig(for: vmName, nodeId: customNode) {
+                environment["AGENT_VM_MANAGED_NETWORK_CONFIG"] = customCfg
+            } else {
+                environment["AGENT_VM_MANAGED_NETWORK_CONFIG"] = st.managedConfigPath
+            }
         } else {
             environment.removeValue(forKey: "AGENT_VM_MANAGED_NETWORK_CONFIG")
         }
@@ -402,24 +455,27 @@ cat /var/lib/agent-vm-region/status
                 self.output += startText
                 self.operationFailed = startCode != 0
                 guard startCode == 0 else { self.busy = false; self.refresh(); return }
-                self.updateRegion(project: selectedProject) {
-                    self.buildComplete = true
-                    self.rebuildBase = false
-                    self.busy = false
-                    if selectedProject.hasPrefix(NSHomeDirectory() + "/AgentVM-Workspaces/") {
-                        let label = self.newVMName.trimmingCharacters(in: .whitespacesAndNewlines)
-                        if !label.isEmpty {
-                            self.run(["name", selectedProject]) { code, rawName in
-                                guard code == 0 else { return }
-                                let vmName = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
-                                if !vmName.isEmpty {
-                                    self.vmAliases[vmName] = label
-                                    UserDefaults.standard.set(self.vmAliases, forKey: "vmAliases")
+                self.installSelectedApps(project: selectedProject) { installOk in
+                    guard installOk else { self.busy = false; self.refresh(); return }
+                    self.updateRegion(project: selectedProject) {
+                        self.buildComplete = true
+                        self.rebuildBase = false
+                        self.busy = false
+                        if selectedProject.hasPrefix(NSHomeDirectory() + "/AgentVM-Workspaces/") {
+                            let label = self.newVMName.trimmingCharacters(in: .whitespacesAndNewlines)
+                            if !label.isEmpty {
+                                self.run(["name", selectedProject]) { code, rawName in
+                                    guard code == 0 else { return }
+                                    let vmName = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+                                    if !vmName.isEmpty {
+                                        self.vmAliases[vmName] = label
+                                        UserDefaults.standard.set(self.vmAliases, forKey: "vmAliases")
+                                    }
                                 }
                             }
                         }
+                        self.refresh()
                     }
-                    self.refresh()
                 }
             }
             }
@@ -429,9 +485,13 @@ cat /var/lib/agent-vm-region/status
                 startProject()
                 return
             }
-            var packages = ["codex"]
+            var packages: [String] = []
+            if self.includeCodex { packages.append("codex") }
+            if self.includeClaude { packages.append("claude") }
+            if self.includeClaude && self.includeBrowser { packages.append("chromium") }
             if self.includeCodeServer { packages.append("code-server") }
-            let args = ["setup", "--preinstall=" + packages.joined(separator: ","), "--memory", String(self.memory), "--cpus", String(self.cpus), "--disk", String(self.disk)]
+            let preinstall = packages.isEmpty ? "none" : packages.joined(separator: ",")
+            let args = ["setup", "--preinstall=" + preinstall, "--memory", String(self.memory), "--cpus", String(self.cpus), "--disk", String(self.disk)]
             self.run(args, progress: { text in
                 if text.contains("Installing packages inside VM") { self.buildStage = max(self.buildStage, 2) }
                 else if text.contains("Starting base VM") { self.buildStage = max(self.buildStage, 1) }
@@ -441,6 +501,74 @@ cat /var/lib/agent-vm-region/status
                 guard code == 0 else { self.busy = false; self.refresh(); return }
                 startProject()
             }
+        }
+    }
+    private func installSelectedApps(project: String, completion: @escaping (Bool) -> Void) {
+        var steps: [String] = [
+            "set -euo pipefail",
+            "export PATH=\"$HOME/.local/bin:$HOME/.claude/local/bin:$PATH\""
+        ]
+        var needed = false
+        if includeCodex {
+            needed = true
+            steps.append("""
+            if ! command -v codex >/dev/null 2>&1; then
+              if ! command -v npm >/dev/null 2>&1; then
+                sudo apt-get update && sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends nodejs npm </dev/null
+              fi
+              sudo npm i -g @openai/codex </dev/null
+            fi
+            """)
+        }
+        if includeClaude {
+            needed = true
+            steps.append("""
+            if ! command -v claude >/dev/null 2>&1; then
+              curl -fsSL https://claude.ai/install.sh | bash
+              grep -q '.claude/local/bin' ~/.zshenv 2>/dev/null || echo 'export PATH=$HOME/.claude/local/bin:$PATH' >> ~/.zshenv
+              sudo mkdir -p /etc/claude-code
+              printf '{"permissions":{"defaultMode":"bypassPermissions"},"tui":"fullscreen"}\n' | sudo tee /etc/claude-code/managed-settings.json >/dev/null
+            fi
+            """)
+        }
+        if includeClaude && includeBrowser {
+            needed = true
+            steps.append("""
+            if ! command -v chromium >/dev/null 2>&1 || ! command -v websockify >/dev/null 2>&1 || [ ! -f /usr/share/novnc/vnc.html ]; then
+              sudo apt-get update && sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends chromium fonts-liberation fonts-dejavu-core xvfb xauth openbox x11vnc novnc websockify </dev/null
+              sudo ln -sf /usr/bin/chromium /usr/bin/google-chrome
+              sudo ln -sf /usr/bin/chromium /usr/bin/google-chrome-stable
+              sudo mkdir -p /opt/google/chrome
+              sudo ln -sf /usr/bin/chromium /opt/google/chrome/chrome
+            fi
+            if command -v npx >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+              python3 -c "import json, pathlib; p = pathlib.Path.home()/'.claude.json'; d = json.loads(p.read_text()) if p.exists() else {}; d.setdefault('mcpServers', {})['chrome-devtools'] = {'command': 'npx', 'args': ['-y', 'chrome-devtools-mcp@latest', '--browserUrl', 'http://127.0.0.1:9222']}; p.write_text(json.dumps(d, indent=2) + '\\n')"
+            fi
+            """)
+        }
+        if includeAgy {
+            needed = true
+            steps.append("""
+            if ! command -v agy >/dev/null 2>&1; then
+              curl -fsSL https://antigravity.google/cli/install.sh | bash
+              grep -q '.local/bin' ~/.zshenv 2>/dev/null || echo 'export PATH=$HOME/.local/bin:$PATH' >> ~/.zshenv
+            fi
+            """)
+        }
+        if includeCodeServer {
+            needed = true
+            steps.append("""
+            if ! command -v code-server >/dev/null 2>&1; then
+              curl -fsSL https://code-server.dev/install.sh | sh
+            fi
+            """)
+        }
+        guard needed else { completion(true); return }
+        let script = steps.joined(separator: "\n")
+        run(["run", "--", "bash", "-lc", script], cwd: project) { code, text in
+            if !text.isEmpty { self.output += text }
+            self.operationFailed = code != 0
+            completion(code == 0)
         }
     }
     func refresh() {
@@ -453,6 +581,7 @@ cat /var/lib/agent-vm-region/status
             }
             let runningNames = Set(self.machines.filter { $0.status == "Running" }.map(\.name))
             self.codeEditorManager.retain(runningNames)
+            self.linuxBrowserManager.retain(runningNames)
             self.vmUsage = self.vmUsage.filter { runningNames.contains($0.key) }
             self.usageErrors = self.usageErrors.filter { runningNames.contains($0) }
             self.pollRunningUsage()
@@ -487,6 +616,150 @@ cat /var/lib/agent-vm-region/status
               let url = URL(string: editor.url) else { prepareCodeEditor(vm, retry: true); return }
         NSWorkspace.shared.open(url)
     }
+    func sshConfigPath(for vmName: String) -> String {
+        let state = ProcessInfo.processInfo.environment["AGENT_VM_STATE_DIR"] ?? NSHomeDirectory() + "/.agent-vm"
+        let lima = ProcessInfo.processInfo.environment["AGENT_VM_LIMA_HOME"] ?? state + "/lima"
+        return URL(fileURLWithPath: lima).appendingPathComponent(vmName).appendingPathComponent("ssh.config").path
+    }
+    func pushToast(title: String, message: String = "", level: String = "info", vmName: String = "") {
+        let id = UUID().uuidString
+        let item: [String: Any] = [
+            "id": id,
+            "title": title,
+            "message": message,
+            "level": level,
+            "vm": vmName,
+            "ts": Date().timeIntervalSince1970
+        ]
+        toasts.append(item)
+        if toasts.count > 6 { toasts.removeFirst(toasts.count - 6) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 6.5) { [weak self] in
+            self?.dismissToast(id: id)
+        }
+    }
+    func dismissToast(id: String) {
+        toasts.removeAll { ($0["id"] as? String) == id }
+    }
+    func openLinuxBrowser(_ vm: VM, width: Int = 1280, height: Int = 800, qualityMode: String? = nil) {
+        guard vm.status == "Running", vm.name != "base", vm.name != "base-building" else { return }
+        let w = width > 100 ? width : max(800, Int(browserSlot.width))
+        let h = height > 100 ? height : max(500, Int(browserSlot.height))
+        linuxBrowserManager.open(name: vm.name, config: sshConfigPath(for: vm.name), width: w, height: h, qualityMode: qualityMode)
+    }
+    func resizeLinuxBrowser(_ vm: VM, width: Int, height: Int) {
+        guard vm.status == "Running", width > 100, height > 100 else { return }
+        linuxBrowserManager.resize(name: vm.name, config: sshConfigPath(for: vm.name), width: width, height: height)
+    }
+    func setBrowserQuality(_ vm: VM, qualityMode: String) {
+        linuxBrowserManager.setQuality(name: vm.name, qualityMode: qualityMode)
+    }
+    func browserInspect(_ vm: VM) {
+        guard vm.status == "Running" else { return }
+        linuxBrowserManager.inspect(name: vm.name, config: sshConfigPath(for: vm.name))
+    }
+    func browserNavigate(_ vm: VM, url: String, tabId: String = "") {
+        guard vm.status == "Running" else { return }
+        let cfg = sshConfigPath(for: vm.name)
+        linuxBrowserManager.navigate(name: vm.name, config: cfg, url: url, tabId: tabId)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+            self?.linuxBrowserManager.inspect(name: vm.name, config: cfg)
+        }
+    }
+    func browserBack(_ vm: VM, tabId: String = "") {
+        guard vm.status == "Running" else { return }
+        let cfg = sshConfigPath(for: vm.name)
+        linuxBrowserManager.back(name: vm.name, config: cfg, tabId: tabId)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+            self?.linuxBrowserManager.inspect(name: vm.name, config: cfg)
+        }
+    }
+    func browserForward(_ vm: VM, tabId: String = "") {
+        guard vm.status == "Running" else { return }
+        let cfg = sshConfigPath(for: vm.name)
+        linuxBrowserManager.forward(name: vm.name, config: cfg, tabId: tabId)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+            self?.linuxBrowserManager.inspect(name: vm.name, config: cfg)
+        }
+    }
+    func browserPageReload(_ vm: VM, tabId: String = "") {
+        guard vm.status == "Running" else { return }
+        let cfg = sshConfigPath(for: vm.name)
+        linuxBrowserManager.reloadPage(name: vm.name, config: cfg, tabId: tabId)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { [weak self] in
+            self?.linuxBrowserManager.inspect(name: vm.name, config: cfg)
+        }
+    }
+    func browserNewTab(_ vm: VM, url: String = "about:blank") {
+        guard vm.status == "Running" else { return }
+        linuxBrowserManager.newTab(name: vm.name, config: sshConfigPath(for: vm.name), url: url)
+    }
+    func browserActivateTab(_ vm: VM, tabId: String) {
+        guard vm.status == "Running", !tabId.isEmpty else { return }
+        linuxBrowserManager.activateTab(name: vm.name, config: sshConfigPath(for: vm.name), tabId: tabId)
+    }
+    func browserCloseTab(_ vm: VM, tabId: String) {
+        guard vm.status == "Running", !tabId.isEmpty else { return }
+        linuxBrowserManager.closeTab(name: vm.name, config: sshConfigPath(for: vm.name), tabId: tabId)
+    }
+    func browserInsertText(_ vm: VM, text: String, tabId: String = "") {
+        guard vm.status == "Running", !text.isEmpty else { return }
+        linuxBrowserManager.insertText(name: vm.name, config: sshConfigPath(for: vm.name), text: text, tabId: tabId)
+    }
+    func browserScreenshotToChat(_ vm: VM, tabId: String = "", jumpToChat: Bool = true) {
+        guard vm.status == "Running", prepareSharedFolder() else { return }
+        linuxBrowserManager.captureScreenshot(name: vm.name, config: sshConfigPath(for: vm.name), tabId: tabId) { [weak self] data, err in
+            guard let self else { return }
+            guard let data else {
+                self.pushToast(title: "截图失败", message: err ?? "无法捕获当前页面", level: "error", vmName: vm.name)
+                return
+            }
+            let dir = URL(fileURLWithPath: NSHomeDirectory() + "/AgentVM-Shared/.attachments", isDirectory: true)
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let name = "browser-\(Int(Date().timeIntervalSince1970)).png"
+            let hostFile = dir.appendingPathComponent(name)
+            do {
+                try data.write(to: hostFile, options: .atomic)
+                let guestPath = "/mnt/agent-vm-shared/.attachments/" + name
+                var list = self.stagedAttachments[vm.name] ?? []
+                list.append([
+                    "id": UUID().uuidString,
+                    "name": name,
+                    "guestPath": guestPath,
+                    "hostPath": hostFile.path,
+                    "isImage": true
+                ])
+                self.stagedAttachments[vm.name] = list
+                if jumpToChat {
+                    self.requestedPage = ["page": "codex", "vm": vm.name, "nonce": UUID().uuidString]
+                }
+                self.pushToast(title: "已截取浏览器画面", message: "已添加到 \(self.displayName(for: vm)) 对话附件", level: "ok", vmName: vm.name)
+            } catch {
+                self.pushToast(title: "保存截图失败", message: error.localizedDescription, level: "error", vmName: vm.name)
+            }
+        }
+    }
+    func browserInstallComponents(_ vm: VM) {
+        guard vm.status == "Running" else { return }
+        let cfg = sshConfigPath(for: vm.name)
+        linuxBrowserManager.installComponents(name: vm.name, config: cfg) { [weak self] ok, msg in
+            guard let self else { return }
+            if ok {
+                self.pushToast(title: "浏览器组件已安装", message: "正在启动 Linux 浏览器…", level: "ok", vmName: vm.name)
+                self.openLinuxBrowser(vm)
+            } else {
+                self.pushToast(title: "安装浏览器组件失败", message: msg, level: "error", vmName: vm.name)
+            }
+        }
+    }
+    func browserFetchLogs(_ vm: VM) {
+        guard vm.status == "Running" else { return }
+        linuxBrowserManager.fetchLogs(name: vm.name, config: sshConfigPath(for: vm.name))
+    }
+    func browserOpenDownloads() {
+        let dl = NSHomeDirectory() + "/AgentVM-Shared/Downloads"
+        try? FileManager.default.createDirectory(atPath: dl, withIntermediateDirectories: true)
+        NSWorkspace.shared.open(URL(fileURLWithPath: dl))
+    }
     func pollRunningUsage() {
         for vm in machines where vm.status == "Running" && vm.name != "base" && vm.name != "base-building" {
             pollUsage(for: vm)
@@ -514,7 +787,12 @@ cat /var/lib/agent-vm-region/status
         idle2=$1; total2=$2
         cpu=$(awk -v i1="$idle1" -v t1="$total1" -v i2="$idle2" -v t2="$total2" 'BEGIN { dt=t2-t1; di=i2-i1; if(dt<=0) print "0"; else printf "%.1f", 100*(dt-di)/dt }')
         mem=$(awk '/^MemTotal:/ { total=$2 } /^MemAvailable:/ { available=$2 } END { if(total>0 && available>=0) printf "%.0f|%.0f", (total-available)/1024, total/1024 }' /proc/meminfo)
-        printf '%s|%s\n' "$cpu" "$mem"
+        agents=""
+        PATH="$HOME/.local/bin:$HOME/.claude/local/bin:$PATH"
+        for a in codex claude agy opencode vibe pi; do
+          command -v "$a" >/dev/null 2>&1 && agents="${agents:+$agents,}$a"
+        done
+        printf '%s|%s|%s\n' "$cpu" "$mem" "$agents"
         """#
         DispatchQueue.global(qos: .utility).async {
             let process = Process()
@@ -527,6 +805,7 @@ cat /var/lib/agent-vm-region/status
             process.standardOutput = output
             process.standardError = FileHandle.nullDevice
             var result: VMUsage?
+            var detectedAgents: [String]?
             do {
                 try process.run()
                 let data = output.fileHandleForReading.readDataToEndOfFile()
@@ -534,13 +813,16 @@ cat /var/lib/agent-vm-region/status
                 if process.terminationStatus == 0,
                    let line = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
                    let last = line.components(separatedBy: .newlines).last {
-                    let parts = last.split(separator: "|")
-                    if parts.count == 3,
+                    let parts = last.split(separator: "|", omittingEmptySubsequences: false)
+                    if parts.count >= 3,
                        let cpu = Double(parts[0]), let used = Double(parts[1]),
                        let total = Double(parts[2]), total > 0,
                        cpu.isFinite, used.isFinite, total.isFinite {
                         result = VMUsage(cpuPercent: min(100, max(0, cpu)),
                                          usedMemoryMB: max(0, used), totalMemoryMB: total)
+                    }
+                    if parts.count >= 4 {
+                        detectedAgents = parts[3].split(separator: ",").map(String.init).filter { !$0.isEmpty }
                     }
                 }
             } catch {
@@ -550,6 +832,7 @@ cat /var/lib/agent-vm-region/status
                 self.usagePolling.remove(name)
                 guard self.machines.contains(where: { $0.name == name && $0.status == "Running" }) else {
                     self.vmUsage.removeValue(forKey: name)
+                    self.vmAgents.removeValue(forKey: name)
                     self.usageErrors.remove(name)
                     return
                 }
@@ -559,6 +842,9 @@ cat /var/lib/agent-vm-region/status
                 } else {
                     self.vmUsage.removeValue(forKey: name)
                     self.usageErrors.insert(name)
+                }
+                if let detectedAgents {
+                    self.vmAgents[name] = detectedAgents
                 }
             }
         }
@@ -579,59 +865,308 @@ cat /var/lib/agent-vm-region/status
     // Resume uses the agent's interactive history picker; never attaches to an
     // unknown live process or guesses a session ID.
     func resumeSession(_ vm: VM, agent: String) {
-        guard vm.status == "Running", ["codex", "claude"].contains(agent) else { return }
+        guard vm.status == "Running", ["codex", "claude", "agy", "opencode", "vibe", "pi"].contains(agent) else { return }
         terminal(vm, resumeAgent: agent)
     }
-    func stopCodex() {
-        if let proc = codexProcess, proc.isRunning {
+    func stopAllAgents() {
+        for (sid, proc) in codexProcesses where proc.isRunning {
+            stoppedSessions.insert(sid)
             proc.terminate()
         }
-        codexProcess = nil
-        codexRunningVM = nil
+        codexProcesses.removeAll()
+        runningSessions.removeAll()
+        runningSessionVMs.removeAll()
     }
-    func clearCodexSession(vmName: String) {
-        guard codexRunningVM != vmName else { return }
-        codexThreadIds.removeValue(forKey: vmName)
-        codexMessages.removeValue(forKey: vmName)
+    func stopCodex(sessionId: String? = nil, vmName: String? = nil) {
+        let targets: [String]
+        if let sessionId {
+            targets = [sessionId]
+        } else if let vmName {
+            targets = runningSessionVMs.filter { $0.value == vmName }.map(\.key)
+        } else {
+            targets = Array(codexProcesses.keys)
+        }
+        for sid in targets {
+            stoppedSessions.insert(sid)
+            if let proc = codexProcesses[sid], proc.isRunning {
+                proc.terminate()
+            }
+            codexProcesses.removeValue(forKey: sid)
+            runningSessions.remove(sid)
+            runningSessionVMs.removeValue(forKey: sid)
+        }
     }
-    func runCodex(vm: VM, workdir: String, prompt: String, mode: String, resume: Bool) {
+    func selectChatSession(vmName: String, sessionId: String) {
+        chatStore.selectSession(vmName: vmName, sessionId: sessionId)
+        chatRevision += 1
+    }
+    func newChatSession(vmName: String, agent: String = "codex", workdir: String = "/mnt/agent-vm-shared", mode: String = "full-auto") {
+        _ = chatStore.createSession(vmName: vmName, agent: agent, workdir: workdir, mode: mode)
+        chatRevision += 1
+    }
+    func renameChatSession(vmName: String, sessionId: String, title: String) {
+        chatStore.renameSession(vmName: vmName, sessionId: sessionId, title: title)
+        chatRevision += 1
+    }
+    func deleteChatSession(vmName: String, sessionId: String) {
+        guard !runningSessions.contains(sessionId) else { return }
+        chatStore.deleteSession(vmName: vmName, sessionId: sessionId)
+        chatRevision += 1
+    }
+    func updateChatSessionConfig(vmName: String, sessionId: String, workdir: String?, mode: String?, agent: String?) {
+        chatStore.updateSession(vmName: vmName, sessionId: sessionId, immediateSave: true) { s in
+            if let workdir, !workdir.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                s.workdir = workdir.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            if let mode, ["default", "full-auto", "read-only", "bypass"].contains(mode) {
+                s.mode = mode
+            }
+            if let agent, ["codex", "claude"].contains(agent) {
+                s.agent = agent
+            }
+        }
+        chatRevision += 1
+    }
+    func clearCodexSession(vmName: String, sessionId: String? = nil) {
+        let activeId = chatStore.activeSessionByVM[vmName]
+        let current = chatStore.sessions(for: vmName).first { $0.id == activeId } ?? chatStore.sessions(for: vmName).first
+        let agent = current?.agent ?? "codex"
+        let workdir = current?.workdir ?? "/mnt/agent-vm-shared"
+        let mode = current?.mode ?? "full-auto"
+        _ = chatStore.createSession(vmName: vmName, agent: agent, workdir: workdir, mode: mode)
+        chatRevision += 1
+    }
+    func stageChatAttachment(vmName: String) {
+        guard prepareSharedFolder() else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = true
+        panel.message = "选择要附加到对话的文件或图片（将复制到共享目录）"
+        guard panel.runModal() == .OK else { return }
+        let dir = URL(fileURLWithPath: NSHomeDirectory() + "/AgentVM-Shared/.attachments", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        var list = stagedAttachments[vmName] ?? []
+        let imageExts: Set<String> = ["png", "jpg", "jpeg", "gif", "webp", "bmp"]
+        let stamp = Int(Date().timeIntervalSince1970)
+        for src in panel.urls {
+            let base = src.lastPathComponent.replacingOccurrences(of: "/", with: "_")
+            let dstName = "\(stamp)-\(base)"
+            let dst = dir.appendingPathComponent(dstName)
+            do {
+                if FileManager.default.fileExists(atPath: dst.path) {
+                    try FileManager.default.removeItem(at: dst)
+                }
+                try FileManager.default.copyItem(at: src, to: dst)
+                let isImage = imageExts.contains(src.pathExtension.lowercased())
+                list.append([
+                    "id": UUID().uuidString,
+                    "name": base,
+                    "guestPath": "/mnt/agent-vm-shared/.attachments/" + dstName,
+                    "hostPath": dst.path,
+                    "isImage": isImage
+                ])
+            } catch {
+                pushToast(title: "附加文件失败", message: error.localizedDescription, level: "error", vmName: vmName)
+            }
+        }
+        stagedAttachments[vmName] = list
+    }
+    func removeChatAttachment(vmName: String, id: String) {
+        stagedAttachments[vmName]?.removeAll { ($0["id"] as? String) == id }
+    }
+    func fetchGitDiff(vm: VM, workdir: String, filePath: String? = nil) {
+        guard vm.status == "Running" else { return }
+        let config = sshConfigPath(for: vm.name)
+        guard FileManager.default.fileExists(atPath: config) else { return }
+        func quote(_ value: String) -> String {
+            "'" + value.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
+        }
+        let targetDir = workdir.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "/mnt/agent-vm-shared" : workdir.trimmingCharacters(in: .whitespacesAndNewlines)
+        gitDiffState = [
+            "vm": vm.name,
+            "workdir": targetDir,
+            "file": filePath ?? "",
+            "loading": true,
+            "diff": "",
+            "status": "",
+            "error": ""
+        ]
+        let fileArg = (filePath?.isEmpty == false) ? " -- \(quote(filePath!))" : ""
+        let remoteCmd = "git -C \(quote(targetDir)) status --short && echo '---AVM-DIFF---' && git -C \(quote(targetDir)) diff --no-color\(fileArg)"
+        DispatchQueue.global(qos: .userInitiated).async {
+            let proc = Process(), out = Pipe(), err = Pipe()
+            proc.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+            proc.arguments = ["-F", config, "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "lima-" + vm.name, remoteCmd]
+            proc.standardOutput = out
+            proc.standardError = err
+            do {
+                try proc.run()
+                let data = out.fileHandleForReading.readDataToEndOfFile()
+                let errData = err.fileHandleForReading.readDataToEndOfFile()
+                proc.waitUntilExit()
+                let text = String(data: data, encoding: .utf8) ?? ""
+                let errText = String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                let parts = text.components(separatedBy: "---AVM-DIFF---\n")
+                let statusPart = parts.first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                let diffPart = parts.count > 1 ? parts[1] : ""
+                let clippedDiff = diffPart.count > 120000 ? String(diffPart.prefix(120000)) + "\n... (diff 已截断)" : diffPart
+                DispatchQueue.main.async {
+                    self.gitDiffState = [
+                        "vm": vm.name,
+                        "workdir": targetDir,
+                        "file": filePath ?? "",
+                        "loading": false,
+                        "status": statusPart,
+                        "diff": clippedDiff,
+                        "error": proc.terminationStatus == 0 ? "" : (errText.isEmpty ? "当前目录不是 Git 仓库或无法读取 diff" : errText)
+                    ]
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.gitDiffState = [
+                        "vm": vm.name,
+                        "workdir": targetDir,
+                        "file": filePath ?? "",
+                        "loading": false,
+                        "status": "",
+                        "diff": "",
+                        "error": error.localizedDescription
+                    ]
+                }
+            }
+        }
+    }
+    static func generateToken() -> String {
+        let chars = Array("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
+        return String((0..<24).map { _ in chars[Int.random(in: 0..<chars.count)] })
+    }
+    func toggleRemoteWorkbench(_ enabled: Bool) {
+        remoteWorkbenchEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "remoteWorkbenchEnabled")
+        if enabled {
+            if remoteWorkbenchToken.isEmpty {
+                remoteWorkbenchToken = "Zhuyq020110"
+                UserDefaults.standard.set(remoteWorkbenchToken, forKey: "remoteWorkbenchToken")
+            }
+            remoteWorkbenchServer.start(port: UInt16(remoteWorkbenchPort), token: remoteWorkbenchToken)
+            refresh()
+        } else {
+            remoteWorkbenchError = ""
+            remoteWorkbenchServer.stop()
+        }
+    }
+    func setRemoteWorkbenchToken(_ newToken: String) {
+        let trimmed = newToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        remoteWorkbenchToken = trimmed
+        UserDefaults.standard.set(trimmed, forKey: "remoteWorkbenchToken")
+        remoteWorkbenchServer.updateToken(trimmed)
+    }
+    func regenerateRemoteWorkbenchToken() {
+        remoteWorkbenchToken = Self.generateToken()
+        UserDefaults.standard.set(remoteWorkbenchToken, forKey: "remoteWorkbenchToken")
+        remoteWorkbenchServer.updateToken(remoteWorkbenchToken)
+    }
+    func setRemoteWorkbenchPort(_ port: Int) {
+        guard (1024...65535).contains(port), port != remoteWorkbenchPort else { return }
+        remoteWorkbenchPort = port
+        UserDefaults.standard.set(port, forKey: "remoteWorkbenchPort")
+        if remoteWorkbenchEnabled {
+            remoteWorkbenchServer.start(port: UInt16(port), token: remoteWorkbenchToken)
+        }
+    }
+    func remoteWorkbenchURLs() -> [String] {
+        let ips = RemoteWorkbenchServer.localIPv4Addresses()
+        let q = remoteWorkbenchToken.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? remoteWorkbenchToken
+        return ips.map { "http://\($0):\(remoteWorkbenchPort)/?token=\(q)" }
+    }
+    func runCodex(vm: VM, sessionId: String? = nil, workdir: String, prompt: String, mode: String, agent: String = "codex", resume: Bool, truncateFromMsgId: String? = nil) {
         let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard vm.status == "Running", !trimmed.isEmpty, codexRunningVM == nil else { return }
-        let state = ProcessInfo.processInfo.environment["AGENT_VM_STATE_DIR"] ?? NSHomeDirectory() + "/.agent-vm"
-        let lima = ProcessInfo.processInfo.environment["AGENT_VM_LIMA_HOME"] ?? state + "/lima"
-        let config = URL(fileURLWithPath: lima).appendingPathComponent(vm.name).appendingPathComponent("ssh.config").path
+        guard vm.status == "Running", !trimmed.isEmpty else { return }
+        let targetDir = workdir.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "/mnt/agent-vm-shared" : workdir.trimmingCharacters(in: .whitespacesAndNewlines)
+        let activeSession: AgentSession
+        if let sessionId, let found = chatStore.session(vmName: vm.name, sessionId: sessionId) {
+            chatStore.selectSession(vmName: vm.name, sessionId: found.id)
+            activeSession = found
+        } else {
+            activeSession = chatStore.ensureActiveSession(vmName: vm.name, defaultWorkdir: targetDir, defaultMode: mode)
+        }
+        let sid = activeSession.id
+        guard !runningSessions.contains(sid) else { return }
+
+        let config = sshConfigPath(for: vm.name)
         guard FileManager.default.fileExists(atPath: config) else {
-            operationFailed = true
-            output = "找不到该虚拟机的 SSH 配置，请启动虚拟机后刷新。"
+            pushToast(title: "无法启动对话", message: "找不到该虚拟机的 SSH 配置，请启动虚拟机后刷新。", level: "error", vmName: vm.name)
             return
         }
         func quote(_ value: String) -> String {
             "'" + value.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
         }
-        let targetDir = workdir.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "/mnt/agent-vm-shared" : workdir.trimmingCharacters(in: .whitespacesAndNewlines)
-        let modeFlags: String
-        switch mode {
-        case "full-auto": modeFlags = "--full-auto"
-        case "read-only": modeFlags = "-s read-only"
-        case "bypass": modeFlags = "--dangerously-bypass-approvals-and-sandbox"
-        default: modeFlags = ""
-        }
-        let threadId = resume ? (codexThreadIds[vm.name] ?? "") : ""
-        let codexCmd: String
-        if !threadId.isEmpty {
-            codexCmd = "codex exec resume \(quote(threadId)) --json --skip-git-repo-check \(modeFlags) -"
-        } else {
-            codexCmd = "codex exec --json --skip-git-repo-check \(modeFlags) -"
-        }
-        let remoteCmd = "cd -- \(quote(targetDir)) && exec zsh -lc \(quote(codexCmd))"
 
+        let chosenAgent = ["codex", "claude"].contains(agent) ? agent : activeSession.agent
+        let attachments = stagedAttachments[vm.name] ?? []
+        let attachmentPaths = attachments.compactMap { $0["guestPath"] as? String }
+        stagedAttachments[vm.name] = []
+
+        var fullPrompt = trimmed
+        if !attachmentPaths.isEmpty {
+            let listText = attachmentPaths.map { "- \($0)" }.joined(separator: "\n")
+            fullPrompt += "\n\n[附加文件（位于虚拟机共享目录）]\n" + listText
+        }
+
+        let threadId = (resume && truncateFromMsgId == nil) ? activeSession.threadId : ""
+        let agentCmd: String
+        if chosenAgent == "claude" {
+            let permFlag: String
+            switch mode {
+            case "read-only": permFlag = "--permission-mode plan"
+            case "bypass": permFlag = "--dangerously-skip-permissions"
+            case "full-auto": permFlag = "--permission-mode acceptEdits"
+            default: permFlag = ""
+            }
+            let resumeFlag = !threadId.isEmpty ? "--resume \(quote(threadId)) " : ""
+            agentCmd = "claude -p --verbose --output-format stream-json \(resumeFlag)\(permFlag) -"
+        } else {
+            let modeFlags: String
+            switch mode {
+            case "full-auto": modeFlags = "--full-auto"
+            case "read-only": modeFlags = "-s read-only"
+            case "bypass": modeFlags = "--dangerously-bypass-approvals-and-sandbox"
+            default: modeFlags = ""
+            }
+            if !threadId.isEmpty {
+                agentCmd = "codex exec resume \(quote(threadId)) --json --skip-git-repo-check \(modeFlags) -"
+            } else {
+                agentCmd = "codex exec --json --skip-git-repo-check \(modeFlags) -"
+            }
+        }
+        let remoteCmd = "cd -- \(quote(targetDir)) && exec zsh -lc \(quote(agentCmd))"
+
+        let now = Date().timeIntervalSince1970
         let userMsgId = UUID().uuidString
         let assistantMsgId = UUID().uuidString
-        var list = codexMessages[vm.name] ?? []
-        list.append(["id": userMsgId, "role": "user", "text": trimmed, "status": "done"])
-        list.append(["id": assistantMsgId, "role": "assistant", "text": "", "items": [[String: Any]](), "status": "running"])
-        codexMessages[vm.name] = list
-        codexRunningVM = vm.name
+        let userMsg = ChatMessage(id: userMsgId, role: "user", text: trimmed, status: "done", startedAt: now, finishedAt: now, attachments: attachmentPaths.isEmpty ? nil : attachmentPaths)
+        let assistantMsg = ChatMessage(id: assistantMsgId, role: "assistant", text: "", status: "running", startedAt: now, items: [])
+
+        chatStore.updateSession(vmName: vm.name, sessionId: sid, immediateSave: true) { s in
+            s.agent = chosenAgent
+            s.workdir = targetDir
+            s.mode = mode
+            if let cutId = truncateFromMsgId, let cutIdx = s.messages.firstIndex(where: { $0.id == cutId }) {
+                s.messages.removeSubrange(cutIdx..<s.messages.count)
+                if cutIdx == 0 { s.threadId = "" }
+            }
+            if s.messages.isEmpty || s.title == "新对话" {
+                s.title = AgentChatStore.deriveTitle(from: trimmed)
+            }
+            s.messages.append(userMsg)
+            s.messages.append(assistantMsg)
+        }
+        stoppedSessions.remove(sid)
+        runningSessions.insert(sid)
+        runningSessionVMs[sid] = vm.name
+        chatRevision += 1
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
@@ -644,7 +1179,7 @@ cat /var/lib/agent-vm-region/status
         process.standardInput = stdinPipe
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
-        codexProcess = process
+        codexProcesses[sid] = process
 
         final class StreamBuffers: @unchecked Sendable {
             let lock = NSLock()
@@ -673,7 +1208,7 @@ cat /var/lib/agent-vm-region/status
             if !lines.isEmpty {
                 DispatchQueue.main.async {
                     for line in lines {
-                        self?.applyCodexEventLine(vmName: vm.name, assistantMsgId: assistantMsgId, line: line)
+                        self?.applyAgentEventLine(vmName: vm.name, sessionId: sid, agent: chosenAgent, assistantMsgId: assistantMsgId, line: line)
                     }
                 }
             }
@@ -709,103 +1244,222 @@ cat /var/lib/agent-vm-region/status
             DispatchQueue.main.async {
                 guard let self else { return }
                 for line in tailLines {
-                    self.applyCodexEventLine(vmName: vm.name, assistantMsgId: assistantMsgId, line: line)
+                    self.applyAgentEventLine(vmName: vm.name, sessionId: sid, agent: chosenAgent, assistantMsgId: assistantMsgId, line: line)
                 }
-                self.finishCodexMessage(vmName: vm.name, assistantMsgId: assistantMsgId, status: proc.terminationStatus, stderrText: stderrText)
-                if self.codexProcess === proc {
-                    self.codexProcess = nil
+                self.finishAgentMessage(vm: vm, sessionId: sid, assistantMsgId: assistantMsgId, status: proc.terminationStatus, stderrText: stderrText)
+                if self.codexProcesses[sid] === proc {
+                    self.codexProcesses.removeValue(forKey: sid)
                 }
-                if self.codexRunningVM == vm.name {
-                    self.codexRunningVM = nil
-                }
+                self.runningSessions.remove(sid)
+                self.runningSessionVMs.removeValue(forKey: sid)
+                self.chatRevision += 1
             }
         }
 
         do {
             try process.run()
-            if let inputData = (trimmed + "\n").data(using: .utf8) {
+            if let inputData = (fullPrompt + "\n").data(using: .utf8) {
                 stdinPipe.fileHandleForWriting.write(inputData)
             }
             try? stdinPipe.fileHandleForWriting.close()
         } catch {
             stdoutPipe.fileHandleForReading.readabilityHandler = nil
             stderrPipe.fileHandleForReading.readabilityHandler = nil
-            codexProcess = nil
-            codexRunningVM = nil
-            finishCodexMessage(vmName: vm.name, assistantMsgId: assistantMsgId, status: 1, stderrText: "无法启动 SSH 进程：\(error.localizedDescription)")
+            codexProcesses.removeValue(forKey: sid)
+            runningSessions.remove(sid)
+            runningSessionVMs.removeValue(forKey: sid)
+            finishAgentMessage(vm: vm, sessionId: sid, assistantMsgId: assistantMsgId, status: 1, stderrText: "无法启动 SSH 进程：\(error.localizedDescription)")
+            chatRevision += 1
         }
     }
-    private func applyCodexEventLine(vmName: String, assistantMsgId: String, line: String) {
+    private func applyAgentEventLine(vmName: String, sessionId: String, agent: String, assistantMsgId: String, line: String) {
         guard let data = line.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let type = obj["type"] as? String else { return }
-        if type == "thread.started", let tid = obj["thread_id"] as? String, !tid.isEmpty {
-            codexThreadIds[vmName] = tid
+              let type = obj["type"] as? String else {
+            // Non-JSON line fallback (e.g. plain text output)
+            if agent == "claude" && !line.isEmpty {
+                chatStore.updateSession(vmName: vmName, sessionId: sessionId) { s in
+                    guard let idx = s.messages.firstIndex(where: { $0.id == assistantMsgId }) else { return }
+                    s.messages[idx].text += (s.messages[idx].text.isEmpty ? "" : "\n") + line
+                }
+                chatRevision += 1
+            }
             return
         }
-        guard var list = codexMessages[vmName],
-              let idx = list.firstIndex(where: { ($0["id"] as? String) == assistantMsgId }) else { return }
-        var msg = list[idx]
 
-        if type == "item.started" || type == "item.updated" || type == "item.completed",
-           let item = obj["item"] as? [String: Any] {
-            let itemType = item["type"] as? String ?? ""
-            if itemType == "agent_message" {
-                let text = item["text"] as? String ?? ""
-                if !text.isEmpty {
-                    msg["text"] = text
+        if agent == "claude" {
+            applyClaudeEvent(vmName: vmName, sessionId: sessionId, assistantMsgId: assistantMsgId, type: type, obj: obj)
+            return
+        }
+
+        if type == "thread.started", let tid = obj["thread_id"] as? String, !tid.isEmpty {
+            chatStore.updateSession(vmName: vmName, sessionId: sessionId, immediateSave: true) { s in
+                s.threadId = tid
+            }
+            chatRevision += 1
+            return
+        }
+
+        chatStore.updateSession(vmName: vmName, sessionId: sessionId) { s in
+            guard let idx = s.messages.firstIndex(where: { $0.id == assistantMsgId }) else { return }
+            if (type == "item.started" || type == "item.updated" || type == "item.completed"),
+               let item = obj["item"] as? [String: Any] {
+                let itemType = item["type"] as? String ?? ""
+                if itemType == "agent_message" {
+                    let text = item["text"] as? String ?? ""
+                    if !text.isEmpty {
+                        s.messages[idx].text = text
+                    }
+                } else {
+                    var items = s.messages[idx].items ?? []
+                    let itemId = item["id"] as? String ?? UUID().uuidString
+                    var changes: [ChatFileChange]? = nil
+                    if let rawChanges = item["changes"] as? [[String: Any]] {
+                        changes = rawChanges.compactMap { c in
+                            guard let p = c["path"] as? String else { return nil }
+                            return ChatFileChange(path: p, kind: (c["kind"] as? String) ?? "modify")
+                        }
+                    }
+                    let rawOut = item["aggregated_output"] as? String
+                    let clippedOut = rawOut.map { $0.count > 24000 ? String($0.suffix(24000)) : $0 }
+                    let entry = ChatStepItem(
+                        id: itemId,
+                        type: itemType,
+                        status: item["status"] as? String,
+                        text: item["text"] as? String,
+                        command: item["command"] as? String,
+                        output: clippedOut,
+                        exitCode: item["exit_code"] as? Int,
+                        changes: changes
+                    )
+                    if let existing = items.firstIndex(where: { $0.id == itemId }) {
+                        items[existing] = entry
+                    } else {
+                        items.append(entry)
+                    }
+                    s.messages[idx].items = items
                 }
-            } else {
-                var items = msg["items"] as? [[String: Any]] ?? []
-                let itemId = item["id"] as? String ?? UUID().uuidString
-                var entry: [String: Any] = ["id": itemId, "type": itemType]
-                if let status = item["status"] as? String { entry["status"] = status }
-                if let text = item["text"] as? String { entry["text"] = text }
-                if let cmd = item["command"] as? String { entry["command"] = cmd }
-                if let out = item["aggregated_output"] as? String {
-                    entry["output"] = out.count > 4000 ? String(out.suffix(4000)) : out
-                }
-                if let exitCode = item["exit_code"] as? Int { entry["exit_code"] = exitCode }
-                if let changes = item["changes"] as? [[String: Any]] {
-                    entry["changes"] = changes.compactMap { c -> [String: String]? in
-                        guard let p = c["path"] as? String else { return nil }
-                        return ["path": p, "kind": (c["kind"] as? String) ?? "modify"]
+            } else if type == "turn.completed", let usage = obj["usage"] as? [String: Any] {
+                s.messages[idx].usage = ChatTokenUsage(
+                    inputTokens: usage["input_tokens"] as? Int,
+                    cachedInputTokens: usage["cached_input_tokens"] as? Int,
+                    outputTokens: usage["output_tokens"] as? Int
+                )
+            } else if type == "turn.failed" || type == "error" {
+                let errObj = obj["error"] as? [String: Any]
+                let errMsg = (errObj?["message"] as? String) ?? (obj["message"] as? String) ?? "执行失败"
+                s.messages[idx].error = errMsg
+                s.messages[idx].status = "error"
+            }
+        }
+        chatRevision += 1
+    }
+    private func applyClaudeEvent(vmName: String, sessionId: String, assistantMsgId: String, type: String, obj: [String: Any]) {
+        if let sid = obj["session_id"] as? String, !sid.isEmpty {
+            chatStore.updateSession(vmName: vmName, sessionId: sessionId, immediateSave: true) { s in
+                s.threadId = sid
+            }
+        }
+        chatStore.updateSession(vmName: vmName, sessionId: sessionId) { s in
+            guard let idx = s.messages.firstIndex(where: { $0.id == assistantMsgId }) else { return }
+            if type == "assistant", let message = obj["message"] as? [String: Any],
+               let contents = message["content"] as? [[String: Any]] {
+                var items = s.messages[idx].items ?? []
+                var textParts: [String] = []
+                for block in contents {
+                    let btype = block["type"] as? String ?? ""
+                    if btype == "text", let t = block["text"] as? String, !t.isEmpty {
+                        textParts.append(t)
+                    } else if btype == "thinking", let t = block["thinking"] as? String, !t.isEmpty {
+                        let id = "thinking-\(items.count)"
+                        items.append(ChatStepItem(id: id, type: "reasoning", status: "completed", text: t))
+                    } else if btype == "tool_use" {
+                        let id = block["id"] as? String ?? UUID().uuidString
+                        let name = block["name"] as? String ?? "tool"
+                        let inputStr = (try? JSONSerialization.data(withJSONObject: block["input"] ?? [:]))
+                            .flatMap { String(data: $0, encoding: .utf8) } ?? ""
+                        let cmdLabel = "\(name) \(inputStr)"
+                        let entry = ChatStepItem(id: id, type: "command_execution", status: "in_progress", text: nil, command: cmdLabel)
+                        if let existing = items.firstIndex(where: { $0.id == id }) { items[existing] = entry } else { items.append(entry) }
                     }
                 }
-                if let existing = items.firstIndex(where: { ($0["id"] as? String) == itemId }) {
-                    items[existing] = entry
-                } else {
-                    items.append(entry)
+                if !textParts.isEmpty { s.messages[idx].text = textParts.joined(separator: "\n") }
+                s.messages[idx].items = items
+            } else if type == "user", let message = obj["message"] as? [String: Any],
+                      let contents = message["content"] as? [[String: Any]] {
+                var items = s.messages[idx].items ?? []
+                for block in contents where (block["type"] as? String) == "tool_result" {
+                    let toolId = block["tool_use_id"] as? String ?? ""
+                    if let existing = items.firstIndex(where: { $0.id == toolId }) {
+                        items[existing].status = "completed"
+                        if let out = block["content"] as? String {
+                            items[existing].output = out.count > 24000 ? String(out.suffix(24000)) : out
+                        }
+                        items[existing].exitCode = (block["is_error"] as? Bool) == true ? 1 : 0
+                    }
                 }
-                msg["items"] = items
+                s.messages[idx].items = items
+            } else if type == "result" {
+                if let res = obj["result"] as? String, !res.isEmpty {
+                    s.messages[idx].text = res
+                }
+                if let usage = obj["usage"] as? [String: Any] {
+                    s.messages[idx].usage = ChatTokenUsage(
+                        inputTokens: usage["input_tokens"] as? Int,
+                        cachedInputTokens: usage["cache_read_input_tokens"] as? Int,
+                        outputTokens: usage["output_tokens"] as? Int
+                    )
+                }
+                if (obj["is_error"] as? Bool) == true {
+                    s.messages[idx].status = "error"
+                    s.messages[idx].error = (obj["result"] as? String) ?? "Claude Code 执行失败"
+                }
             }
-        } else if type == "turn.completed", let usage = obj["usage"] as? [String: Any] {
-            msg["usage"] = usage
-        } else if type == "turn.failed" || type == "error" {
-            let errObj = obj["error"] as? [String: Any]
-            let errMsg = (errObj?["message"] as? String) ?? (obj["message"] as? String) ?? "执行失败"
-            msg["error"] = errMsg
-            msg["status"] = "error"
         }
-        list[idx] = msg
-        codexMessages[vmName] = list
+        chatRevision += 1
     }
-    private func finishCodexMessage(vmName: String, assistantMsgId: String, status: Int32, stderrText: String) {
-        guard var list = codexMessages[vmName],
-              let idx = list.firstIndex(where: { ($0["id"] as? String) == assistantMsgId }) else { return }
-        var msg = list[idx]
-        if status != 0 {
-            if (msg["error"] as? String ?? "").isEmpty {
-                msg["error"] = stderrText.isEmpty ? "Codex 退出码：\(status)" : stderrText
+    private func finishAgentMessage(vm: VM, sessionId: String, assistantMsgId: String, status: Int32, stderrText: String) {
+        let wasStopped = stoppedSessions.remove(sessionId) != nil
+        let now = Date().timeIntervalSince1970
+        var finalStatus = "done"
+        var finalTitle = ""
+        chatStore.updateSession(vmName: vm.name, sessionId: sessionId, immediateSave: true) { s in
+            finalTitle = s.title
+            guard let idx = s.messages.firstIndex(where: { $0.id == assistantMsgId }) else { return }
+            s.messages[idx].finishedAt = now
+            // Close any lingering in-progress steps
+            if var items = s.messages[idx].items {
+                for i in items.indices where items[i].status == "in_progress" {
+                    items[i].status = wasStopped ? "stopped" : (status == 0 ? "completed" : "failed")
+                }
+                s.messages[idx].items = items
             }
-            if (msg["status"] as? String) == "running" {
-                msg["status"] = "error"
+            if wasStopped {
+                s.messages[idx].status = "stopped"
+                finalStatus = "stopped"
+            } else if status != 0 {
+                if (s.messages[idx].error ?? "").isEmpty {
+                    s.messages[idx].error = stderrText.isEmpty ? "Agent 退出码：\(status)" : stderrText
+                }
+                if s.messages[idx].status == "running" {
+                    s.messages[idx].status = "error"
+                }
+                finalStatus = "error"
+            } else if s.messages[idx].status == "running" {
+                s.messages[idx].status = "done"
+                finalStatus = "done"
+            } else {
+                finalStatus = s.messages[idx].status
             }
-        } else if (msg["status"] as? String) == "running" {
-            msg["status"] = "done"
         }
-        list[idx] = msg
-        codexMessages[vmName] = list
+        let label = displayName(for: vm)
+        if finalStatus == "done" {
+            pushToast(title: "\(label) 任务完成", message: finalTitle, level: "ok", vmName: vm.name)
+            if !NSApp.isActive { NSApp.requestUserAttention(.informationalRequest) }
+        } else if finalStatus == "error" {
+            pushToast(title: "\(label) 任务失败", message: finalTitle, level: "error", vmName: vm.name)
+            if !NSApp.isActive { NSApp.requestUserAttention(.criticalRequest) }
+        }
     }
     func terminal(_ vm: VM, resumeAgent: String? = nil) {
         let state = ProcessInfo.processInfo.environment["AGENT_VM_STATE_DIR"] ?? NSHomeDirectory() + "/.agent-vm"
@@ -832,9 +1486,14 @@ cat /var/lib/agent-vm-region/status
             let mount = vmMounts[vm.name]?.first
             let isStandalone = mount?.location.hasPrefix(NSHomeDirectory() + "/AgentVM-Workspaces/") == true
             let guestDir = isStandalone ? "/mnt/agent-vm-shared" : (mount?.guestPath ?? "/mnt/agent-vm-shared")
-            if let agent = resumeAgent, ["codex", "claude"].contains(agent) {
+            if let agent = resumeAgent, ["codex", "claude", "agy", "opencode", "vibe", "pi"].contains(agent) {
                 // The CLI presents its own history selector. No live process is attached.
-                let resumeCommand = agent == "codex" ? "codex resume" : "claude --resume"
+                let resumeCommand: String
+                switch agent {
+                case "codex": resumeCommand = "codex resume"
+                case "claude": resumeCommand = "claude --resume"
+                default: resumeCommand = agent
+                }
                 let remote = "cd -- " + quote(guestDir) + " && exec bash -lic " + quote(resumeCommand)
                 command += " " + quote(remote)
             } else if mount != nil {
@@ -857,17 +1516,34 @@ cat /var/lib/agent-vm-region/status
         }
     }
     func remove(_ vm: VM) {
+        stopCodex(vmName: vm.name)
+        operationFailed = false
         busy = true
         run(["rm", vm.name]) { code, text in
             self.output = text
             self.operationFailed = code != 0
+            if code == 0 {
+                self.vmMounts.removeValue(forKey: vm.name)
+                self.managedFolders.removeValue(forKey: vm.name)
+                self.vmQuotas.removeValue(forKey: vm.name)
+                self.vmUsage.removeValue(forKey: vm.name)
+                self.usageErrors.remove(vm.name)
+                self.vmProxyRoutes.removeValue(forKey: vm.name)
+                self.chatStore.removeAllSessions(for: vm.name)
+                self.chatRevision += 1
+                UserDefaults.standard.set(self.vmProxyRoutes, forKey: "vmProxyRoutes")
+            }
+            self.stopVMMihomo(vm.name)
             self.busy = false
             self.refresh()
         }
     }
     func stop(_ vm: VM) {
         busy = true
-        run(["stop", vm.name]) { code, text in self.output = text; self.operationFailed = code != 0; self.busy = false; self.refresh() }
+        run(["stop", vm.name]) { code, text in
+            self.stopVMMihomo(vm.name)
+            self.output = text; self.operationFailed = code != 0; self.busy = false; self.refresh()
+        }
     }
     func chooseProject() {
         let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = false
@@ -886,7 +1562,7 @@ cat /var/lib/agent-vm-region/status
                 self.output = "项目文件夹与虚拟机身份不匹配，无法启动。\n" + name
                 self.operationFailed = true; self.busy = false; return
             }
-            self.run(["run", "true"], cwd: project) { code, text in
+            self.run(["run", "true"], cwd: project, vmName: vm.name) { code, text in
                 self.output = text
                 self.operationFailed = code != 0
                 guard code == 0 else { self.busy = false; self.refresh(); return }
@@ -1027,6 +1703,160 @@ cat /var/lib/agent-vm-region/status
             "port": port
         ]
         runProxyStatusCommand(["apply"], payload: payload, message: "Mihomo 核心已应用并启动", completion: completion)
+    }
+
+    func setVMProxyRoute(_ vm: VM, nodeId: String) {
+        if nodeId.isEmpty {
+            vmProxyRoutes.removeValue(forKey: vm.name)
+            UserDefaults.standard.set(vmProxyRoutes, forKey: "vmProxyRoutes")
+            stopVMMihomo(vm.name)
+            proxyMessage = vm.status == "Running"
+                ? "已将「\(displayName(for: vm))」恢复为跟随全局出口；重启该虚拟机后生效。"
+                : "已将「\(displayName(for: vm))」恢复为跟随全局出口。"
+            return
+        }
+        vmProxyRoutes[vm.name] = nodeId
+        UserDefaults.standard.set(vmProxyRoutes, forKey: "vmProxyRoutes")
+        let sock = vmMihomoSocketPath(vm.name)
+        if vm.status == "Running", vmMihomoProcesses[vm.name]?.isRunning == true,
+           FileManager.default.fileExists(atPath: sock),
+           let body = try? JSONSerialization.data(withJSONObject: ["name": nodeId]),
+           let json = String(data: body, encoding: .utf8) {
+            DispatchQueue.global(qos: .userInitiated).async {
+                let p = Process()
+                p.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
+                p.arguments = ["--silent", "--show-error", "--fail", "--unix-socket", sock,
+                               "-X", "PUT", "http://localhost/proxies/agentvm-exit",
+                               "-H", "Content-Type: application/json", "-d", json]
+                p.standardOutput = FileHandle.nullDevice
+                p.standardError = FileHandle.nullDevice
+                try? p.run()
+                p.waitUntilExit()
+                DispatchQueue.main.async {
+                    if p.terminationStatus == 0 {
+                        self.proxyMessage = "已切换「\(self.displayName(for: vm))」的独立代理出口。"
+                    } else {
+                        self.proxyMessage = "已保存「\(self.displayName(for: vm))」的独立出口；重启该虚拟机后生效。"
+                    }
+                }
+            }
+        } else {
+            proxyMessage = vm.status == "Running"
+                ? "已保存「\(displayName(for: vm))」的独立出口；重启该虚拟机后生效。"
+                : "已保存「\(displayName(for: vm))」的独立出口，下次启动时生效。"
+        }
+    }
+
+    private func vmMihomoDir(_ vmName: String) -> String {
+        let state = ProcessInfo.processInfo.environment["AGENT_VM_STATE_DIR"] ?? NSHomeDirectory() + "/.agent-vm"
+        return state + "/proxy/vms/" + vmName
+    }
+
+    private func vmMihomoSocketPath(_ vmName: String) -> String {
+        let hash = abs(vmName.utf8.reduce(5381) { ($0 << 5) &+ $0 &+ Int($1) }) % 100000
+        return "/tmp/agentvm-vm-\(getuid())-\(hash).sock"
+    }
+
+    private func vmMihomoPort(_ vmName: String) -> Int {
+        let hash = abs(vmName.utf8.reduce(5381) { ($0 << 5) &+ $0 &+ Int($1) }) % 900
+        return 17900 + hash
+    }
+
+    func stopVMMihomo(_ vmName: String) {
+        if let proc = vmMihomoProcesses.removeValue(forKey: vmName), proc.isRunning {
+            proc.terminate()
+        }
+        try? FileManager.default.removeItem(atPath: vmMihomoSocketPath(vmName))
+    }
+
+    func stopAllVMMihomo() {
+        for name in Array(vmMihomoProcesses.keys) { stopVMMihomo(name) }
+    }
+
+    private func prepareVMManagedNetworkConfig(for vmName: String, nodeId: String) -> String? {
+        guard let st = proxyStatus, !st.managedConfigPath.isEmpty else { return nil }
+        let state = ProcessInfo.processInfo.environment["AGENT_VM_STATE_DIR"] ?? NSHomeDirectory() + "/.agent-vm"
+        let baseConfigPath = state + "/proxy/config.yaml"
+        let mihomoPath = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/mihomo").path
+        guard FileManager.default.isExecutableFile(atPath: mihomoPath),
+              let rawYaml = try? String(contentsOfFile: baseConfigPath, encoding: .utf8),
+              let baseManagedData = try? Data(contentsOf: URL(fileURLWithPath: st.managedConfigPath)),
+              var managedObj = try? JSONSerialization.jsonObject(with: baseManagedData) as? [String: Any],
+              let baseProxyURL = managedObj["proxy_url"] as? String,
+              var comps = URLComponents(string: baseProxyURL) else { return nil }
+
+        let vmPort = vmMihomoPort(vmName)
+        let vmSock = vmMihomoSocketPath(vmName)
+        let vmDir = vmMihomoDir(vmName)
+        let vmConfigPath = vmDir + "/config.yaml"
+        let vmManagedPath = vmDir + "/managed-network.json"
+
+        var allNodes = st.safeSources.flatMap { $0.safeNodes.map(\.id) }.filter { $0 != nodeId }
+        allNodes.insert(nodeId, at: 0)
+
+        var outLines: [String] = []
+        var skippingProxyGroups = false
+        for line in rawYaml.components(separatedBy: .newlines) {
+            if skippingProxyGroups {
+                if !line.isEmpty && !line.hasPrefix(" ") && !line.hasPrefix("-") {
+                    skippingProxyGroups = false
+                } else {
+                    continue
+                }
+            }
+            if line.hasPrefix("mixed-port:") {
+                outLines.append("mixed-port: \(vmPort)")
+            } else if line.hasPrefix("external-controller-unix:") {
+                outLines.append("external-controller-unix: \(vmSock)")
+            } else if line.hasPrefix("proxy-groups:") {
+                skippingProxyGroups = true
+                outLines.append("proxy-groups:")
+                outLines.append("  - name: agentvm-exit")
+                outLines.append("    type: select")
+                outLines.append("    proxies:")
+                for n in allNodes {
+                    let escaped = n.replacingOccurrences(of: "\"", with: "\\\"")
+                    outLines.append("      - \"\(escaped)\"")
+                }
+            } else {
+                outLines.append(line)
+            }
+        }
+
+        do {
+            try FileManager.default.createDirectory(atPath: vmDir, withIntermediateDirectories: true)
+            let yamlText = outLines.joined(separator: "\n") + "\n"
+            try yamlText.write(toFile: vmConfigPath, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: vmConfigPath)
+
+            comps.port = vmPort
+            managedObj["proxy_url"] = comps.string ?? baseProxyURL
+            let managedData = try JSONSerialization.data(withJSONObject: managedObj)
+            try managedData.write(to: URL(fileURLWithPath: vmManagedPath), options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: vmManagedPath)
+
+            stopVMMihomo(vmName)
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: mihomoPath)
+            proc.arguments = ["-d", state + "/proxy", "-f", vmConfigPath]
+            proc.standardInput = FileHandle.nullDevice
+            let logURL = URL(fileURLWithPath: vmDir + "/mihomo.log")
+            FileManager.default.createFile(atPath: logURL.path, contents: nil, attributes: [.posixPermissions: 0o600])
+            if let fh = try? FileHandle(forWritingTo: logURL) {
+                proc.standardOutput = fh
+                proc.standardError = fh
+            }
+            try proc.run()
+            vmMihomoProcesses[vmName] = proc
+
+            let deadline = Date().addingTimeInterval(3.0)
+            while Date() < deadline && !FileManager.default.fileExists(atPath: vmSock) {
+                Thread.sleep(forTimeInterval: 0.05)
+            }
+            return vmManagedPath
+        } catch {
+            return nil
+        }
     }
 
     func stopProxyCore(completion: (() -> Void)? = nil) {
@@ -2120,9 +2950,23 @@ private struct MenuBarControls: View {
     @Environment(\.scenePhase) private var scenePhase
     var body: some Scene {
         WindowGroup("Agent VM", id: "main") {
-            ReactWorkbenchView(model: model)
-                .frame(minWidth: 920, minHeight: 640)
-                .onChange(of: scenePhase) { phase in
+            ZStack(alignment: .topLeading) {
+                ReactWorkbenchView(model: model)
+                if model.browserSlotVisible,
+                   let state = model.linuxBrowsers[model.activeBrowserVM],
+                   state.status == "ready",
+                   let url = URL(string: state.url),
+                   model.browserSlot.width > 20, model.browserSlot.height > 20 {
+                    LinuxBrowserWebView(url: url, reloadToken: model.browserReloadToken) { action in
+                        model.browserShortcutSignal = ["action": action, "vm": model.activeBrowserVM, "nonce": UUID().uuidString]
+                    }
+                        .frame(width: model.browserSlot.width, height: model.browserSlot.height)
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .offset(x: model.browserSlot.minX, y: model.browserSlot.minY)
+                }
+            }
+            .frame(minWidth: 920, minHeight: 640)
+            .onChange(of: scenePhase) { phase in
                     if phase == .active {
                         model.refresh()
                         model.refreshProxyStatus()

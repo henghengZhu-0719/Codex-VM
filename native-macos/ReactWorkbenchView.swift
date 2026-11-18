@@ -36,15 +36,29 @@ struct ReactWorkbenchView: NSViewRepresentable {
         private weak var web: WKWebView?
         private var observation: AnyCancellable?
         private var ready = false
+        private var publishWorkItem: DispatchWorkItem?
         private let allowedRoot = Bundle.main.resourceURL?.appendingPathComponent("web", isDirectory: true).standardizedFileURL.path ?? ""
 
         init(model: Model) {
             self.model = model
             super.init()
-            observation = model.objectWillChange.receive(on: DispatchQueue.main).sink { [weak self] _ in
-                // Published properties emit before the new value is assigned.
-                DispatchQueue.main.async { self?.publish() }
+            model.remoteWorkbenchServer.onAction = { [weak self] action, payload in
+                self?.handle(action, payload)
             }
+            observation = model.objectWillChange.receive(on: DispatchQueue.main).sink { [weak self] _ in
+                // Coalesce rapid updates (e.g. streaming agent events) to keep WebView responsive.
+                self?.schedulePublish()
+            }
+        }
+
+        private func schedulePublish() {
+            guard publishWorkItem == nil else { return }
+            let item = DispatchWorkItem { [weak self] in
+                self?.publishWorkItem = nil
+                self?.publish()
+            }
+            publishWorkItem = item
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.035, execute: item)
         }
 
         func attach(_ web: WKWebView) { self.web = web }
@@ -107,7 +121,6 @@ struct ReactWorkbenchView: NSViewRepresentable {
         }
 
         func publish() {
-            guard ready, let web else { return }
             let vms = model.machines.map { vm -> [String: Any] in
                 let project = model.vmMounts[vm.name]?.first?.location ?? ""
                 let guestMounts = (model.vmMounts[vm.name] ?? []).map { m in
@@ -120,6 +133,24 @@ struct ReactWorkbenchView: NSViewRepresentable {
                     "guestMounts":guestMounts
                 ]
             }
+            var codexPayload = model.chatStore.bridgePayload(
+                runningSessions: model.runningSessions,
+                runningVMs: Set(model.runningSessionVMs.values)
+            )
+            codexPayload["stagedAttachments"] = model.stagedAttachments
+            codexPayload["gitDiff"] = model.gitDiffState
+
+            if model.remoteWorkbenchEnabled {
+                let remoteState: [String: Any] = [
+                    "vms": vms,
+                    "agents": model.vmAgents,
+                    "busy": model.busy,
+                    "error": model.operationFailed ? model.errorSummary : "",
+                    "codex": codexPayload
+                ]
+                model.remoteWorkbenchServer.broadcastState(remoteState)
+            }
+            guard ready, let web else { return }
             var usage: [String:[String:Double]] = [:]
             for (name,u) in model.vmUsage {
                 usage[name] = ["cpu":u.cpuPercent,"used":u.usedMemoryMB,"total":u.totalMemoryMB]
@@ -134,7 +165,31 @@ struct ReactWorkbenchView: NSViewRepresentable {
                 "editors":model.codeEditors.mapValues { editor in
                     ["status":editor.status,"url":editor.url,"localURL":editor.localURL,"lanURL":editor.lanURL,"error":editor.error]
                 },
-                "vms":vms, "usage":usage, "quotas":quota, "mounts":mounts,
+                "browsers":model.linuxBrowsers.mapValues { browser in
+                    [
+                        "status": browser.status,
+                        "stage": browser.stage,
+                        "stageMessage": browser.stageMessage,
+                        "url": browser.url,
+                        "error": browser.error,
+                        "missing": browser.missingComponents,
+                        "resolution": browser.resolution,
+                        "qualityMode": browser.qualityMode,
+                        "tabs": browser.tabs,
+                        "activeTabId": browser.activeTabId,
+                        "activeURL": browser.activeURL,
+                        "activeTitle": browser.activeTitle,
+                        "devPorts": browser.devPorts,
+                        "logs": browser.logs,
+                        "installing": browser.installing
+                    ] as [String: Any]
+                },
+                "activeBrowserVM":model.activeBrowserVM,
+                "browserShortcut":model.browserShortcutSignal,
+                "requestedPage":model.requestedPage,
+                "toasts":model.toasts,
+                "vms":vms, "usage":usage, "quotas":quota, "mounts":mounts, "agents":model.vmAgents,
+                "vmProxyRoutes":model.vmProxyRoutes,
                 "busy":model.busy, "proxyBusy":model.proxyBusy,
                 "error":model.operationFailed ? model.errorSummary : "",
                 "proxyError":model.proxyError, "proxyMessage":model.proxyMessage,
@@ -145,10 +200,13 @@ struct ReactWorkbenchView: NSViewRepresentable {
                      "network":$0.network, "upload":$0.upload, "download":$0.download] as [String:Any]
                 },
                 "proxyUploadTotal":model.proxyUploadTotal, "proxyDownloadTotal":model.proxyDownloadTotal,
-                "codex":[
-                    "runningVM":model.codexRunningVM ?? "",
-                    "threads":model.codexThreadIds,
-                    "messages":model.codexMessages
+                "codex":codexPayload,
+                "remoteWorkbench":[
+                    "enabled":model.remoteWorkbenchEnabled,
+                    "port":model.remoteWorkbenchPort,
+                    "token":model.remoteWorkbenchToken,
+                    "urls":model.remoteWorkbenchEnabled ? model.remoteWorkbenchURLs() : [],
+                    "error":model.remoteWorkbenchError
                 ]
             ]
             if let p = model.proxyStatus { data["proxy"] = proxyData(p) }
@@ -194,6 +252,90 @@ struct ReactWorkbenchView: NSViewRepresentable {
                 if let vm = existingVM(payload) { model.openCodeEditor(vm) }
             case "codeRetry":
                 if let vm = existingVM(payload) { model.prepareCodeEditor(vm, retry: true) }
+            case "browserOpen":
+                if let vm = existingVM(payload) {
+                    model.activeBrowserVM = vm.name
+                    let w = (payload["width"] as? NSNumber)?.intValue ?? 1280
+                    let h = (payload["height"] as? NSNumber)?.intValue ?? 800
+                    let qMode = payload["qualityMode"] as? String
+                    model.openLinuxBrowser(vm, width: w, height: h, qualityMode: qMode)
+                }
+            case "browserSelect":
+                if let vm = existingVM(payload) {
+                    model.activeBrowserVM = vm.name
+                    model.browserInspect(vm)
+                }
+            case "browserReload":
+                model.browserReloadToken += 1
+            case "browserResize":
+                if let vm = existingVM(payload) {
+                    let w = (payload["width"] as? NSNumber)?.intValue ?? 1280
+                    let h = (payload["height"] as? NSNumber)?.intValue ?? 800
+                    model.resizeLinuxBrowser(vm, width: w, height: h)
+                }
+            case "browserSetQuality":
+                if let vm = existingVM(payload), let mode = payload["qualityMode"] as? String {
+                    model.setBrowserQuality(vm, qualityMode: mode)
+                }
+            case "browserInspect":
+                if let vm = existingVM(payload) {
+                    model.browserInspect(vm)
+                }
+            case "browserNavigate":
+                if let vm = existingVM(payload), let url = payload["url"] as? String {
+                    model.browserNavigate(vm, url: url, tabId: payload["tabId"] as? String ?? "")
+                }
+            case "browserBack":
+                if let vm = existingVM(payload) {
+                    model.browserBack(vm, tabId: payload["tabId"] as? String ?? "")
+                }
+            case "browserForward":
+                if let vm = existingVM(payload) {
+                    model.browserForward(vm, tabId: payload["tabId"] as? String ?? "")
+                }
+            case "browserPageReload":
+                if let vm = existingVM(payload) {
+                    model.browserPageReload(vm, tabId: payload["tabId"] as? String ?? "")
+                }
+            case "browserNewTab":
+                if let vm = existingVM(payload) {
+                    model.browserNewTab(vm, url: payload["url"] as? String ?? "about:blank")
+                }
+            case "browserActivateTab":
+                if let vm = existingVM(payload), let tabId = payload["tabId"] as? String {
+                    model.browserActivateTab(vm, tabId: tabId)
+                }
+            case "browserCloseTab":
+                if let vm = existingVM(payload), let tabId = payload["tabId"] as? String {
+                    model.browserCloseTab(vm, tabId: tabId)
+                }
+            case "browserInsertText":
+                if let vm = existingVM(payload), let text = payload["text"] as? String {
+                    model.browserInsertText(vm, text: text, tabId: payload["tabId"] as? String ?? "")
+                }
+            case "browserScreenshotToChat":
+                if let vm = existingVM(payload) {
+                    let jump = payload["jump"] as? Bool ?? true
+                    model.browserScreenshotToChat(vm, tabId: payload["tabId"] as? String ?? "", jumpToChat: jump)
+                }
+            case "browserInstallComponents":
+                if let vm = existingVM(payload) {
+                    model.browserInstallComponents(vm)
+                }
+            case "browserFetchLogs":
+                if let vm = existingVM(payload) {
+                    model.browserFetchLogs(vm)
+                }
+            case "browserOpenDownloads":
+                model.browserOpenDownloads()
+            case "browserSlot":
+                let visible = payload["visible"] as? Bool ?? false
+                let x = (payload["x"] as? NSNumber)?.doubleValue ?? 0
+                let y = (payload["y"] as? NSNumber)?.doubleValue ?? 0
+                let w = (payload["width"] as? NSNumber)?.doubleValue ?? 0
+                let h = (payload["height"] as? NSNumber)?.doubleValue ?? 0
+                model.browserSlotVisible = visible
+                model.browserSlot = CGRect(x: x, y: y, width: w, height: h)
             case "resume":
                 if let vm = existingVM(payload), let agent = payload["agent"] as? String {
                     model.resumeSession(vm, agent: agent)
@@ -203,7 +345,7 @@ struct ReactWorkbenchView: NSViewRepresentable {
             case "stop":
                 if let vm = existingVM(payload), vm.status == "Running", !model.busy { model.stop(vm) }
             case "delete":
-                if let vm = existingVM(payload), vm.status != "Running", !model.busy { model.remove(vm) }
+                if let vm = existingVM(payload), !model.busy { model.remove(vm) }
             case "create":
                 guard !model.busy else { break }
                 let cpus = payload["cpus"] as? Int ?? 2
@@ -215,6 +357,10 @@ struct ReactWorkbenchView: NSViewRepresentable {
                 model.cpus = cpus
                 model.memory = memory
                 model.disk = disk
+                model.includeCodex = payload["codex"] as? Bool ?? true
+                model.includeClaude = payload["claude"] as? Bool ?? false
+                model.includeBrowser = (payload["claude"] as? Bool ?? false) && (payload["browser"] as? Bool ?? false)
+                model.includeAgy = payload["agy"] as? Bool ?? false
                 model.includeCodeServer = payload["codeServer"] as? Bool ?? true
                 model.rebuildBase = false
                 model.setup()
@@ -283,31 +429,113 @@ struct ReactWorkbenchView: NSViewRepresentable {
                       let label = payload["label"] as? String, label.count <= 80,
                       !label.unicodeScalars.contains(where: { $0.value < 0x20 }) else { break }
                 model.renameVM(vm, to:label)
+            case "vmProxyRoute":
+                guard let vm = existingVM(payload) else { break }
+                let nodeId = payload["nodeId"] as? String ?? ""
+                if nodeId.isEmpty {
+                    model.setVMProxyRoute(vm, nodeId: "")
+                } else if let proxy = model.proxyStatus,
+                          proxy.safeSources.contains(where: { $0.safeNodes.contains(where: { $0.id == nodeId }) }) {
+                    model.setVMProxyRoute(vm, nodeId: nodeId)
+                }
             case "codexRun":
                 guard let vmName = payload["vm"] as? String,
                       let vm = model.machines.first(where: { $0.name == vmName && $0.status == "Running" }),
                       let prompt = payload["prompt"] as? String,
                       !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { break }
+                let sessionId = payload["sessionId"] as? String
                 let workdir = payload["workdir"] as? String ?? "/mnt/agent-vm-shared"
-                let mode = payload["mode"] as? String ?? "default"
+                let mode = payload["mode"] as? String ?? "full-auto"
+                let agent = payload["agent"] as? String ?? "codex"
                 let resume = payload["resume"] as? Bool ?? true
-                model.runCodex(vm: vm, workdir: workdir, prompt: prompt, mode: mode, resume: resume)
+                model.runCodex(vm: vm, sessionId: sessionId, workdir: workdir, prompt: prompt, mode: mode, agent: agent, resume: resume)
+            case "codexEditResend":
+                guard let vmName = payload["vm"] as? String,
+                      let vm = model.machines.first(where: { $0.name == vmName && $0.status == "Running" }),
+                      let sessionId = payload["sessionId"] as? String,
+                      let msgId = payload["messageId"] as? String,
+                      let prompt = payload["prompt"] as? String,
+                      !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { break }
+                let workdir = payload["workdir"] as? String ?? "/mnt/agent-vm-shared"
+                let mode = payload["mode"] as? String ?? "full-auto"
+                let agent = payload["agent"] as? String ?? "codex"
+                model.runCodex(vm: vm, sessionId: sessionId, workdir: workdir, prompt: prompt, mode: mode, agent: agent, resume: true, truncateFromMsgId: msgId)
             case "codexStop":
-                model.stopCodex()
+                model.stopCodex(sessionId: payload["sessionId"] as? String, vmName: payload["vm"] as? String)
             case "codexClear":
                 if let vmName = payload["vm"] as? String {
-                    model.clearCodexSession(vmName: vmName)
+                    model.clearCodexSession(vmName: vmName, sessionId: payload["sessionId"] as? String)
+                }
+            case "codexSelectSession":
+                if let vmName = payload["vm"] as? String, let sid = payload["sessionId"] as? String {
+                    model.selectChatSession(vmName: vmName, sessionId: sid)
+                }
+            case "codexNewSession":
+                if let vmName = payload["vm"] as? String {
+                    let agent = payload["agent"] as? String ?? "codex"
+                    let workdir = payload["workdir"] as? String ?? "/mnt/agent-vm-shared"
+                    let mode = payload["mode"] as? String ?? "full-auto"
+                    model.newChatSession(vmName: vmName, agent: agent, workdir: workdir, mode: mode)
+                }
+            case "codexRenameSession":
+                if let vmName = payload["vm"] as? String,
+                   let sid = payload["sessionId"] as? String,
+                   let title = payload["title"] as? String {
+                    model.renameChatSession(vmName: vmName, sessionId: sid, title: title)
+                }
+            case "codexDeleteSession":
+                if let vmName = payload["vm"] as? String, let sid = payload["sessionId"] as? String {
+                    model.deleteChatSession(vmName: vmName, sessionId: sid)
+                }
+            case "codexSetSessionConfig":
+                if let vmName = payload["vm"] as? String, let sid = payload["sessionId"] as? String {
+                    model.updateChatSessionConfig(
+                        vmName: vmName,
+                        sessionId: sid,
+                        workdir: payload["workdir"] as? String,
+                        mode: payload["mode"] as? String,
+                        agent: payload["agent"] as? String
+                    )
+                }
+            case "codexGitDiff":
+                if let vmName = payload["vm"] as? String,
+                   let vm = model.machines.first(where: { $0.name == vmName && $0.status == "Running" }) {
+                    let workdir = payload["workdir"] as? String ?? "/mnt/agent-vm-shared"
+                    let file = payload["file"] as? String
+                    model.fetchGitDiff(vm: vm, workdir: workdir, filePath: file)
+                }
+            case "codexAttachFile":
+                if let vmName = payload["vm"] as? String {
+                    model.stageChatAttachment(vmName: vmName)
+                }
+            case "codexRemoveAttachment":
+                if let vmName = payload["vm"] as? String, let id = payload["id"] as? String {
+                    model.removeChatAttachment(vmName: vmName, id: id)
+                }
+            case "toastDismiss":
+                if let id = payload["id"] as? String {
+                    model.dismissToast(id: id)
                 }
             case "codexTerminal":
                 if let vmName = payload["vm"] as? String,
                    let vm = model.machines.first(where: { $0.name == vmName && $0.status == "Running" }) {
-                    model.resumeSession(vm, agent: "codex")
+                    let agent = payload["agent"] as? String ?? "codex"
+                    model.resumeSession(vm, agent: agent)
                 }
             case "doctor":
                 model.doctor()
             case "openShared":
                 let path = NSHomeDirectory() + "/AgentVM-Shared"
                 if model.prepareSharedFolder() { NSWorkspace.shared.open(URL(fileURLWithPath:path)) }
+            case "remoteWorkbenchToggle":
+                let enabled = payload["enabled"] as? Bool ?? false
+                model.toggleRemoteWorkbench(enabled)
+            case "remoteWorkbenchRegenToken":
+                model.regenerateRemoteWorkbenchToken()
+            case "remoteWorkbenchSetPort":
+                if let port = (payload["port"] as? NSNumber)?.intValue {
+                    model.setRemoteWorkbenchPort(port)
+                }
             default:
                 break
             }

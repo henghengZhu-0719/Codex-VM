@@ -53,7 +53,7 @@ Options:
                         'none' for nothing.
                       Available names:
                         python, node, ruby, rust, golang, docker, chromium,
-                        gh, claude, opencode, codex, vibe, pi, mcp-chrome,
+                        gh, claude, opencode, codex, vibe, pi, agy, mcp-chrome,
                         mcp-playwright, code-server, code-claude,
                         code-opencode, code-codex, code-vibe
                       'code-server' is VS Code in the browser, for
@@ -88,7 +88,7 @@ Options:
 
 // The software of the base, as agent-vm.setup.sh names it
 // (AGENT_VM_INSTALL_<NAME>).
-var software = []string{"python", "node", "ruby", "rust", "golang", "docker", "chromium", "gh", "claude", "opencode", "codex", "vibe", "pi",
+var software = []string{"python", "node", "ruby", "rust", "golang", "docker", "chromium", "gh", "claude", "opencode", "codex", "vibe", "pi", "agy",
 	"code-server", "code-claude", "code-opencode", "code-codex", "code-vibe", "mcp-chrome", "mcp-playwright"}
 
 // The default set. Opt-in: Ruby, Rust, Go, Pi (released several times a

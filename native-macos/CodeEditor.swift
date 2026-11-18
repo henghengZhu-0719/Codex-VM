@@ -68,7 +68,7 @@ struct CodeEditorState {
         guard !preparing.contains(name) else { return }
         if !retry, let state = states[name], state.status == "ready",
            let generation = generations[name], let port = URL(string: state.url)?.port {
-            check(name: name, port: port, address: address, url: state.url, generation: generation, attempts: 2)
+            check(name: name, port: port, address: address, url: state.lanURL, generation: generation, attempts: 2)
             return
         }
         if !retry, let next = retryAfter[name], next > Date() { return }
@@ -148,7 +148,12 @@ struct CodeEditorState {
         process.terminationHandler = { _ in
             DispatchQueue.main.async {
                 guard self.generations[name] == generation else { return }
-                self.failed(name, "Web Code 连接已断开。")
+                self.tunnels.removeValue(forKey: name)
+                if var state = self.states[name], state.status == "ready" {
+                    state.lanURL = ""
+                    self.states[name] = state
+                    self.onChange?(self.states)
+                }
             }
         }
         do {
@@ -156,23 +161,25 @@ struct CodeEditorState {
             tunnels[name] = process
             let url = "http://\(bindAddress):\(port)/"
             check(name: name, port: port, address: address, url: url, generation: generation, attempts: 20)
-        } catch { failed(name, "无法建立 Web Code 连接。") }
+        } catch {
+            check(name: name, port: port, address: "", url: "http://127.0.0.1:\(port)/", generation: generation, attempts: 20)
+        }
     }
 
     private func check(name: String, port: Int, address: String, url: String, generation: UUID, attempts: Int) {
-        var request = URLRequest(url: URL(string: url + "healthz")!)
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/healthz")!)
         request.timeoutInterval = 2
         request.cachePolicy = .reloadIgnoringLocalCacheData
         URLSession.shared.dataTask(with: request) { data, response, _ in
             DispatchQueue.main.async {
-                guard self.generations[name] == generation,
-                      address.isEmpty || self.tunnels[name]?.isRunning == true else { return }
+                guard self.generations[name] == generation else { return }
                 if (response as? HTTPURLResponse)?.statusCode == 200,
                    let data, let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                    ["alive", "expired"].contains(object["status"] as? String ?? "") {
                     self.preparing.remove(name)
+                    let lanReady = !address.isEmpty && self.tunnels[name]?.isRunning == true
                     self.states[name] = CodeEditorState(status: "ready", localURL: "http://\(name.lowercased()).localhost:\(port)/",
-                                                         lanURL: address.isEmpty ? "" : url)
+                                                         lanURL: lanReady ? url : "")
                     self.retryAfter.removeValue(forKey: name)
                     self.onChange?(self.states)
                 } else if attempts > 1 {
