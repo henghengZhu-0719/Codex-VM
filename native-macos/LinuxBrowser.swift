@@ -10,9 +10,13 @@ struct LinuxBrowserState {
     var url = ""
     var port = 0
     var error = ""
+    var checked = false
+    var installed = false
+    var appRunning = false
     var missingComponents: [String] = []
     var resolution = "1280x800"
-    var qualityMode = "balanced"
+    var qualityMode = "sharp"
+    var autoResize = true
     var tabs: [[String: Any]] = []
     var activeTabId = ""
     var activeURL = ""
@@ -484,6 +488,7 @@ struct LinuxBrowserWebView: NSViewRepresentable {
     var onOpen: ((String, URL) -> Void)?
     private(set) var states: [String: LinuxBrowserState] = [:]
     private var preparing: Set<String> = []
+    private var checking: Set<String> = []
     private var generations: [String: UUID] = [:]
     private var resizeWorkItems: [String: DispatchWorkItem] = [:]
 
@@ -524,6 +529,7 @@ struct LinuxBrowserWebView: NSViewRepresentable {
         for name in Array(states.keys) where !names.contains(name) {
             generations.removeValue(forKey: name)
             preparing.remove(name)
+            checking.remove(name)
             resizeWorkItems[name]?.cancel()
             resizeWorkItems.removeValue(forKey: name)
             states.removeValue(forKey: name)
@@ -531,8 +537,51 @@ struct LinuxBrowserWebView: NSViewRepresentable {
         onChange?(states)
     }
 
+    func checkStatus(name: String, config: String) {
+        guard !checking.contains(name), !preparing.contains(name), states[name]?.installing != true else { return }
+        checking.insert(name)
+        let script = Self.statusScript
+        DispatchQueue.global(qos: .utility).async {
+            let proc = Process(), out = Pipe(), stdin = Pipe()
+            proc.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+            proc.arguments = Self.sshControlArgs(config: config) + ["lima-" + name, "python3 -"]
+            proc.standardOutput = out
+            proc.standardError = out
+            proc.standardInput = stdin
+            do {
+                try proc.run()
+                try stdin.fileHandleForWriting.write(contentsOf: Data(script.utf8))
+                try stdin.fileHandleForWriting.close()
+                let data = out.fileHandleForReading.readDataToEndOfFile()
+                proc.waitUntilExit()
+                let text = String(data: data, encoding: .utf8) ?? ""
+                let line = text.components(separatedBy: .newlines).last(where: { $0.trimmingCharacters(in: .whitespaces).hasPrefix("{") })
+                let obj = line.flatMap { $0.data(using: .utf8) }.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+                DispatchQueue.main.async {
+                    self.checking.remove(name)
+                    guard let obj else { return }
+                    var st = self.states[name] ?? LinuxBrowserState()
+                    let installed = obj["installed"] as? Bool ?? false
+                    let appRunning = obj["appRunning"] as? Bool ?? false
+                    let missing = obj["missing"] as? [String] ?? []
+                    st.checked = true
+                    st.installed = installed
+                    st.appRunning = appRunning
+                    st.missingComponents = missing
+                    if st.status == "idle" && !missing.isEmpty {
+                        st.status = "idle"
+                    }
+                    self.states[name] = st
+                    self.onChange?(self.states)
+                }
+            } catch {
+                DispatchQueue.main.async { self.checking.remove(name) }
+            }
+        }
+    }
+
     func open(name: String, config: String, width: Int = 1280, height: Int = 800, qualityMode: String? = nil) {
-        let qMode = qualityMode ?? states[name]?.qualityMode ?? "balanced"
+        let qMode = qualityMode ?? states[name]?.qualityMode ?? "sharp"
         if let existing = states[name], existing.status == "ready", existing.port > 0 {
             let url = Self.buildNoVNCURL(port: existing.port, qualityMode: qMode)
             states[name]?.qualityMode = qMode
@@ -558,6 +607,61 @@ struct LinuxBrowserWebView: NSViewRepresentable {
         } else {
             states[name] = st
             onChange?(states)
+        }
+    }
+
+    func setAutoResize(name: String, enabled: Bool, config: String, width: Int, height: Int) {
+        var st = states[name] ?? LinuxBrowserState()
+        st.autoResize = enabled
+        states[name] = st
+        onChange?(states)
+        if enabled && width > 100 && height > 100 {
+            resize(name: name, config: config, width: width, height: height)
+        }
+    }
+
+    func restartApp(name: String, config: String, width: Int, height: Int) {
+        guard !preparing.contains(name), states[name]?.installing != true else { return }
+        let qMode = states[name]?.qualityMode ?? "sharp"
+        start(name: name, config: config, width: width, height: height, qualityMode: qMode, restartApp: true)
+    }
+
+    func stopSession(name: String, config: String, completion: (() -> Void)? = nil) {
+        guard !preparing.contains(name), states[name]?.installing != true else { return }
+        generations[name] = UUID()
+        resizeWorkItems[name]?.cancel()
+        resizeWorkItems.removeValue(forKey: name)
+        var st = states[name] ?? LinuxBrowserState()
+        st.status = "idle"
+        st.stage = "idle"
+        st.url = ""
+        st.port = 0
+        st.appRunning = false
+        st.checked = true
+        st.tabs = []
+        st.activeTabId = ""
+        st.activeURL = ""
+        st.activeTitle = ""
+        states[name] = st
+        onChange?(states)
+
+        let script = Self.stopScript
+        DispatchQueue.global(qos: .utility).async {
+            let proc = Process(), stdin = Pipe()
+            proc.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+            proc.arguments = Self.sshControlArgs(config: config) + ["lima-" + name, "python3 -"]
+            proc.standardInput = stdin
+            proc.standardOutput = FileHandle.nullDevice
+            proc.standardError = FileHandle.nullDevice
+            do {
+                try proc.run()
+                try stdin.fileHandleForWriting.write(contentsOf: Data(script.utf8))
+                try stdin.fileHandleForWriting.close()
+                proc.waitUntilExit()
+            } catch {}
+            DispatchQueue.main.async {
+                completion?()
+            }
         }
     }
 
@@ -622,7 +726,7 @@ struct LinuxBrowserWebView: NSViewRepresentable {
         }.resume()
     }
 
-    private func start(name: String, config: String, width: Int, height: Int, qualityMode: String) {
+    private func start(name: String, config: String, width: Int, height: Int, qualityMode: String, restartApp: Bool = false) {
         let generation = UUID()
         generations[name] = generation
         preparing.insert(name)
@@ -637,7 +741,7 @@ struct LinuxBrowserWebView: NSViewRepresentable {
         states[name] = st
         onChange?(states)
 
-        let input: [String: Any] = ["name": name, "width": w, "height": h]
+        let input: [String: Any] = ["name": name, "width": w, "height": h, "restartApp": restartApp]
         guard let data = try? JSONSerialization.data(withJSONObject: input) else { return }
         let script = "import json, base64\nsettings = json.loads(base64.b64decode('" + data.base64EncodedString() + "'))\n" + Self.prepareScript
 
@@ -734,6 +838,9 @@ struct LinuxBrowserWebView: NSViewRepresentable {
                     st.url = url
                     st.port = port
                     st.qualityMode = qualityMode
+                    st.checked = true
+                    st.installed = true
+                    st.appRunning = true
                     st.error = ""
                     st.missingComponents = []
                     self.states[name] = st
@@ -845,7 +952,7 @@ struct LinuxBrowserWebView: NSViewRepresentable {
         onChange?(states)
 
         let installCmd = """
-        sudo apt-get update && sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends chromium fonts-liberation fonts-dejavu-core fonts-noto-cjk xvfb xauth openbox x11vnc novnc websockify x11-xserver-utils </dev/null && \
+        sudo apt-get update && sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends chromium fonts-liberation fonts-dejavu-core fonts-noto-cjk tigervnc-standalone-server xvfb xauth openbox x11vnc novnc websockify x11-xserver-utils </dev/null && \
         sudo ln -sf /usr/bin/chromium /usr/bin/google-chrome && \
         sudo ln -sf /usr/bin/chromium /usr/bin/google-chrome-stable && \
         sudo mkdir -p /opt/google/chrome && \
@@ -944,22 +1051,75 @@ struct LinuxBrowserWebView: NSViewRepresentable {
 
     // MARK: - Guest Python Scripts
 
+    static let statusScript = #"""
+import json, os, shutil
+
+chromium = shutil.which('chromium') or shutil.which('chromium-browser') or shutil.which('google-chrome')
+websockify = shutil.which('websockify')
+xtigervnc = shutil.which('Xtigervnc')
+xvfb = shutil.which('Xvfb')
+x11vnc = shutil.which('x11vnc')
+openbox = shutil.which('openbox')
+missing = []
+if not chromium: missing.append('chromium')
+if not xtigervnc and (not xvfb or not x11vnc):
+    if not xvfb: missing.append('xvfb')
+    if not x11vnc: missing.append('x11vnc')
+if not openbox: missing.append('openbox')
+if not websockify or not os.path.isfile('/usr/share/novnc/vnc.html'): missing.append('novnc')
+
+app_running = False
+for d in os.listdir('/proc'):
+    if not d.isdigit(): continue
+    try:
+        if os.stat('/proc/' + d).st_uid != os.getuid(): continue
+        raw = open(f'/proc/{d}/cmdline', 'rb').read().decode(errors='ignore')
+        args = [x for x in raw.split('\0') if x]
+        if any('chromium' in x or 'chrome' in x for x in args[:2]) and '--remote-debugging-port=9222' in args:
+            app_running = True
+            break
+    except Exception:
+        pass
+
+print(json.dumps({
+    'installed': chromium is not None,
+    'appRunning': app_running,
+    'missing': missing
+}))
+"""#
+
     static let prepareScript = #"""
-import os, pathlib, socket, subprocess, time, json, shutil, hashlib
+import os, pathlib, socket, subprocess, time, json, shutil, hashlib, signal
 
 def emit(obj):
     print(json.dumps(obj), flush=True)
 
 def proc_running(match):
+    pids = []
     for proc in pathlib.Path('/proc').iterdir():
         if not proc.name.isdigit(): continue
         try:
             if proc.stat().st_uid != os.getuid(): continue
-            args = (proc/'cmdline').read_bytes().decode(errors='ignore').split('\0')
-            if match(args): return args
+            args = [x for x in (proc/'cmdline').read_bytes().decode(errors='ignore').split('\0') if x]
+            if match(args): pids.append((int(proc.name), args))
         except OSError:
             pass
-    return None
+    return pids
+
+def stop_procs(match, wait_sec=3.5):
+    targets = proc_running(match)
+    if not targets: return
+    for pid, _ in targets:
+        try: os.kill(pid, signal.SIGTERM)
+        except OSError: pass
+    deadline = time.time() + wait_sec
+    while time.time() < deadline:
+        if not proc_running(match): return
+        time.sleep(0.15)
+    for pid, _ in proc_running(match):
+        try: os.kill(pid, signal.SIGKILL)
+        except OSError: pass
+    time.sleep(0.2)
 
 def ensure_download_prefs(profile_dir):
     try:
@@ -982,14 +1142,16 @@ try:
     emit({'stage': 'checking', 'message': '正在检查 Chromium 与 VNC 组件…'})
     chromium = shutil.which('chromium') or shutil.which('chromium-browser') or shutil.which('google-chrome')
     websockify = shutil.which('websockify')
+    xtigervnc = shutil.which('Xtigervnc')
     xvfb = shutil.which('Xvfb')
     x11vnc = shutil.which('x11vnc')
     openbox = shutil.which('openbox')
     missing = []
     if not chromium: missing.append('chromium')
-    if not xvfb: missing.append('xvfb')
+    if not xtigervnc and (not xvfb or not x11vnc):
+        if not xvfb: missing.append('xvfb')
+        if not x11vnc: missing.append('x11vnc')
     if not openbox: missing.append('openbox')
-    if not x11vnc: missing.append('x11vnc')
     if not websockify or not os.path.isfile('/usr/share/novnc/vnc.html'): missing.append('novnc')
     if missing:
         msg = '此虚拟机缺少浏览器组件：' + ', '.join(missing)
@@ -998,6 +1160,7 @@ try:
 
     w = max(800, min(2560, int(settings.get('width', 1280)) // 2 * 2))
     h = max(500, min(1600, int(settings.get('height', 800)) // 2 * 2))
+    restart_app = bool(settings.get('restartApp', False))
 
     log_dir = pathlib.Path.home() / '.config/agent-vm-browser'
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -1023,14 +1186,33 @@ try:
         pass
     env = dict(os.environ, DISPLAY=':99', LANG='en_US.UTF-8', LC_CTYPE='en_US.UTF-8')
 
+    use_tiger = bool(xtigervnc)
+    if use_tiger and proc_running(lambda a: any('Xvfb' in x for x in a[:2]) and ':99' in a):
+        stop_procs(lambda a: any('chromium' in x or 'chrome' in x for x in a[:2]) and '--remote-debugging-port=9222' in a)
+        stop_procs(lambda a: any('openbox' in x for x in a[:2]) and 'agent-vm-browser' in ' '.join(a))
+        stop_procs(lambda a: any('x11vnc' in x for x in a[:2]) and '5999' in a)
+        stop_procs(lambda a: any('Xvfb' in x for x in a[:2]) and ':99' in a)
+
+    if restart_app:
+        stop_procs(lambda a: any('chromium' in x or 'chrome' in x for x in a[:2]) and '--remote-debugging-port=9222' in a)
+
     emit({'stage': 'display', 'message': f'正在启动虚拟显示 ({w}×{h})…'})
-    if not proc_running(lambda a: any('Xvfb' in x for x in a[:2]) and ':99' in a):
+    if use_tiger:
+        if not proc_running(lambda a: any('Xtigervnc' in x for x in a[:2]) and ':99' in a):
+            with open(log_dir / 'xvfb.log', 'ab') as f:
+                subprocess.Popen([
+                    xtigervnc, ':99', '-localhost', '-rfbport', '5999',
+                    '-SecurityTypes', 'None', '-geometry', f'{w}x{h}', '-depth', '24',
+                    '-AcceptSetDesktopSize=1', '-AlwaysShared=1'
+                ], stdin=subprocess.DEVNULL, stdout=f, stderr=f, start_new_session=True)
+            time.sleep(0.55)
+    elif not proc_running(lambda a: any('Xvfb' in x for x in a[:2]) and ':99' in a):
         with open(log_dir / 'xvfb.log', 'ab') as f:
             subprocess.Popen(['Xvfb', ':99', '-screen', '0', f'{w}x{h}x24', '-nolisten', 'tcp', '+extension', 'RANDR'],
                              stdin=subprocess.DEVNULL, stdout=f, stderr=f, start_new_session=True)
         time.sleep(0.45)
 
-    if not proc_running(lambda a: any('openbox' in x for x in a[:2])):
+    if not proc_running(lambda a: any('openbox' in x for x in a[:2]) and 'agent-vm-browser' in ' '.join(a)):
         ob_rc = log_dir / 'openbox-rc.xml'
         ob_rc.write_text('''<?xml version="1.0" encoding="UTF-8"?>
 <openbox_config xmlns="http://openbox.org/3.4/rc">
@@ -1059,9 +1241,10 @@ try:
                 f'--window-size={w},{h}',
                 '--start-maximized'
             ], env=env, stdin=subprocess.DEVNULL, stdout=f, stderr=f, start_new_session=True)
+        time.sleep(0.8)
 
     emit({'stage': 'vnc', 'message': '正在启动 noVNC 画面服务…'})
-    if not proc_running(lambda a: any('x11vnc' in x for x in a[:2]) and '5999' in a):
+    if not use_tiger and not proc_running(lambda a: any('x11vnc' in x for x in a[:2]) and '5999' in a):
         with open(log_dir / 'x11vnc.log', 'ab') as f:
             subprocess.Popen([
                 'x11vnc', '-display', ':99', '-localhost', '-rfbport', '5999',
@@ -1073,7 +1256,7 @@ try:
     port = None
     existing = proc_running(lambda a: any('websockify' in x for x in a[:3]) and '127.0.0.1:5999' in a)
     if existing:
-        for arg in existing:
+        for arg in existing[0][1]:
             if arg.startswith('127.0.0.1:') and arg != '127.0.0.1:5999':
                 try:
                     port = int(arg.split(':', 1)[1])
@@ -1114,6 +1297,42 @@ except Exception as error:
     raise SystemExit(1)
 """#
 
+    static let stopScript = #"""
+import os, pathlib, signal, time
+
+def proc_running(match):
+    pids = []
+    for proc in pathlib.Path('/proc').iterdir():
+        if not proc.name.isdigit(): continue
+        try:
+            if proc.stat().st_uid != os.getuid(): continue
+            args = [x for x in (proc / 'cmdline').read_bytes().decode(errors='ignore').split('\0') if x]
+            if match(args): pids.append(int(proc.name))
+        except OSError:
+            pass
+    return pids
+
+def stop_procs(match, wait_sec=3.0):
+    pids = proc_running(match)
+    if not pids: return
+    for pid in pids:
+        try: os.kill(pid, signal.SIGTERM)
+        except OSError: pass
+    deadline = time.time() + wait_sec
+    while time.time() < deadline:
+        if not proc_running(match): return
+        time.sleep(0.15)
+    for pid in proc_running(match):
+        try: os.kill(pid, signal.SIGKILL)
+        except OSError: pass
+
+stop_procs(lambda a: any('chromium' in x or 'chrome' in x for x in a[:2]) and '--remote-debugging-port=9222' in a)
+stop_procs(lambda a: any('websockify' in x for x in a[:3]) and '127.0.0.1:5999' in a)
+stop_procs(lambda a: any('openbox' in x for x in a[:2]) and 'agent-vm-browser' in ' '.join(a))
+stop_procs(lambda a: any('x11vnc' in x for x in a[:2]) and '5999' in a)
+stop_procs(lambda a: any(('Xtigervnc' in x or 'Xvfb' in x) for x in a[:2]) and ':99' in a)
+"""#
+
     static let resizeScript = #"""
 import os, re, subprocess, json, shutil
 
@@ -1127,15 +1346,21 @@ actual = f'{w}x{h}'
 if xrandr:
     q = subprocess.run([xrandr, '--query'], env=env, capture_output=True, text=True)
     m_out = re.search(r'^(\S+)\s+connected', q.stdout, re.M)
-    out_name = m_out.group(1) if m_out else 'screen'
-    mode_name = f'{w}x{h}_avm'
-    if mode_name in q.stdout:
+    out_name = m_out.group(1) if m_out else 'VNC-0'
+    mode_name = f'{w}x{h}'
+    if re.search(rf'^\s+{re.escape(mode_name)}\s+', q.stdout, re.M):
         subprocess.run([xrandr, '--output', out_name, '--mode', mode_name], env=env, capture_output=True)
-    elif cvt:
-        c = subprocess.run([cvt, str(w), str(h), '60'], capture_output=True, text=True)
-        ml = re.search(r'Modeline\s+"[^"]+"\s+(.*)', c.stdout)
-        if ml:
-            params = ml.group(1).split()
+    else:
+        if cvt:
+            c = subprocess.run([cvt, str(w), str(h), '60'], capture_output=True, text=True)
+            ml = re.search(r'Modeline\s+"[^"]+"\s+(.*)', c.stdout)
+            params = ml.group(1).split() if ml else None
+        else:
+            htotal = w + 160
+            vtotal = h + 30
+            pclk = round((htotal * vtotal * 60.0) / 1e6, 2)
+            params = [str(pclk), str(w), str(w + 48), str(w + 80), str(htotal), str(h), str(h + 3), str(h + 8), str(vtotal), '-hsync', '+vsync']
+        if params:
             subprocess.run([xrandr, '--newmode', mode_name] + params, env=env, capture_output=True)
             subprocess.run([xrandr, '--addmode', out_name, mode_name], env=env, capture_output=True)
             subprocess.run([xrandr, '--output', out_name, '--mode', mode_name], env=env, capture_output=True)

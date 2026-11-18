@@ -91,6 +91,22 @@ struct ReactWorkbenchView: NSViewRepresentable {
             return d
         }
 
+        private func agentQuotaData(_ q: AgentQuotaResult) -> [String: Any] {
+            var d: [String: Any] = ["status": q.status]
+            if let plan = q.planType { d["plan_type"] = plan }
+            if let err = q.error { d["error"] = err }
+            if let wins = q.windows {
+                d["windows"] = wins.map { w -> [String: Any] in
+                    var wd: [String: Any] = ["label": w.label, "used_percent": w.usedPercent]
+                    if let sec = w.resetAfterSeconds { wd["reset_after_seconds"] = sec }
+                    if let at = w.resetAt { wd["reset_at"] = at }
+                    return wd
+                }
+            }
+            if let at = q.fetchedAt { d["fetchedAt"] = DateFormatter.localizedString(from: at, dateStyle: .none, timeStyle: .short) }
+            return d
+        }
+
         private func proxyData(_ p: ProxyStatusResponse) -> [String: Any] {
             var d: [String: Any] = [
                 "proxy_mode":p.proxyMode, "managed_enabled":p.managedEnabled,
@@ -157,6 +173,10 @@ struct ReactWorkbenchView: NSViewRepresentable {
             }
             var quota: [String:[String:Any]] = [:]
             for (name,q) in model.vmQuotas { quota[name] = quotaData(q) }
+            var agentQuotas: [String: [String: [String: Any]]] = [:]
+            for (name, map) in model.vmAgentQuotas {
+                agentQuotas[name] = map.mapValues { agentQuotaData($0) }
+            }
             var mounts: [String:[[String:Any]]] = [:]
             for (name, entries) in model.managedFolders {
                 mounts[name] = entries.map { ["path":$0.path, "mode":$0.mode] }
@@ -172,9 +192,13 @@ struct ReactWorkbenchView: NSViewRepresentable {
                         "stageMessage": browser.stageMessage,
                         "url": browser.url,
                         "error": browser.error,
+                        "checked": browser.checked,
+                        "installed": browser.installed,
+                        "appRunning": browser.appRunning,
                         "missing": browser.missingComponents,
                         "resolution": browser.resolution,
                         "qualityMode": browser.qualityMode,
+                        "autoResize": browser.autoResize,
                         "tabs": browser.tabs,
                         "activeTabId": browser.activeTabId,
                         "activeURL": browser.activeURL,
@@ -192,7 +216,9 @@ struct ReactWorkbenchView: NSViewRepresentable {
                         "stageMessage": d.stageMessage,
                         "url": d.url,
                         "error": d.error,
+                        "checked": d.checked,
                         "installed": d.installed,
+                        "appRunning": d.appRunning,
                         "appVersion": d.appVersion,
                         "diskAvailMB": d.diskAvailMB,
                         "missing": d.missingComponents,
@@ -208,7 +234,7 @@ struct ReactWorkbenchView: NSViewRepresentable {
                 "browserShortcut":model.browserShortcutSignal,
                 "requestedPage":model.requestedPage,
                 "toasts":model.toasts,
-                "vms":vms, "usage":usage, "quotas":quota, "mounts":mounts, "agents":model.vmAgents,
+                "vms":vms, "usage":usage, "quotas":quota, "agentQuotas":agentQuotas, "mounts":mounts, "agents":model.vmAgents,
                 "vmProxyRoutes":model.vmProxyRoutes,
                 "busy":model.busy, "proxyBusy":model.proxyBusy,
                 "hostDiskAvailGB":model.hostDiskAvailGB(),
@@ -273,6 +299,10 @@ struct ReactWorkbenchView: NSViewRepresentable {
                 if let vm = existingVM(payload) { model.openCodeEditor(vm) }
             case "codeRetry":
                 if let vm = existingVM(payload) { model.prepareCodeEditor(vm, retry: true) }
+            case "browserCheck":
+                if let vm = existingVM(payload) {
+                    model.checkLinuxBrowser(vm)
+                }
             case "browserOpen":
                 if let vm = existingVM(payload) {
                     model.activeBrowserVM = vm.name
@@ -280,6 +310,16 @@ struct ReactWorkbenchView: NSViewRepresentable {
                     let h = (payload["height"] as? NSNumber)?.intValue ?? 800
                     let qMode = payload["qualityMode"] as? String
                     model.openLinuxBrowser(vm, width: w, height: h, qualityMode: qMode)
+                }
+            case "browserRestart":
+                if let vm = existingVM(payload) {
+                    let w = (payload["width"] as? NSNumber)?.intValue ?? 1280
+                    let h = (payload["height"] as? NSNumber)?.intValue ?? 800
+                    model.restartLinuxBrowser(vm, width: w, height: h)
+                }
+            case "browserSetAutoResize":
+                if let vm = existingVM(payload), let enabled = payload["enabled"] as? Bool {
+                    model.setBrowserAutoResize(vm, enabled: enabled)
                 }
             case "browserSelect":
                 if let vm = existingVM(payload) {

@@ -111,12 +111,21 @@ struct CodexDesktopFloatingOverlay: View {
 
                         Divider()
 
-                        HStack(spacing: 8) {
+                        HStack(spacing: 6) {
                             Button {
                                 showControls = false
                                 model.restartCodexDesktop(vm)
                             } label: {
                                 Label("重启", systemImage: "power")
+                            }
+                            .controlSize(.small)
+                            .buttonStyle(.bordered)
+
+                            Button {
+                                showControls = false
+                                model.stopCodexDesktop(vm)
+                            } label: {
+                                Label("休眠", systemImage: "moon.zzz")
                             }
                             .controlSize(.small)
                             .buttonStyle(.bordered)
@@ -141,7 +150,7 @@ struct CodexDesktopFloatingOverlay: View {
                         }
                     }
                     .padding(12)
-                    .frame(width: 272)
+                    .frame(width: 296)
                     .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                     .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(.primary.opacity(0.12)))
                     .shadow(color: .black.opacity(0.16), radius: 14, y: 6)

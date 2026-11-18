@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from 'react';
-import { Monitor, MoreHorizontal, Play, Square, Terminal, Globe, Sparkles } from 'lucide-react';
+import { AppWindow, Monitor, MoreHorizontal, Play, Square, Terminal, Globe } from 'lucide-react';
 import { bridge, agentLabel } from '../bridge.js';
 
 export function IconButton({ title, children, onClick, disabled = false, danger = false }) {
@@ -104,14 +104,31 @@ export function SectionTitle({ title, sub, children }) {
   );
 }
 
+const QUOTA_APPS = ['codex', 'agy', 'claude'];
+
+export function quotaStatusText(q) {
+  if (!q) return '查询中…';
+  if (q.status === 'not_logged_in') return '未登录';
+  if (q.status === 'unauthorized') return '登录已过期';
+  if (q.status === 'api_key') return q.plan_type ? `${q.plan_type}（按量）` : 'API Key';
+  if (q.status === 'error') return q.error || '查询失败';
+  return '';
+}
+
 export function VMCard({ vm, state, select }) {
   const running = vm.status === 'Running';
   const editor = state.editors?.[vm.name];
-  const quota = state.quotas[vm.name];
+  const agentQuotas = state.agentQuotas?.[vm.name] || {};
+  const legacyQuota = state.quotas[vm.name];
   const usage = state.usage[vm.name];
-  const agents = state.agents?.[vm.name];
-  const hasAgents = Array.isArray(agents);
-  const hasCodex = !hasAgents || agents.includes('codex');
+  const rawAgents = state.agents?.[vm.name];
+  const hasAgents = Array.isArray(rawAgents);
+  const quotaApps = hasAgents
+    ? QUOTA_APPS.filter(a => rawAgents.includes(a))
+    : Object.keys(agentQuotas).filter(a => QUOTA_APPS.includes(a));
+  const hasCodex = quotaApps.includes('codex');
+  const hasClaude = quotaApps.includes('claude');
+  const hasAgy = quotaApps.includes('agy');
   const agentBusy = (state.codex?.runningVMs || []).includes(vm.name);
   const name = vm.displayName || vm.name;
   const routeNode = state.vmProxyRoutes?.[vm.name]
@@ -159,17 +176,41 @@ export function VMCard({ vm, state, select }) {
         </div>
       </div>
 
-      {(quota?.status === 'ok' || (running && hasAgents && agents.length > 0)) && (
-        <div className="quota-inline">
-          <span className="vm-meta-agents">
-            {running && hasAgents && agents.length > 0 ? agents.map(agentLabel).join(' · ') : 'Codex'}
-          </span>
-          {hasCodex && quota?.status === 'ok' && (
-            <div className="quota-chips">
-              <QuotaChip label="5h" win={quota.five_hour} compact />
-              <QuotaChip label="7d" win={quota.weekly} compact />
-            </div>
-          )}
+      {quotaApps.length > 0 && (
+        <div className="vm-quota-list">
+          {quotaApps.map(app => {
+            const q =
+              agentQuotas[app] ||
+              (app === 'codex' && legacyQuota
+                ? {
+                    ...legacyQuota,
+                    windows: [
+                      legacyQuota.five_hour ? { label: '5h', ...legacyQuota.five_hour } : null,
+                      legacyQuota.weekly ? { label: '7d', ...legacyQuota.weekly } : null,
+                    ].filter(Boolean),
+                  }
+                : null);
+            const wins = q?.status === 'ok' ? q.windows || [] : [];
+            return (
+              <div className="quota-inline" key={app}>
+                <span className="vm-meta-agents">{agentLabel(app)}</span>
+                {wins.length > 0 ? (
+                  <div className="quota-chips">
+                    {wins.map((w, idx) => (
+                      <QuotaChip
+                        key={w.label || idx}
+                        label={w.label === '5 小时' ? '5h' : w.label === '每周' ? '7d' : w.label || String(idx + 1)}
+                        win={w}
+                        compact
+                      />
+                    ))}
+                  </div>
+                ) : (
+                  <span className="muted text-xs">{running ? quotaStatusText(q) : '已停止'}</span>
+                )}
+              </div>
+            );
+          })}
         </div>
       )}
 
@@ -194,11 +235,19 @@ export function VMCard({ vm, state, select }) {
       )}
 
       <div className="card-actions">
-        <button className="primary" style={{ padding: '7px 11px', minHeight: '31px' }} onClick={() => select({ type: 'chatOpen', vm })} disabled={!running}>
-          <Sparkles size={14} /> 对话
-        </button>
+        {hasCodex && (
+          <button
+            className="primary"
+            style={{ padding: '7px 11px', minHeight: '31px' }}
+            onClick={() => select({ type: 'codexDesktopOpen', vm })}
+            disabled={!running}
+          >
+            <AppWindow size={14} /> Codex 桌面
+          </button>
+        )}
         <button
-          className="secondary"
+          className={hasCodex ? 'secondary' : 'primary'}
+          style={hasCodex ? undefined : { padding: '7px 11px', minHeight: '31px' }}
           onClick={() => select({ type: 'browserOpen', vm })}
           disabled={!running || state.browsers?.[vm.name]?.status === 'starting'}
           title="在应用内打开 Linux 浏览器"
@@ -210,25 +259,22 @@ export function VMCard({ vm, state, select }) {
         </button>
         <div className="flex-fill" />
         <MoreMenu>
-          <button disabled={!running} onClick={() => select({ type: 'codexDesktopOpen', vm })}>
-            打开官方 Codex 桌面端
-          </button>
           <button disabled={!running || editor?.status !== 'ready'} onClick={() => bridge('codeOpen', { name: vm.name })}>
             打开 Web Code
           </button>
-          {(!hasAgents || agents.includes('codex')) && (
+          {hasCodex && (
             <button disabled={!running} onClick={() => bridge('resume', { name: vm.name, agent: 'codex' })}>
               恢复 Codex 终端会话
             </button>
           )}
-          {(!hasAgents || agents.includes('claude')) && (
+          {hasClaude && (
             <button disabled={!running} onClick={() => bridge('resume', { name: vm.name, agent: 'claude' })}>
               恢复 Claude 终端会话
             </button>
           )}
-          {(!hasAgents || agents.includes('agy')) && (
+          {hasAgy && (
             <button disabled={!running} onClick={() => bridge('resume', { name: vm.name, agent: 'agy' })}>
-              打开 AGY
+              打开 Antigravity
             </button>
           )}
           <button onClick={() => select({ type: 'rename', vm })}>修改名称</button>
@@ -237,7 +283,7 @@ export function VMCard({ vm, state, select }) {
           </button>
           <button onClick={() => select({ type: 'mounts', vm })}>管理共享文件夹</button>
           <button onClick={() => select({ type: 'proxyRoute', vm })}>代理出口</button>
-          {(hasCodex || quota?.status === 'ok') && (
+          {quotaApps.length > 0 && (
             <button onClick={() => bridge('quota', { name: vm.name })} disabled={!running}>
               刷新额度
             </button>

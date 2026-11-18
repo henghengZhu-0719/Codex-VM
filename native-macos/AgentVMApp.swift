@@ -51,6 +51,57 @@ struct CodexWindowQuota: Codable {
     var isLow: Bool { remainingPercent <= 15 }
 }
 
+struct QuotaWindowItem: Codable {
+    let label: String
+    let usedPercent: Int
+    let resetAfterSeconds: Int?
+    let resetAt: Int64?
+
+    enum CodingKeys: String, CodingKey {
+        case label
+        case usedPercent = "used_percent"
+        case resetAfterSeconds = "reset_after_seconds"
+        case resetAt = "reset_at"
+    }
+
+    var remainingPercent: Int { max(0, min(100, 100 - usedPercent)) }
+    var isLow: Bool { remainingPercent <= 15 }
+}
+
+struct AgentQuotaResult: Decodable {
+    let status: String
+    let planType: String?
+    let windows: [QuotaWindowItem]?
+    let error: String?
+    let fetchedAt: Date?
+
+    enum CodingKeys: String, CodingKey {
+        case status, windows, error
+        case planType = "plan_type"
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        status = try c.decode(String.self, forKey: .status)
+        planType = try c.decodeIfPresent(String.self, forKey: .planType)
+        windows = try c.decodeIfPresent([QuotaWindowItem].self, forKey: .windows)
+        error = try c.decodeIfPresent(String.self, forKey: .error)
+        fetchedAt = Date()
+    }
+
+    init(status: String, planType: String? = nil, windows: [QuotaWindowItem]? = nil, error: String? = nil, fetchedAt: Date? = Date()) {
+        self.status = status
+        self.planType = planType
+        self.windows = windows
+        self.error = error
+        self.fetchedAt = fetchedAt
+    }
+}
+
+struct VMQuotasEnvelope: Decodable {
+    let agents: [String: AgentQuotaResult]?
+}
+
 struct CodexQuotaStatus: Decodable {
     let status: String
     let planType: String?
@@ -123,7 +174,9 @@ struct CodexQuotaStatus: Decodable {
     @Published var proxyDownloadTotal: Int64 = 0
     @Published var vmAliases: [String: String] = UserDefaults.standard.dictionary(forKey: "vmAliases") as? [String: String] ?? [:]
     @Published var vmProxyRoutes: [String: String] = UserDefaults.standard.dictionary(forKey: "vmProxyRoutes") as? [String: String] ?? [:]
+    @Published var vmSelectedAgents: [String: [String]] = UserDefaults.standard.dictionary(forKey: "vmSelectedAgents") as? [String: [String]] ?? [:]
     @Published var vmQuotas: [String: CodexQuotaStatus] = [:]
+    @Published var vmAgentQuotas: [String: [String: AgentQuotaResult]] = [:]
     @Published var vmUsage: [String: VMUsage] = [:]
     @Published var vmAgents: [String: [String]] = [:]
     @Published var usageErrors: Set<String> = []
@@ -170,6 +223,9 @@ struct CodexQuotaStatus: Decodable {
     private var quotaTimer: Timer?
     private var usageTimer: Timer?
     private var usagePolling: Set<String> = []
+    private var codexDesktopLastActiveAt: [String: Date] = [:]
+    private var browserLastActiveAt: [String: Date] = [:]
+    private let guiIdleLimitSeconds: TimeInterval = 600
     let executable: String
 
     init() {
@@ -214,6 +270,7 @@ struct CodexQuotaStatus: Decodable {
             Task { @MainActor in
                 self?.pollRunningUsage()
                 self?.refreshCodeEditors()
+                self?.reclaimIdleGUIs()
             }
         }
     }
@@ -471,20 +528,27 @@ cat /var/lib/agent-vm-region/status
                         self.buildComplete = true
                         self.rebuildBase = false
                         self.busy = false
-                        if selectedProject.hasPrefix(NSHomeDirectory() + "/AgentVM-Workspaces/") {
-                            let label = self.newVMName.trimmingCharacters(in: .whitespacesAndNewlines)
-                            if !label.isEmpty {
-                                self.run(["name", selectedProject]) { code, rawName in
-                                    guard code == 0 else { return }
-                                    let vmName = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
-                                    if !vmName.isEmpty {
-                                        self.vmAliases[vmName] = label
-                                        UserDefaults.standard.set(self.vmAliases, forKey: "vmAliases")
-                                    }
+                        let selectedList = [
+                            self.includeCodex ? "codex" : nil,
+                            self.includeAgy ? "agy" : nil,
+                            self.includeClaude ? "claude" : nil
+                        ].compactMap { $0 }
+                        self.run(["name", selectedProject]) { code, rawName in
+                            guard code == 0 else { self.refresh(); return }
+                            let vmName = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+                            guard !vmName.isEmpty else { self.refresh(); return }
+                            self.vmSelectedAgents[vmName] = selectedList
+                            UserDefaults.standard.set(self.vmSelectedAgents, forKey: "vmSelectedAgents")
+                            self.vmAgents[vmName] = selectedList
+                            if selectedProject.hasPrefix(NSHomeDirectory() + "/AgentVM-Workspaces/") {
+                                let label = self.newVMName.trimmingCharacters(in: .whitespacesAndNewlines)
+                                if !label.isEmpty {
+                                    self.vmAliases[vmName] = label
+                                    UserDefaults.standard.set(self.vmAliases, forKey: "vmAliases")
                                 }
                             }
+                            self.refresh()
                         }
-                        self.refresh()
                     }
                 }
             }
@@ -518,9 +582,7 @@ cat /var/lib/agent-vm-region/status
             "set -euo pipefail",
             "export PATH=\"$HOME/.local/bin:$HOME/.claude/local/bin:$PATH\""
         ]
-        var needed = false
         if includeCodex {
-            needed = true
             steps.append("""
             if ! command -v codex >/dev/null 2>&1; then
               if ! command -v npm >/dev/null 2>&1; then
@@ -531,7 +593,6 @@ cat /var/lib/agent-vm-region/status
             """)
         }
         if includeClaude {
-            needed = true
             steps.append("""
             if ! command -v claude >/dev/null 2>&1; then
               curl -fsSL https://claude.ai/install.sh | bash
@@ -542,7 +603,6 @@ cat /var/lib/agent-vm-region/status
             """)
         }
         if includeClaude && includeBrowser {
-            needed = true
             steps.append("""
             if ! command -v chromium >/dev/null 2>&1 || ! command -v websockify >/dev/null 2>&1 || [ ! -f /usr/share/novnc/vnc.html ]; then
               sudo apt-get update && sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends chromium fonts-liberation fonts-dejavu-core xvfb xauth openbox x11vnc novnc websockify </dev/null
@@ -557,7 +617,6 @@ cat /var/lib/agent-vm-region/status
             """)
         }
         if includeAgy {
-            needed = true
             steps.append("""
             if ! command -v agy >/dev/null 2>&1; then
               curl -fsSL https://antigravity.google/cli/install.sh | bash
@@ -566,14 +625,17 @@ cat /var/lib/agent-vm-region/status
             """)
         }
         if includeCodeServer {
-            needed = true
             steps.append("""
             if ! command -v code-server >/dev/null 2>&1; then
               curl -fsSL https://code-server.dev/install.sh | sh
             fi
             """)
         }
-        guard needed else { completion(true); return }
+        let selectedCSV = [includeCodex ? "codex" : nil, includeAgy ? "agy" : nil, includeClaude ? "claude" : nil].compactMap { $0 }.joined(separator: ",")
+        steps.append("""
+        mkdir -p "$HOME/.config"
+        printf '%s\\n' '\(selectedCSV)' > "$HOME/.config/agent-vm-selected-agents"
+        """)
         let script = steps.joined(separator: "\n")
         run(["run", "--", "bash", "-lc", script], cwd: project) { code, text in
             if !text.isEmpty { self.output += text }
@@ -603,8 +665,16 @@ cat /var/lib/agent-vm-region/status
                         self.prepareCodeEditor(vm)
                     }
                 }
-                if vm.status == "Running", vm.name != "base", vm.name != "base-building", self.vmQuotas[vm.name] == nil {
-                    self.pollQuota(for: vm)
+                if vm.status == "Running", vm.name != "base", vm.name != "base-building" {
+                    if self.vmAgentQuotas[vm.name] == nil {
+                        self.pollQuota(for: vm)
+                    }
+                    if self.codexDesktops[vm.name]?.checked != true {
+                        self.checkCodexDesktop(vm)
+                    }
+                    if self.linuxBrowsers[vm.name]?.checked != true {
+                        self.checkLinuxBrowser(vm)
+                    }
                 }
             }
             self.refreshManagedFolders()
@@ -651,6 +721,10 @@ cat /var/lib/agent-vm-region/status
     func dismissToast(id: String) {
         toasts.removeAll { ($0["id"] as? String) == id }
     }
+    func checkLinuxBrowser(_ vm: VM) {
+        guard vm.status == "Running", vm.name != "base", vm.name != "base-building" else { return }
+        linuxBrowserManager.checkStatus(name: vm.name, config: sshConfigPath(for: vm.name))
+    }
     func openLinuxBrowser(_ vm: VM, width: Int = 1280, height: Int = 800, qualityMode: String? = nil) {
         guard vm.status == "Running", vm.name != "base", vm.name != "base-building" else { return }
         let w = width > 100 ? width : max(800, Int(browserSlot.width))
@@ -663,6 +737,29 @@ cat /var/lib/agent-vm-region/status
     }
     func setBrowserQuality(_ vm: VM, qualityMode: String) {
         linuxBrowserManager.setQuality(name: vm.name, qualityMode: qualityMode)
+    }
+    func setBrowserAutoResize(_ vm: VM, enabled: Bool) {
+        let w = max(800, Int(browserSlot.width))
+        let h = max(500, Int(browserSlot.height))
+        linuxBrowserManager.setAutoResize(name: vm.name, enabled: enabled, config: sshConfigPath(for: vm.name), width: w, height: h)
+    }
+    func restartLinuxBrowser(_ vm: VM, width: Int = 0, height: Int = 0) {
+        guard vm.status == "Running" else { return }
+        let w = width > 100 ? width : max(800, Int(browserSlot.width))
+        let h = height > 100 ? height : max(500, Int(browserSlot.height))
+        linuxBrowserManager.restartApp(name: vm.name, config: sshConfigPath(for: vm.name), width: w, height: h)
+    }
+    func requestBrowserPicker() {
+        requestedPage = ["page": "browser", "pick": true, "nonce": UUID().uuidString]
+    }
+    func stopLinuxBrowser(_ vm: VM, reasonToast: String? = nil) {
+        browserLastActiveAt.removeValue(forKey: vm.name)
+        linuxBrowserManager.stopSession(name: vm.name, config: sshConfigPath(for: vm.name)) { [weak self] in
+            self?.pollUsage(for: vm)
+            if let reasonToast {
+                self?.pushToast(title: reasonToast, message: self?.displayName(for: vm) ?? vm.name, level: "info", vmName: vm.name)
+            }
+        }
     }
     func browserInspect(_ vm: VM) {
         guard vm.status == "Running" else { return }
@@ -796,6 +893,49 @@ cat /var/lib/agent-vm-region/status
     func requestCodexDesktopPicker() {
         requestedPage = ["page": "codexDesktop", "pick": true, "nonce": UUID().uuidString]
     }
+    func stopCodexDesktop(_ vm: VM, reasonToast: String? = nil) {
+        codexDesktopLastActiveAt.removeValue(forKey: vm.name)
+        codexDesktopManager.stopSession(name: vm.name, config: sshConfigPath(for: vm.name)) { [weak self] in
+            self?.pollUsage(for: vm)
+            if let reasonToast {
+                self?.pushToast(title: reasonToast, message: self?.displayName(for: vm) ?? vm.name, level: "info", vmName: vm.name)
+            }
+        }
+    }
+    func reclaimIdleGUIs() {
+        let now = Date()
+        for vm in machines where vm.status == "Running" && vm.name != "base" && vm.name != "base-building" {
+            let desktopActive = codexDesktopSlotVisible && activeCodexDesktopVM == vm.name
+            if desktopActive {
+                codexDesktopLastActiveAt[vm.name] = now
+            } else if let st = codexDesktops[vm.name], (st.status == "ready" || st.appRunning), !st.installing {
+                if let last = codexDesktopLastActiveAt[vm.name] {
+                    if now.timeIntervalSince(last) >= guiIdleLimitSeconds {
+                        stopCodexDesktop(vm, reasonToast: "已休眠闲置桌面以释放内存")
+                    }
+                } else {
+                    codexDesktopLastActiveAt[vm.name] = now
+                }
+            } else {
+                codexDesktopLastActiveAt.removeValue(forKey: vm.name)
+            }
+
+            let browserActive = browserSlotVisible && activeBrowserVM == vm.name
+            if browserActive {
+                browserLastActiveAt[vm.name] = now
+            } else if let bst = linuxBrowsers[vm.name], (bst.status == "ready" || bst.appRunning), !bst.installing {
+                if let last = browserLastActiveAt[vm.name] {
+                    if now.timeIntervalSince(last) >= guiIdleLimitSeconds {
+                        stopLinuxBrowser(vm, reasonToast: "已休眠闲置浏览器以释放内存")
+                    }
+                } else {
+                    browserLastActiveAt[vm.name] = now
+                }
+            } else {
+                browserLastActiveAt.removeValue(forKey: vm.name)
+            }
+        }
+    }
     func installCodexDesktop(_ vm: VM, width: Int = 1280, height: Int = 800) {
         guard vm.status == "Running", vm.name != "base", vm.name != "base-building" else { return }
         let w = width > 100 ? width : max(800, Int(codexDesktopSlot.width))
@@ -852,10 +992,18 @@ cat /var/lib/agent-vm-region/status
         mem=$(awk '/^MemTotal:/ { total=$2 } /^MemAvailable:/ { available=$2 } END { if(total>0 && available>=0) printf "%.0f|%.0f", (total-available)/1024, total/1024 }' /proc/meminfo)
         agents=""
         PATH="$HOME/.local/bin:$HOME/.claude/local/bin:$PATH"
-        for a in codex claude agy opencode vibe pi; do
+        for a in codex claude agy; do
           command -v "$a" >/dev/null 2>&1 && agents="${agents:+$agents,}$a"
         done
-        printf '%s|%s|%s\n' "$cpu" "$mem" "$agents"
+        selected=""
+        if [ -f "$HOME/.config/agent-vm-selected-agents" ]; then
+          selected=$(tr -d '\r\n ' < "$HOME/.config/agent-vm-selected-agents")
+        fi
+        auths=""
+        [ -f "$HOME/.codex/auth.json" ] && auths="${auths:+$auths,}codex"
+        [ -f "$HOME/.gemini/antigravity-cli/antigravity-oauth-token" ] && auths="${auths:+$auths,}agy"
+        [ -f "$HOME/.claude/.credentials.json" ] && auths="${auths:+$auths,}claude"
+        printf '%s|%s|%s|%s|%s\n' "$cpu" "$mem" "$agents" "$selected" "$auths"
         """#
         DispatchQueue.global(qos: .utility).async {
             let process = Process()
@@ -869,6 +1017,8 @@ cat /var/lib/agent-vm-region/status
             process.standardError = FileHandle.nullDevice
             var result: VMUsage?
             var detectedAgents: [String]?
+            var guestSelected: [String]?
+            var authFlags: Set<String> = []
             do {
                 try process.run()
                 let data = output.fileHandleForReading.readDataToEndOfFile()
@@ -886,6 +1036,13 @@ cat /var/lib/agent-vm-region/status
                     }
                     if parts.count >= 4 {
                         detectedAgents = parts[3].split(separator: ",").map(String.init).filter { !$0.isEmpty }
+                    }
+                    if parts.count >= 5 {
+                        let rawSel = parts[4].split(separator: ",").map(String.init).filter { ["codex", "agy", "claude"].contains($0) }
+                        if !rawSel.isEmpty { guestSelected = rawSel }
+                    }
+                    if parts.count >= 6 {
+                        authFlags = Set(parts[5].split(separator: ",").map(String.init).filter { !$0.isEmpty })
                     }
                 }
             } catch {
@@ -906,8 +1063,31 @@ cat /var/lib/agent-vm-region/status
                     self.vmUsage.removeValue(forKey: name)
                     self.usageErrors.insert(name)
                 }
-                if let detectedAgents {
-                    self.vmAgents[name] = detectedAgents
+                let effective: [String]
+                if let saved = self.vmSelectedAgents[name], !saved.isEmpty {
+                    effective = saved
+                } else if let guestSel = guestSelected, !guestSel.isEmpty {
+                    effective = guestSel
+                    self.vmSelectedAgents[name] = guestSel
+                    UserDefaults.standard.set(self.vmSelectedAgents, forKey: "vmSelectedAgents")
+                } else if let detected = detectedAgents {
+                    let detSet = Set(detected)
+                    var inferred: [String] = []
+                    if detSet.contains("codex") && (authFlags.contains("codex") || (!detSet.contains("agy") && !detSet.contains("claude"))) {
+                        inferred.append("codex")
+                    }
+                    if detSet.contains("agy") { inferred.append("agy") }
+                    if detSet.contains("claude") { inferred.append("claude") }
+                    effective = inferred
+                } else {
+                    effective = []
+                }
+                let prev = self.vmAgents[name]
+                if detectedAgents != nil || !effective.isEmpty {
+                    self.vmAgents[name] = effective
+                    if prev != effective, let vmObj = self.machines.first(where: { $0.name == name }) {
+                        self.pollQuota(for: vmObj)
+                    }
                 }
             }
         }
@@ -1589,6 +1769,9 @@ cat /var/lib/agent-vm-region/status
                 self.vmMounts.removeValue(forKey: vm.name)
                 self.managedFolders.removeValue(forKey: vm.name)
                 self.vmQuotas.removeValue(forKey: vm.name)
+                self.vmAgentQuotas.removeValue(forKey: vm.name)
+                self.vmSelectedAgents.removeValue(forKey: vm.name)
+                UserDefaults.standard.set(self.vmSelectedAgents, forKey: "vmSelectedAgents")
                 self.vmUsage.removeValue(forKey: vm.name)
                 self.usageErrors.remove(vm.name)
                 self.vmProxyRoutes.removeValue(forKey: vm.name)
@@ -2095,41 +2278,200 @@ cat /var/lib/agent-vm-region/status
 
         quotaPolling.insert(vm.name)
         let vmName = vm.name
+        let configuredAgents = vmSelectedAgents[vmName] ?? vmAgents[vmName] ?? []
+        let targetsJSONData = (try? JSONSerialization.data(withJSONObject: configuredAgents)) ?? Data("[]".utf8)
+        let targetsJSON = String(data: targetsJSONData, encoding: .utf8) ?? "[]"
         let script = """
-import json, os, urllib.error, urllib.request
-p = os.path.expanduser("~/.codex/auth.json")
-if not os.path.exists(p):
-    print(json.dumps({"status": "not_logged_in"}))
-    raise SystemExit(0)
-try:
-    d = json.load(open(p))
-    tok = d.get("tokens", {}).get("access_token", "")
-    acc = d.get("tokens", {}).get("account_id", "")
+import datetime, json, os, shutil, subprocess, urllib.error, urllib.request
+
+SUPPORTED = ('codex', 'agy', 'claude')
+targets = [a for a in \(targetsJSON) if a in SUPPORTED]
+env_path = os.path.expanduser('~/.local/bin') + ':' + os.path.expanduser('~/.claude/local/bin') + ':' + os.environ.get('PATH', '')
+
+if not targets:
+    sel_file = os.path.expanduser('~/.config/agent-vm-selected-agents')
+    if os.path.isfile(sel_file):
+        try:
+            raw = open(sel_file).read().strip()
+            targets = [x.strip() for x in raw.split(',') if x.strip() in SUPPORTED]
+        except Exception:
+            pass
+    if not targets:
+        has_codex = bool(shutil.which('codex', path=env_path))
+        has_agy = bool(shutil.which('agy', path=env_path))
+        has_claude = bool(shutil.which('claude', path=env_path))
+        if has_codex and (os.path.exists(os.path.expanduser('~/.codex/auth.json')) or (not has_agy and not has_claude)):
+            targets.append('codex')
+        if has_agy:
+            targets.append('agy')
+        if has_claude:
+            targets.append('claude')
+
+def iso_to_epoch_and_left(iso_str):
+    if not iso_str or not isinstance(iso_str, str):
+        return None, None
+    try:
+        dt = datetime.datetime.fromisoformat(iso_str.replace('Z', '+00:00'))
+        epoch = int(dt.timestamp())
+        left = max(0, int(epoch - datetime.datetime.now(datetime.timezone.utc).timestamp()))
+        return epoch, left
+    except Exception:
+        return None, None
+
+def query_codex():
+    p = os.path.expanduser('~/.codex/auth.json')
+    if not os.path.exists(p):
+        return {'status': 'not_logged_in'}
+    try:
+        d = json.load(open(p))
+        tok = d.get('tokens', {}).get('access_token', '')
+        acc = d.get('tokens', {}).get('account_id', '')
+        if not tok:
+            return {'status': 'not_logged_in'}
+        req = urllib.request.Request('https://chatgpt.com/backend-api/wham/usage', headers={
+            'Authorization': 'Bearer ' + tok,
+            'ChatGPT-Account-Id': acc,
+            'Accept': 'application/json',
+            'User-Agent': 'codex-cli/0.169.0',
+        })
+        with urllib.request.urlopen(req, timeout=10) as r:
+            u = json.loads(r.read().decode())
+        rl = u.get('rate_limit', {}) or {}
+        windows = []
+        for key, label in (('primary_window', '5 小时'), ('secondary_window', '每周')):
+            w = rl.get(key)
+            if isinstance(w, dict) and w.get('used_percent') is not None:
+                windows.append({
+                    'label': label,
+                    'used_percent': int(round(w['used_percent'])),
+                    'reset_after_seconds': w.get('reset_after_seconds'),
+                    'reset_at': w.get('reset_at'),
+                })
+        return {'status': 'ok', 'plan_type': u.get('plan_type'), 'windows': windows}
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            return {'status': 'unauthorized', 'error': f'Codex 登录已过期 (HTTP {e.code})'}
+        return {'status': 'error', 'error': f'HTTP {e.code}'}
+    except Exception as e:
+        return {'status': 'error', 'error': str(e)[:120]}
+
+def query_agy():
+    p = os.path.expanduser('~/.gemini/antigravity-cli/antigravity-oauth-token')
+    if not os.path.exists(p):
+        return {'status': 'not_logged_in'}
+    def call_api(tok):
+        req = urllib.request.Request(
+            'https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels',
+            data=b'{}',
+            headers={
+                'Authorization': 'Bearer ' + tok,
+                'Content-Type': 'application/json',
+                'User-Agent': 'antigravity/1.5.11 linux/arm64',
+            },
+            method='POST',
+        )
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return json.loads(r.read().decode())
+    try:
+        d = json.load(open(p))
+        tok = (d.get('token') or {}).get('access_token', '')
+        if not tok:
+            return {'status': 'not_logged_in'}
+        try:
+            body = call_api(tok)
+        except urllib.error.HTTPError as e:
+            if e.code == 401 and shutil.which('agy', path=env_path):
+                subprocess.run(['agy', 'models'], env=dict(os.environ, PATH=env_path), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=12)
+                d = json.load(open(p))
+                tok = (d.get('token') or {}).get('access_token', '')
+                body = call_api(tok)
+            else:
+                raise
+        models = body.get('models') or {}
+        windows = []
+        for label, prefix_tuple in (('Gemini', ('gemini-',)), ('Claude', ('claude-', 'gpt-'))):
+            candidates = []
+            for mid, info in models.items():
+                if not mid.startswith(prefix_tuple):
+                    continue
+                qi = info.get('quotaInfo') if isinstance(info, dict) else None
+                if isinstance(qi, dict) and qi.get('remainingFraction') is not None:
+                    candidates.append(qi)
+            if candidates:
+                chosen = min(candidates, key=lambda q: float(q.get('remainingFraction', 1.0)))
+                rem = max(0.0, min(1.0, float(chosen.get('remainingFraction', 1.0))))
+                used_pct = max(0, min(100, int(round((1.0 - rem) * 100))))
+                epoch, left = iso_to_epoch_and_left(chosen.get('resetTime'))
+                windows.append({
+                    'label': label,
+                    'used_percent': used_pct,
+                    'reset_after_seconds': left,
+                    'reset_at': epoch,
+                })
+        plan = d.get('id_token_email') or d.get('auth_method')
+        return {'status': 'ok', 'plan_type': plan, 'windows': windows}
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            return {'status': 'unauthorized', 'error': f'Antigravity 登录已过期 (HTTP {e.code})'}
+        return {'status': 'error', 'error': f'HTTP {e.code}'}
+    except Exception as e:
+        return {'status': 'error', 'error': str(e)[:120]}
+
+def query_claude():
+    cred = os.path.expanduser('~/.claude/.credentials.json')
+    tok = ''
+    plan = None
+    if os.path.exists(cred):
+        try:
+            cd = json.load(open(cred))
+            oauth = cd.get('claudeAiOauth') or {}
+            tok = oauth.get('accessToken', '')
+            plan = oauth.get('subscriptionType')
+        except Exception:
+            pass
     if not tok:
-        print(json.dumps({"status": "not_logged_in"}))
-        raise SystemExit(0)
-    req = urllib.request.Request("https://chatgpt.com/backend-api/wham/usage", headers={
-        "Authorization": "Bearer " + tok,
-        "ChatGPT-Account-Id": acc,
-        "Accept": "application/json",
-        "User-Agent": "codex-cli/0.169.0",
-    })
-    with urllib.request.urlopen(req, timeout=12) as r:
-        u = json.loads(r.read().decode())
-    rl = u.get("rate_limit", {})
-    print(json.dumps({
-        "status": "ok",
-        "plan_type": u.get("plan_type"),
-        "five_hour": rl.get("primary_window"),
-        "weekly": rl.get("secondary_window"),
-    }))
-except urllib.error.HTTPError as e:
-    if e.code in (401, 403):
-        print(json.dumps({"status": "unauthorized", "error": f"Codex 登录已过期 (HTTP {e.code})"}))
-    else:
-        print(json.dumps({"status": "error", "error": f"HTTP {e.code}"}))
-except Exception as e:
-    print(json.dumps({"status": "error", "error": str(e)[:120]}))
+        cli = shutil.which('claude', path=env_path)
+        if cli:
+            try:
+                out = subprocess.run([cli, 'auth', 'status'], env=dict(os.environ, PATH=env_path), capture_output=True, text=True, timeout=6)
+                if out.returncode == 0 and out.stdout.strip().startswith('{'):
+                    st = json.loads(out.stdout)
+                    if st.get('loggedIn') and st.get('authMethod') not in (None, '', 'none'):
+                        return {'status': 'api_key', 'plan_type': st.get('authMethod'), 'error': 'API Key 鉴权无窗口额度'}
+            except Exception:
+                pass
+        return {'status': 'not_logged_in'}
+    try:
+        req = urllib.request.Request('https://api.anthropic.com/api/oauth/usage', headers={
+            'Authorization': 'Bearer ' + tok,
+            'anthropic-beta': 'oauth-2025-04-20',
+            'Accept': 'application/json',
+            'User-Agent': 'claude-code/2.1.0',
+        })
+        with urllib.request.urlopen(req, timeout=10) as r:
+            u = json.loads(r.read().decode())
+        windows = []
+        for key, label in (('five_hour', '5 小时'), ('seven_day', '每周')):
+            w = u.get(key)
+            if isinstance(w, dict) and w.get('utilization') is not None:
+                epoch, left = iso_to_epoch_and_left(w.get('resets_at'))
+                windows.append({
+                    'label': label,
+                    'used_percent': max(0, min(100, int(round(float(w['utilization']))))),
+                    'reset_after_seconds': left,
+                    'reset_at': epoch,
+                })
+        return {'status': 'ok', 'plan_type': plan or 'Claude OAuth', 'windows': windows}
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            return {'status': 'unauthorized', 'error': f'Claude 登录已过期 (HTTP {e.code})'}
+        return {'status': 'error', 'error': f'HTTP {e.code}'}
+    except Exception as e:
+        return {'status': 'error', 'error': str(e)[:120]}
+
+handlers = {'codex': query_codex, 'agy': query_agy, 'claude': query_claude}
+out = {t: handlers[t]() for t in targets if t in handlers}
+print(json.dumps({'agents': out}))
 """
         DispatchQueue.global(qos: .utility).async {
             let process = Process()
@@ -2149,7 +2491,7 @@ except Exception as e:
             process.standardOutput = outPipe
             process.standardError = errPipe
             process.standardInput = inPipe
-            var result = CodexQuotaStatus(status: "error", error: "连接失败")
+            var agentMap: [String: AgentQuotaResult] = [:]
             do {
                 try process.run()
                 try inPipe.fileHandleForWriting.write(contentsOf: Data(script.utf8))
@@ -2159,19 +2501,34 @@ except Exception as e:
                 if process.terminationStatus == 0,
                    let line = (String(data: data, encoding: .utf8) ?? "").components(separatedBy: .newlines).last(where: { $0.contains("{") }),
                    let jsonData = line.data(using: .utf8),
-                   let decoded = try? JSONDecoder().decode(CodexQuotaStatus.self, from: jsonData) {
-                    result = decoded
+                   let env = try? JSONDecoder().decode(VMQuotasEnvelope.self, from: jsonData),
+                   let agents = env.agents {
+                    agentMap = agents
                 } else {
                     let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
                     let errMsg = (String(data: errData, encoding: .utf8) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-                    result = CodexQuotaStatus(status: "error", error: errMsg.isEmpty ? "无法查询 Codex 额度" : String(errMsg.prefix(120)))
+                    let msg = errMsg.isEmpty ? "无法查询额度" : String(errMsg.prefix(120))
+                    for a in (configuredAgents.isEmpty ? ["codex"] : configuredAgents) {
+                        agentMap[a] = AgentQuotaResult(status: "error", error: msg)
+                    }
                 }
             } catch {
-                result = CodexQuotaStatus(status: "error", error: error.localizedDescription)
+                let msg = error.localizedDescription
+                for a in (configuredAgents.isEmpty ? ["codex"] : configuredAgents) {
+                    agentMap[a] = AgentQuotaResult(status: "error", error: msg)
+                }
             }
             DispatchQueue.main.async {
                 self.quotaPolling.remove(vmName)
-                self.vmQuotas[vmName] = result
+                self.vmAgentQuotas[vmName] = agentMap
+                if let c = agentMap["codex"] {
+                    let wins = c.windows ?? []
+                    let w0 = wins.first.map { CodexWindowQuota(usedPercent: $0.usedPercent, resetAfterSeconds: $0.resetAfterSeconds, resetAt: $0.resetAt) }
+                    let w1 = wins.dropFirst().first.map { CodexWindowQuota(usedPercent: $0.usedPercent, resetAfterSeconds: $0.resetAfterSeconds, resetAt: $0.resetAt) }
+                    self.vmQuotas[vmName] = CodexQuotaStatus(status: c.status, planType: c.planType, fiveHour: w0, weekly: w1, error: c.error, fetchedAt: c.fetchedAt)
+                } else {
+                    self.vmQuotas.removeValue(forKey: vmName)
+                }
                 self.lastQuotaPollAt = Date()
             }
         }
@@ -3039,12 +3396,14 @@ private struct MenuBarControls: View {
             ForEach(projects) { vm in
                 Menu {
                     if vm.status == "Running" {
-                        if let quota = model.vmQuotas[vm.name], quota.status == "ok" {
-                            if let five = quota.fiveHour {
-                                Text("Codex 5 小时剩余 \(five.remainingPercent)%")
-                            }
-                            if let weekly = quota.weekly {
-                                Text("Codex 每周剩余 \(weekly.remainingPercent)%")
+                        if let aq = model.vmAgentQuotas[vm.name] {
+                            ForEach(["codex", "agy", "claude"], id: \.self) { agent in
+                                if let q = aq[agent], q.status == "ok" {
+                                    let title = agent == "codex" ? "Codex" : agent == "agy" ? "Antigravity" : "Claude"
+                                    ForEach(Array((q.windows ?? []).enumerated()), id: \.offset) { _, w in
+                                        Text("\(title) \(w.label)剩余 \(w.remainingPercent)%")
+                                    }
+                                }
                             }
                         }
                         Button("打开终端", systemImage: "terminal") { model.terminal(vm) }
@@ -3052,7 +3411,7 @@ private struct MenuBarControls: View {
                             Button("Codex…") { model.resumeSession(vm, agent: "codex") }
                             Button("Claude Code…") { model.resumeSession(vm, agent: "claude") }
                         }
-                        Button("刷新 Codex 额度", systemImage: "arrow.clockwise") { model.pollQuota(for: vm) }
+                        Button("刷新 AI 额度", systemImage: "arrow.clockwise") { model.pollQuota(for: vm) }
                             .disabled(model.quotaPolling.contains(vm.name))
                         Button("停止", systemImage: "stop.fill") { model.stop(vm) }
                             .disabled(model.busy)
@@ -3097,6 +3456,9 @@ private struct MenuBarControls: View {
                         .frame(width: model.browserSlot.width, height: model.browserSlot.height)
                         .clipShape(RoundedRectangle(cornerRadius: 12))
                         .offset(x: model.browserSlot.minX, y: model.browserSlot.minY)
+                    if let bVM = model.machines.first(where: { $0.name == model.activeBrowserVM }) {
+                        BrowserFloatingOverlay(model: model, vm: bVM, slot: model.browserSlot)
+                    }
                 }
                 if model.codexDesktopSlotVisible,
                    let state = model.codexDesktops[model.activeCodexDesktopVM],

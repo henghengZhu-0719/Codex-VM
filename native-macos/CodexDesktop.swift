@@ -8,7 +8,9 @@ struct CodexDesktopState {
     var url = ""
     var port = 0
     var error = ""
+    var checked = false
     var installed = false
+    var appRunning = false
     var appVersion = ""
     var diskAvailMB = 0
     var missingComponents: [String] = []
@@ -103,8 +105,11 @@ struct CodexDesktopState {
                     guard let obj else { return }
                     var st = self.states[name] ?? CodexDesktopState()
                     let installed = obj["installed"] as? Bool ?? false
+                    let appRunning = obj["appRunning"] as? Bool ?? false
                     let missing = obj["missing"] as? [String] ?? []
+                    st.checked = true
                     st.installed = installed
+                    st.appRunning = appRunning
                     st.appVersion = obj["version"] as? String ?? ""
                     st.diskAvailMB = obj["diskAvailMB"] as? Int ?? 0
                     st.missingComponents = missing
@@ -299,6 +304,7 @@ struct CodexDesktopState {
                         var st = self.states[name] ?? CodexDesktopState()
                         st.status = "missing"
                         st.stage = "checking"
+                        st.checked = true
                         st.installed = !missing.contains("chatgpt")
                         st.missingComponents = missing
                         st.diskAvailMB = diskAvailMB
@@ -349,7 +355,9 @@ struct CodexDesktopState {
                     st.url = url
                     st.port = port
                     st.qualityMode = qualityMode
+                    st.checked = true
                     st.installed = true
+                    st.appRunning = true
                     st.error = ""
                     st.missingComponents = []
                     self.states[name] = st
@@ -379,8 +387,43 @@ struct CodexDesktopState {
 
     func restartApp(name: String, config: String, width: Int, height: Int) {
         guard !preparing.contains(name), states[name]?.installing != true else { return }
-        let qMode = states[name]?.qualityMode ?? "balanced"
+        let qMode = states[name]?.qualityMode ?? "sharp"
         start(name: name, config: config, width: width, height: height, qualityMode: qMode, restartApp: true)
+    }
+
+    func stopSession(name: String, config: String, completion: (() -> Void)? = nil) {
+        guard !preparing.contains(name), states[name]?.installing != true else { return }
+        generations[name] = UUID()
+        resizeWorkItems[name]?.cancel()
+        resizeWorkItems.removeValue(forKey: name)
+        var st = states[name] ?? CodexDesktopState()
+        st.status = "idle"
+        st.stage = "idle"
+        st.url = ""
+        st.port = 0
+        st.appRunning = false
+        st.checked = true
+        states[name] = st
+        onChange?(states)
+
+        let script = Self.stopScript
+        DispatchQueue.global(qos: .utility).async {
+            let proc = Process(), stdin = Pipe()
+            proc.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+            proc.arguments = Self.sshControlArgs(config: config) + ["lima-" + name, "python3 -"]
+            proc.standardInput = stdin
+            proc.standardOutput = FileHandle.nullDevice
+            proc.standardError = FileHandle.nullDevice
+            do {
+                try proc.run()
+                try stdin.fileHandleForWriting.write(contentsOf: Data(script.utf8))
+                try stdin.fileHandleForWriting.close()
+                proc.waitUntilExit()
+            } catch {}
+            DispatchQueue.main.async {
+                completion?()
+            }
+        }
     }
 
     func sendText(name: String, config: String, text: String) {
@@ -545,8 +588,22 @@ if not shutil.which('websockify') or not os.path.isfile('/usr/share/novnc/vnc.ht
 if not shutil.which('xclip'): missing.append('xclip')
 if not shutil.which('xdotool'): missing.append('xdotool')
 
+def is_app_running():
+    for d in os.listdir('/proc'):
+        if not d.isdigit(): continue
+        try:
+            if os.stat('/proc/' + d).st_uid != os.getuid(): continue
+            raw = open(f'/proc/{d}/cmdline', 'rb').read().decode(errors='ignore')
+            args = [x for x in raw.split('\0') if x]
+            if any('chatgpt' in os.path.basename(x).lower() for x in args[:2]):
+                return True
+        except Exception:
+            pass
+    return False
+
 print(json.dumps({
     'installed': app_bin is not None,
+    'appRunning': is_app_running(),
     'version': get_version(),
     'diskAvailMB': disk_avail_mb(),
     'missing': missing
@@ -830,6 +887,42 @@ if text:
     p.communicate(text.encode('utf-8'))
     time.sleep(0.08)
     subprocess.run(['xdotool', 'key', '--clearmodifiers', 'ctrl+v'], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+"""#
+
+    static let stopScript = #"""
+import os, pathlib, signal, time
+
+def proc_running(match):
+    pids = []
+    for proc in pathlib.Path('/proc').iterdir():
+        if not proc.name.isdigit(): continue
+        try:
+            if proc.stat().st_uid != os.getuid(): continue
+            args = [x for x in (proc / 'cmdline').read_bytes().decode(errors='ignore').split('\0') if x]
+            if match(args): pids.append(int(proc.name))
+        except OSError:
+            pass
+    return pids
+
+def stop_procs(match, wait_sec=3.0):
+    pids = proc_running(match)
+    if not pids: return
+    for pid in pids:
+        try: os.kill(pid, signal.SIGTERM)
+        except OSError: pass
+    deadline = time.time() + wait_sec
+    while time.time() < deadline:
+        if not proc_running(match): return
+        time.sleep(0.15)
+    for pid in proc_running(match):
+        try: os.kill(pid, signal.SIGKILL)
+        except OSError: pass
+
+stop_procs(lambda a: any('chatgpt' in os.path.basename(x).lower() for x in a[:2]))
+stop_procs(lambda a: any('websockify' in x for x in a[:3]) and '127.0.0.1:5998' in a)
+stop_procs(lambda a: any('openbox' in x for x in a[:2]) and 'agent-vm-codex-desktop' in ' '.join(a))
+stop_procs(lambda a: any('x11vnc' in x for x in a[:2]) and '5998' in a)
+stop_procs(lambda a: any(('Xtigervnc' in x or 'Xvfb' in x) for x in a[:2]) and ':98' in a)
 """#
 
     static let logsScript = #"""

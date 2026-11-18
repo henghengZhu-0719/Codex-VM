@@ -19,7 +19,6 @@ import {
   Settings2,
   ShieldAlert,
   ShieldCheck,
-  Sparkles,
 } from 'lucide-react';
 import './style.css';
 import {
@@ -29,7 +28,7 @@ import {
   getRemoteToken,
   isRemoteWeb,
 } from './bridge.js';
-import { IconButton, KV, QuotaBar, SectionTitle, VMCard } from './components/SharedUI.jsx';
+import { IconButton, KV, QuotaBar, SectionTitle, VMCard, quotaStatusText } from './components/SharedUI.jsx';
 import ToastStack from './components/ToastStack.jsx';
 import ChatPage from './features/chat/ChatPage.jsx';
 import BrowserPage from './features/browser/BrowserPage.jsx';
@@ -40,6 +39,7 @@ const blank = {
   busy: false,
   proxy: null,
   quotas: {},
+  agentQuotas: {},
   usage: {},
   editors: {},
   browsers: {},
@@ -73,7 +73,6 @@ const blank = {
 
 const tabs = [
   { id: 'vms', label: '虚拟机', icon: Monitor },
-  { id: 'codex', label: 'Agent 对话', icon: Sparkles },
   { id: 'codexDesktop', label: 'Codex 官方桌面', icon: AppWindow },
   { id: 'browser', label: '浏览器', icon: Globe },
   { id: 'proxy', label: '网络代理', icon: Network },
@@ -115,6 +114,7 @@ function App() {
   const [desktopVM, setDesktopVM] = useState('');
   const [desktopPicked, setDesktopPicked] = useState(false);
   const [browserVM, setBrowserVM] = useState('');
+  const [browserPicked, setBrowserPicked] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
     try { return localStorage.getItem('agentvm.sidebarCollapsed') === '1'; } catch { return false; }
   });
@@ -204,9 +204,12 @@ function App() {
       setDesktopVM(req.vm);
       setDesktopPicked(true);
       setBrowserVM(req.vm);
+      setBrowserPicked(true);
     }
     if (req.page) setPage(req.page);
-    if (req.pick) setModal({ type: 'codexDesktopPick' });
+    if (req.pick) {
+      setModal({ type: req.page === 'browser' ? 'browserPick' : 'codexDesktopPick' });
+    }
   }, [state.requestedPage?.nonce]);
 
   const vms = useMemo(() => state.vms.filter(v => v.name !== 'base' && v.name !== 'base-building'), [state.vms]);
@@ -240,11 +243,25 @@ function App() {
     }
     if (running.length && (!browserVM || !running.some(v => v.name === browserVM))) {
       setBrowserVM(running[0].name);
+      if (running.length === 1) setBrowserPicked(true);
+    }
+    if (!running.length) {
+      setBrowserVM('');
+      setBrowserPicked(false);
     }
   }, [running, codexVMs, codexVM, desktopVM, browserVM]);
 
+  useEffect(() => {
+    if (modal?.type === 'codexDesktopPick') {
+      codexVMs.forEach(v => bridge('codexDesktopCheck', { name: v.name }));
+    } else if (modal?.type === 'browserPick') {
+      running.forEach(v => bridge('browserCheck', { name: v.name }));
+    }
+  }, [modal?.type]);
+
   const openCodexDesktopTab = () => {
     setPage('codexDesktop');
+    codexVMs.forEach(v => bridge('codexDesktopCheck', { name: v.name }));
     if (codexVMs.length > 1 && !desktopPicked) {
       setModal({ type: 'codexDesktopPick' });
     } else if (codexVMs.length === 1) {
@@ -256,7 +273,21 @@ function App() {
     }
   };
 
-  // Global keyboard shortcuts (Cmd+1..6, Cmd+N)
+  const openBrowserTab = () => {
+    setPage('browser');
+    running.forEach(v => bridge('browserCheck', { name: v.name }));
+    if (running.length > 1 && !browserPicked) {
+      setModal({ type: 'browserPick' });
+    } else if (running.length === 1) {
+      setBrowserVM(running[0].name);
+      setBrowserPicked(true);
+      setSidebarCollapsed(true);
+    } else if (browserPicked) {
+      setSidebarCollapsed(true);
+    }
+  };
+
+  // Global keyboard shortcuts (Cmd+1..6)
   useEffect(() => {
     if (isRemoteWeb) return;
     const onKey = e => {
@@ -266,17 +297,13 @@ function App() {
         e.preventDefault();
         const tid = tabs[num - 1].id;
         if (tid === 'codexDesktop') openCodexDesktopTab();
+        else if (tid === 'browser') openBrowserTab();
         else setPage(tid);
-        return;
-      }
-      if (e.key.toLowerCase() === 'n' && page === 'codex' && codexVM) {
-        e.preventDefault();
-        bridge('codexNewSession', { vm: codexVM });
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [page, codexVM]);
+  }, [page, codexVMs.length, desktopPicked, running.length, browserPicked]);
 
   const proxy = state.proxy;
   const nodes = useMemo(
@@ -300,7 +327,6 @@ function App() {
   }, [nodes, nodeFilter, activeNodeId]);
   const displayedNodes = showAllNodes ? filteredNodes : filteredNodes.slice(0, 40);
 
-  const runningTaskCount = (state.codex?.runningSessions || []).length;
   const refreshAction = page === 'proxy' ? 'proxyRefresh' : page === 'quota' ? 'refreshQuotas' : 'refresh';
 
   const act = (type, vm) => {
@@ -379,14 +405,11 @@ function App() {
                 key={t.id}
                 title={`${t.label} (⌘${idx + 1})`}
                 className={'nav-item ' + (page === t.id ? 'selected' : '')}
-                onClick={() => (t.id === 'codexDesktop' ? openCodexDesktopTab() : setPage(t.id))}
+                onClick={() => (t.id === 'codexDesktop' ? openCodexDesktopTab() : t.id === 'browser' ? openBrowserTab() : setPage(t.id))}
               >
                 <t.icon size={16} />
                 <span className="nav-text">{t.label}</span>
                 {t.id === 'vms' && <span className="nav-count">{vms.length}</span>}
-                {t.id === 'codex' && runningTaskCount > 0 && (
-                  <span className="nav-count nav-count-live">{runningTaskCount}</span>
-                )}
               </button>
             ))}
           </nav>
@@ -396,12 +419,6 @@ function App() {
               <span className="status-dot active" />
               <span>{running.length} 运行中</span>
             </div>
-            {runningTaskCount > 0 && (
-              <div className="side-status">
-                <LoaderCircle size={12} className="spin" color="var(--blue)" />
-                <span>{runningTaskCount} 任务</span>
-              </div>
-            )}
             <div className="side-status">
               <span className={'status-dot ' + (proxy?.use_proxy ? 'active' : '')} />
               <span>{proxy?.use_proxy ? '代理已开' : '直连'}</span>
@@ -439,7 +456,7 @@ function App() {
           </div>
         )}
 
-        <div className={'content' + (page === 'codex' ? ' codex-content' : page === 'codexDesktop' ? ' codex-desktop-content' : page === 'browser' ? ' browser-content' : '')}>
+        <div className={'content' + (isRemoteWeb ? ' codex-content' : page === 'codexDesktop' ? ' codex-desktop-content' : page === 'browser' ? ' browser-content' : '')}>
           {!isRemoteWeb && page === 'vms' && (
             <>
               <SectionTitle title="虚拟机">
@@ -494,15 +511,15 @@ function App() {
                         } else if (type === 'mounts' || type === 'proxyRoute') {
                           setNodeFilter('');
                           setModal({ type, vm });
-                        } else if (type === 'chatOpen') {
-                          setCodexVM(vm.name);
-                          setPage('codex');
                         } else if (type === 'codexDesktopOpen') {
                           setDesktopVM(vm.name);
                           setDesktopPicked(true);
+                          setSidebarCollapsed(true);
                           setPage('codexDesktop');
                         } else if (type === 'browserOpen') {
                           setBrowserVM(vm.name);
+                          setBrowserPicked(true);
+                          setSidebarCollapsed(true);
                           setPage('browser');
                           bridge('browserOpen', { name: vm.name });
                         } else {
@@ -529,7 +546,7 @@ function App() {
             </>
           )}
 
-          {(isRemoteWeb || page === 'codex') && (
+          {isRemoteWeb && (
             <ChatPage
               state={state}
               running={running}
@@ -560,10 +577,10 @@ function App() {
             <BrowserPage
               state={state}
               running={running}
-              browserVM={browserVM}
-              setBrowserVM={setBrowserVM}
+              browserVM={browserPicked || running.length === 1 ? browserVM : ''}
               sidebarCollapsed={sidebarCollapsed}
               modalOpen={!!modal}
+              onOpenPicker={() => setModal({ type: 'browserPick' })}
               onNavigateTab={navigateTab}
             />
           )}
@@ -577,36 +594,65 @@ function App() {
               </SectionTitle>
               <div className="quota-grid">
                 {vms.map(vm => {
-                  const q = state.quotas[vm.name];
-                  const agents = state.agents?.[vm.name];
-                  const hasAgents = Array.isArray(agents);
-                  const hasCodex = !hasAgents || agents.includes('codex');
-                  const badge = q?.plan_type
-                    ? q.plan_type.toUpperCase()
-                    : hasAgents && agents.length
-                      ? agents.map(agentLabel).join(' / ')
-                      : 'Codex';
+                  const vmAQ = state.agentQuotas?.[vm.name] || {};
+                  const legacyQ = state.quotas[vm.name];
+                  const rawAgents = state.agents?.[vm.name];
+                  const quotaApps = ['codex', 'agy', 'claude'].filter(a =>
+                    Array.isArray(rawAgents) ? rawAgents.includes(a) : !!vmAQ[a]
+                  );
                   return (
                     <section className="panel" key={vm.name}>
                       <div className="flex-between">
                         <strong>{vm.displayName || vm.name}</strong>
-                        <span className="muted">{badge}</span>
-                      </div>
-                      {q?.status === 'ok' ? (
-                        <>
-                          <QuotaBar label="5 小时" window={q.five_hour} />
-                          <QuotaBar label="每周" window={q.weekly} />
-                        </>
-                      ) : (
-                        <p className="muted">
+                        <span className="muted">
                           {vm.status !== 'Running'
                             ? '已停止'
-                            : !hasCodex
-                              ? '未安装 Codex'
-                              : q?.error || '暂无数据'}
-                        </p>
+                            : quotaApps.length
+                              ? quotaApps.map(agentLabel).join(' · ')
+                              : '无额度应用'}
+                        </span>
+                      </div>
+                      {vm.status !== 'Running' ? (
+                        <p className="muted">已停止</p>
+                      ) : quotaApps.length === 0 ? (
+                        <p className="muted">未启用 Codex / Antigravity / Claude</p>
+                      ) : (
+                        <div className="quota-agent-stack">
+                          {quotaApps.map(app => {
+                            const q =
+                              vmAQ[app] ||
+                              (app === 'codex' && legacyQ
+                                ? {
+                                    ...legacyQ,
+                                    windows: [
+                                      legacyQ.five_hour ? { label: '5 小时', ...legacyQ.five_hour } : null,
+                                      legacyQ.weekly ? { label: '每周', ...legacyQ.weekly } : null,
+                                    ].filter(Boolean),
+                                  }
+                                : null);
+                            const wins = q?.status === 'ok' ? q.windows || [] : [];
+                            const badge = q?.plan_type ? q.plan_type : quotaStatusText(q);
+                            return (
+                              <div className="quota-agent-block" key={app}>
+                                <div className="flex-between quota-agent-head">
+                                  <span>{agentLabel(app)}</span>
+                                  {badge && <small className="muted">{badge}</small>}
+                                </div>
+                                {wins.length > 0 ? (
+                                  wins.map((w, idx) => (
+                                    <QuotaBar key={w.label || idx} label={w.label || String(idx + 1)} window={w} />
+                                  ))
+                                ) : (
+                                  <p className="muted text-xs" style={{ margin: '6px 0 0' }}>
+                                    {quotaStatusText(q)}
+                                  </p>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
                       )}
-                      {hasCodex && (
+                      {quotaApps.length > 0 && (
                         <button
                           className="small-button"
                           disabled={vm.status !== 'Running'}
@@ -1032,8 +1078,14 @@ function App() {
         <ToastStack
           toasts={state.toasts || []}
           onNavigateVM={vmName => {
-            setCodexVM(vmName);
-            setPage('codex');
+            if (codexVMs.some(v => v.name === vmName)) {
+              setDesktopVM(vmName);
+              setDesktopPicked(true);
+              setSidebarCollapsed(true);
+              setPage('codexDesktop');
+            } else {
+              setPage('vms');
+            }
           }}
         />
       )}
@@ -1511,7 +1563,64 @@ function App() {
                           {!v.standalone && v.projectPath && <span>{v.projectPath}</span>}
                         </div>
                         <span className="picker-vm-badge">
-                          {d?.status === 'ready' ? '运行中' : d?.installed ? '已安装' : '需安装'}
+                          {d?.status === 'ready' || d?.appRunning
+                            ? '运行中'
+                            : !d?.checked
+                              ? '检查中…'
+                              : d?.installed && (d?.missing || []).length === 0
+                                ? '已安装'
+                                : d?.installed
+                                  ? '待补齐'
+                                  : '需安装'}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+                <div className="dialog-actions">
+                  <button className="secondary" onClick={() => setModal(null)}>
+                    关闭
+                  </button>
+                </div>
+              </>
+            )}
+
+            {modal.type === 'browserPick' && (
+              <>
+                <h2>选择浏览器虚拟机</h2>
+                <div className="picker-vm-list">
+                  {running.map(v => {
+                    const b = state.browsers?.[v.name];
+                    const isCur = browserPicked && browserVM === v.name;
+                    const name = v.displayName || v.name;
+                    return (
+                      <button
+                        key={v.name}
+                        type="button"
+                        className={'picker-vm-item' + (isCur ? ' active' : '')}
+                        onClick={() => {
+                          setBrowserVM(v.name);
+                          setBrowserPicked(true);
+                          setModal(null);
+                          setSidebarCollapsed(true);
+                          bridge('browserOpen', { name: v.name });
+                        }}
+                      >
+                        <Globe size={16} />
+                        <div className="picker-vm-info">
+                          <strong>{name}</strong>
+                          {!v.standalone && v.projectPath && <span>{v.projectPath}</span>}
+                        </div>
+                        <span className="picker-vm-badge">
+                          {b?.status === 'ready' || b?.appRunning
+                            ? '运行中'
+                            : !b?.checked
+                              ? '检查中…'
+                              : b?.installed && (b?.missing || []).length === 0
+                                ? '已安装'
+                                : b?.installed
+                                  ? '待补齐'
+                                  : '需安装'}
                         </span>
                       </button>
                     );

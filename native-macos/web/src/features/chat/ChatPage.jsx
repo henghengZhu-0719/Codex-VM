@@ -240,7 +240,17 @@ export default function ChatPage({
   const activeRunning = !!(activeSession && runningSessions.has(activeSession.id));
   const threadId = activeSession?.threadId || '';
   const stagedFiles = codexState.stagedAttachments?.[codexVM] || [];
-  const quota = state.quotas?.[codexVM];
+  const activeAgentQuota =
+    state.agentQuotas?.[codexVM]?.[agentInput] ||
+    (agentInput === 'codex' && state.quotas?.[codexVM]
+      ? {
+          ...state.quotas[codexVM],
+          windows: [
+            state.quotas[codexVM].five_hour ? { label: '5h', ...state.quotas[codexVM].five_hour } : null,
+            state.quotas[codexVM].weekly ? { label: '7d', ...state.quotas[codexVM].weekly } : null,
+          ].filter(Boolean),
+        }
+      : null);
   const vmBrowser = state.browsers?.[codexVM];
 
   // Collect all file changes in current session
@@ -437,10 +447,16 @@ export default function ChatPage({
           <h1>{selectedVM?.displayName || codexVM}</h1>
         </div>
         <div className="heading-actions">
-          {quota?.status === 'ok' && (
-            <div className="chat-quota-inline" title="Codex 剩余额度">
-              <QuotaChip label="5h" win={quota.five_hour} compact />
-              <QuotaChip label="7d" win={quota.weekly} compact />
+          {activeAgentQuota?.status === 'ok' && (activeAgentQuota.windows || []).length > 0 && (
+            <div className="chat-quota-inline" title={`${agentLabel(agentInput)} 剩余额度`}>
+              {(activeAgentQuota.windows || []).map((w, idx) => (
+                <QuotaChip
+                  key={w.label || idx}
+                  label={w.label === '5 小时' ? '5h' : w.label === '每周' ? '7d' : w.label || String(idx + 1)}
+                  win={w}
+                  compact
+                />
+              ))}
             </div>
           )}
           {!isRemoteWeb && (

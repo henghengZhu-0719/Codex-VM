@@ -56,7 +56,7 @@ export const bridge = (action, payload = {}) => {
 export const agentLabels = {
   codex: 'Codex',
   claude: 'Claude Code',
-  agy: 'AGY',
+  agy: 'Antigravity',
   opencode: 'OpenCode',
   vibe: 'Vibe',
   pi: 'Pi',
