@@ -97,7 +97,7 @@ export function SectionTitle({ title, sub, children }) {
     <div className="heading">
       <div>
         <h1>{title}</h1>
-        <p>{sub}</p>
+        {sub ? <p>{sub}</p> : null}
       </div>
       <div className="heading-actions">{children}</div>
     </div>
@@ -114,86 +114,85 @@ export function VMCard({ vm, state, select }) {
   const hasCodex = !hasAgents || agents.includes('codex');
   const agentBusy = (state.codex?.runningVMs || []).includes(vm.name);
   const name = vm.displayName || vm.name;
+  const routeNode = state.vmProxyRoutes?.[vm.name]
+    ? (state.proxy?.sources || []).flatMap(s => s.nodes || []).find(n => n.id === state.vmProxyRoutes[vm.name])?.name ||
+      state.vmProxyRoutes[vm.name]
+    : '';
 
   return (
     <article className="vm-card">
       <div className="vm-head">
         <div className="vm-glyph">
-          <Monitor size={20} />
+          <Monitor size={18} />
         </div>
         <div className="vm-name">
           <strong title={name}>{name}</strong>
-          <span>{vm.standalone ? '共享工作区' : vm.projectPath || '项目环境'}</span>
+          {!vm.standalone && vm.projectPath && <span title={vm.projectPath}>{vm.projectPath}</span>}
         </div>
         <div className={'status ' + (running ? 'running' : '')}>
           <span className="status-dot" />
-          {running ? (agentBusy ? 'Agent 执行中' : '运行中') : vm.status === 'Stopped' ? '已停止' : vm.status}
+          {running ? (agentBusy ? '执行中' : '运行中') : vm.status === 'Stopped' ? '已停止' : vm.status}
         </div>
       </div>
-      <div className="metrics">
+
+      <div className="metrics metrics-3">
         <div>
           <span>CPU</span>
           <strong>{running && usage ? usage.cpu.toFixed(1) + '%' : '—'}</strong>
         </div>
         <div>
           <span>内存</span>
-          <strong>{running && usage ? Math.round(usage.used) + ' / ' + Math.round(usage.total) + ' MB' : '—'}</strong>
+          <strong>{running && usage ? Math.round(usage.used) + '/' + Math.round(usage.total) + ' MB' : '—'}</strong>
+        </div>
+        <div>
+          <span>存储</span>
+          <button
+            type="button"
+            className="metric-action"
+            onClick={() => select({ type: 'resizeDisk', vm })}
+            disabled={state.busy}
+            title="扩容磁盘"
+          >
+            <strong>{vm.disk || '—'}</strong>
+            <small>扩容</small>
+          </button>
         </div>
       </div>
-      {running && hasAgents && (
-        <div className="web-code-row">
-          <span>已装 Agent</span>
-          <span className="muted">{agents.length ? agents.map(agentLabel).join(' · ') : '未检测到'}</span>
-        </div>
-      )}
-      {(hasCodex || quota?.status === 'ok') && (
+
+      {(quota?.status === 'ok' || (running && hasAgents && agents.length > 0)) && (
         <div className="quota-inline">
-          <span>Codex 额度</span>
-          <div className="quota-chips">
-            {quota?.status === 'ok' ? (
-              <>
-                <QuotaChip label="5h" win={quota.five_hour} />
-                <QuotaChip label="7d" win={quota.weekly} />
-              </>
-            ) : (
-              <span className="muted">{running ? '暂无数据' : '启动后查询'}</span>
-            )}
-          </div>
-        </div>
-      )}
-      {running && (
-        <div className="web-code-row">
-          <span>Web Code</span>
-          {editor?.status === 'ready' ? (
-            <button className="web-code-link" onClick={() => bridge('codeOpen', { name: vm.name })}>
-              {editor.url}
-            </button>
-          ) : editor?.status === 'error' ? (
-            <button className="web-code-retry" title={editor.error} onClick={() => bridge('codeRetry', { name: vm.name })}>
-              重试
-            </button>
-          ) : (
-            <span className="muted">启动中…</span>
+          <span className="vm-meta-agents">
+            {running && hasAgents && agents.length > 0 ? agents.map(agentLabel).join(' · ') : 'Codex'}
+          </span>
+          {hasCodex && quota?.status === 'ok' && (
+            <div className="quota-chips">
+              <QuotaChip label="5h" win={quota.five_hour} compact />
+              <QuotaChip label="7d" win={quota.weekly} compact />
+            </div>
           )}
         </div>
       )}
-      {running && state.browsers?.[vm.name]?.status === 'error' && (
-        <div className="web-code-row">
-          <span>Linux 浏览器</span>
-          <span className="muted" title={state.browsers[vm.name].error}>
-            {state.browsers[vm.name].error}
-          </span>
+
+      {((running && (editor?.status === 'ready' || editor?.status === 'error')) || routeNode) && (
+        <div className="vm-sub-links">
+          {running && editor?.status === 'ready' && (
+            <button className="web-code-link" onClick={() => bridge('codeOpen', { name: vm.name })}>
+              {editor.url}
+            </button>
+          )}
+          {running && editor?.status === 'error' && (
+            <button className="web-code-retry" title={editor.error} onClick={() => bridge('codeRetry', { name: vm.name })}>
+              Web Code 重试
+            </button>
+          )}
+          {routeNode && (
+            <button className="web-code-link" onClick={() => select({ type: 'proxyRoute', vm })}>
+              出口 · {routeNode}
+            </button>
+          )}
         </div>
       )}
-      {state.vmProxyRoutes?.[vm.name] && (
-        <div className="web-code-row">
-          <span>代理出口</span>
-          <button className="web-code-link" onClick={() => select({ type: 'proxyRoute', vm })}>
-            {(state.proxy?.sources || []).flatMap(s => s.nodes || []).find(n => n.id === state.vmProxyRoutes[vm.name])?.name ||
-              state.vmProxyRoutes[vm.name]}
-          </button>
-        </div>
-      )}
+
       <div className="card-actions">
         <button className="primary" style={{ padding: '7px 11px', minHeight: '31px' }} onClick={() => select({ type: 'chatOpen', vm })} disabled={!running}>
           <Sparkles size={14} /> 对话
@@ -211,6 +210,9 @@ export function VMCard({ vm, state, select }) {
         </button>
         <div className="flex-fill" />
         <MoreMenu>
+          <button disabled={!running} onClick={() => select({ type: 'codexDesktopOpen', vm })}>
+            打开官方 Codex 桌面端
+          </button>
           <button disabled={!running || editor?.status !== 'ready'} onClick={() => bridge('codeOpen', { name: vm.name })}>
             打开 Web Code
           </button>
@@ -230,6 +232,9 @@ export function VMCard({ vm, state, select }) {
             </button>
           )}
           <button onClick={() => select({ type: 'rename', vm })}>修改名称</button>
+          <button onClick={() => select({ type: 'resizeDisk', vm })} disabled={state.busy}>
+            调整磁盘容量
+          </button>
           <button onClick={() => select({ type: 'mounts', vm })}>管理共享文件夹</button>
           <button onClick={() => select({ type: 'proxyRoute', vm })}>代理出口</button>
           {(hasCodex || quota?.status === 'ok') && (

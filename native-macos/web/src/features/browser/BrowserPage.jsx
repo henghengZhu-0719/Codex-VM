@@ -196,10 +196,9 @@ export default function BrowserPage({
     return (
       <div className="browser-page">
         <div className="empty" style={{ flex: 1 }}>
-          <Globe size={30} />
+          <Globe size={28} />
           <strong>暂无运行中的虚拟机</strong>
-          <span>请先在「虚拟机」页面启动至少一台虚拟机。</span>
-          <button className="primary" onClick={() => onNavigateTab?.('vms')}>前往虚拟机列表</button>
+          <button className="primary" onClick={() => onNavigateTab?.('vms')}>前往虚拟机</button>
         </div>
       </div>
     );
@@ -271,19 +270,18 @@ export default function BrowserPage({
 
         <div className="browser-top-meta">
           {browser.resolution && <span className="browser-meta-pill">{browser.resolution}</span>}
-          <label className="browser-meta-check" title="窗口大小变化时自动调整虚拟显示分辨率">
+          <label className="browser-meta-check" title="自适应窗口分辨率">
             <input type="checkbox" checked={autoResize} onChange={e => toggleAutoResize(e.target.checked)} />
             <span>自适应</span>
           </label>
           <select
             className="browser-quality-select"
             value={qualityMode}
-            title="画面清晰度与流畅度"
             onChange={e => bridge('browserSetQuality', { name: browserVM, qualityMode: e.target.value })}
           >
-            <option value="sharp">高清画质</option>
-            <option value="balanced">均衡画质</option>
-            <option value="smooth">流畅优先</option>
+            <option value="sharp">高清</option>
+            <option value="balanced">均衡</option>
+            <option value="smooth">流畅</option>
           </select>
         </div>
       </div>
@@ -328,7 +326,7 @@ export default function BrowserPage({
             onFocus={() => setAddrFocused(true)}
             onBlur={() => setAddrFocused(false)}
             onChange={e => setAddr(e.target.value)}
-            placeholder="输入网址或 localhost:3000（⌘L 聚焦）"
+            placeholder="输入网址或 localhost:端口（⌘L）"
           />
         </form>
 
@@ -336,30 +334,28 @@ export default function BrowserPage({
           type="button"
           className={'small-button' + (imeOpen ? ' is-active' : '')}
           disabled={!isReady}
-          title="使用 macOS 中文输入法输入文字并直接发送到浏览器焦点输入框"
           onClick={() => {
             const next = !imeOpen;
             setImeOpen(next);
             if (next) setTimeout(() => imeRef.current?.focus(), 50);
           }}
         >
-          <Keyboard size={13} /> 中文输入
+          <Keyboard size={13} /> 中文
         </button>
 
         <button
           type="button"
           className="small-button"
           disabled={!isReady}
-          title="截取当前页面发送到 Agent 对话附件"
+          title="截图发送到 Agent 对话"
           onClick={() => bridge('browserScreenshotToChat', { name: browserVM, tabId: browser.activeTabId || '', jump: true })}
         >
-          <Camera size={13} /> 截图提问
+          <Camera size={13} /> 截图
         </button>
 
         <button
           type="button"
           className="small-button"
-          title="打开下载文件夹 (~/AgentVM-Shared/Downloads)"
           onClick={() => bridge('browserOpenDownloads')}
         >
           <FolderOpen size={13} /> 下载
@@ -369,7 +365,6 @@ export default function BrowserPage({
           type="button"
           className="small-button"
           disabled={browser.status === 'starting'}
-          title="重连 VNC 画面"
           onClick={() => {
             if (isReady) bridge('browserReload');
             else {
@@ -382,7 +377,7 @@ export default function BrowserPage({
             }
           }}
         >
-          <RefreshCw size={13} /> {isReady ? '重连画面' : '重新启动'}
+          <RefreshCw size={13} /> {isReady ? '重连' : '启动'}
         </button>
 
         <button
@@ -398,10 +393,9 @@ export default function BrowserPage({
         </button>
       </div>
 
-      {/* Optional Row: Discovered VM listening ports */}
       {isReady && devPorts.length > 0 && (
         <div className="browser-ports-bar">
-          <span className="ports-label"><Zap size={12} /> 虚拟机运行端口</span>
+          <Zap size={12} className="muted" />
           {devPorts.map(port => (
             <button
               key={port}
@@ -409,13 +403,12 @@ export default function BrowserPage({
               className="port-chip"
               onClick={() => bridge('browserNavigate', { name: browserVM, url: `http://localhost:${port}`, tabId: browser.activeTabId || '' })}
             >
-              localhost:{port}
+              :{port}
             </button>
           ))}
         </div>
       )}
 
-      {/* Optional Row: Chinese IME Bridge Input */}
       {imeOpen && isReady && (
         <form className="browser-ime-bar" onSubmit={sendImeText}>
           <Keyboard size={14} />
@@ -423,10 +416,10 @@ export default function BrowserPage({
             ref={imeRef}
             value={imeText}
             onChange={e => setImeText(e.target.value)}
-            placeholder="在此使用 macOS 中文输入法打字，按 Enter 直接填入虚拟机网页当前输入框…"
+            placeholder="输入中文，Enter 填入网页"
           />
           <button type="submit" className="primary" style={{ minHeight: 28, padding: '4px 10px' }} disabled={!imeText}>
-            <Send size={12} /> 发送输入
+            <Send size={12} /> 发送
           </button>
           <button type="button" className="icon-button" style={{ width: 28, height: 28 }} onClick={() => setImeOpen(false)}>
             <X size={13} />

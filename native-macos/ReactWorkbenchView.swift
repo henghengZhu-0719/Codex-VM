@@ -185,12 +185,33 @@ struct ReactWorkbenchView: NSViewRepresentable {
                     ] as [String: Any]
                 },
                 "activeBrowserVM":model.activeBrowserVM,
+                "codexDesktops":model.codexDesktops.mapValues { d in
+                    [
+                        "status": d.status,
+                        "stage": d.stage,
+                        "stageMessage": d.stageMessage,
+                        "url": d.url,
+                        "error": d.error,
+                        "installed": d.installed,
+                        "appVersion": d.appVersion,
+                        "diskAvailMB": d.diskAvailMB,
+                        "missing": d.missingComponents,
+                        "resolution": d.resolution,
+                        "qualityMode": d.qualityMode,
+                        "autoResize": d.autoResize,
+                        "logs": d.logs,
+                        "installing": d.installing,
+                        "installOutput": d.installOutput
+                    ] as [String: Any]
+                },
+                "activeCodexDesktopVM":model.activeCodexDesktopVM,
                 "browserShortcut":model.browserShortcutSignal,
                 "requestedPage":model.requestedPage,
                 "toasts":model.toasts,
                 "vms":vms, "usage":usage, "quotas":quota, "mounts":mounts, "agents":model.vmAgents,
                 "vmProxyRoutes":model.vmProxyRoutes,
                 "busy":model.busy, "proxyBusy":model.proxyBusy,
+                "hostDiskAvailGB":model.hostDiskAvailGB(),
                 "error":model.operationFailed ? model.errorSummary : "",
                 "proxyError":model.proxyError, "proxyMessage":model.proxyMessage,
                 "buildStarted":model.buildStarted, "buildComplete":model.buildComplete,
@@ -336,12 +357,72 @@ struct ReactWorkbenchView: NSViewRepresentable {
                 let h = (payload["height"] as? NSNumber)?.doubleValue ?? 0
                 model.browserSlotVisible = visible
                 model.browserSlot = CGRect(x: x, y: y, width: w, height: h)
+            case "codexDesktopCheck":
+                if let vm = existingVM(payload) {
+                    model.checkCodexDesktop(vm)
+                }
+            case "codexDesktopOpen":
+                if let vm = existingVM(payload) {
+                    model.activeCodexDesktopVM = vm.name
+                    let w = (payload["width"] as? NSNumber)?.intValue ?? 1280
+                    let h = (payload["height"] as? NSNumber)?.intValue ?? 800
+                    let qMode = payload["qualityMode"] as? String
+                    model.openCodexDesktop(vm, width: w, height: h, qualityMode: qMode)
+                }
+            case "codexDesktopSelect":
+                if let vm = existingVM(payload) {
+                    model.activeCodexDesktopVM = vm.name
+                }
+            case "codexDesktopReload":
+                model.codexDesktopReloadToken += 1
+            case "codexDesktopResize":
+                if let vm = existingVM(payload) {
+                    let w = (payload["width"] as? NSNumber)?.intValue ?? 1280
+                    let h = (payload["height"] as? NSNumber)?.intValue ?? 800
+                    model.resizeCodexDesktop(vm, width: w, height: h)
+                }
+            case "codexDesktopSetQuality":
+                if let vm = existingVM(payload), let mode = payload["qualityMode"] as? String {
+                    model.setCodexDesktopQuality(vm, qualityMode: mode)
+                }
+            case "codexDesktopInstall":
+                if let vm = existingVM(payload) {
+                    let w = (payload["width"] as? NSNumber)?.intValue ?? 1280
+                    let h = (payload["height"] as? NSNumber)?.intValue ?? 800
+                    model.installCodexDesktop(vm, width: w, height: h)
+                }
+            case "codexDesktopRestart":
+                if let vm = existingVM(payload) {
+                    let w = (payload["width"] as? NSNumber)?.intValue ?? 1280
+                    let h = (payload["height"] as? NSNumber)?.intValue ?? 800
+                    model.restartCodexDesktop(vm, width: w, height: h)
+                }
+            case "codexDesktopSendText":
+                if let vm = existingVM(payload), let text = payload["text"] as? String {
+                    model.codexDesktopSendText(vm, text: text)
+                }
+            case "codexDesktopFetchLogs":
+                if let vm = existingVM(payload) {
+                    model.codexDesktopFetchLogs(vm)
+                }
+            case "codexDesktopSlot":
+                let visible = payload["visible"] as? Bool ?? false
+                let x = (payload["x"] as? NSNumber)?.doubleValue ?? 0
+                let y = (payload["y"] as? NSNumber)?.doubleValue ?? 0
+                let w = (payload["width"] as? NSNumber)?.doubleValue ?? 0
+                let h = (payload["height"] as? NSNumber)?.doubleValue ?? 0
+                model.codexDesktopSlotVisible = visible
+                model.codexDesktopSlot = CGRect(x: x, y: y, width: w, height: h)
             case "resume":
                 if let vm = existingVM(payload), let agent = payload["agent"] as? String {
                     model.resumeSession(vm, agent: agent)
                 }
             case "start":
                 if let vm = existingVM(payload), vm.status == "Stopped", !model.busy { model.start(vm) }
+            case "resizeDisk":
+                if let vm = existingVM(payload), let disk = payload["disk"] as? Int, !model.busy {
+                    model.resizeDisk(vm, diskGiB: disk)
+                }
             case "stop":
                 if let vm = existingVM(payload), vm.status == "Running", !model.busy { model.stop(vm) }
             case "delete":

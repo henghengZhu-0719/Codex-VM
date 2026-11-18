@@ -136,6 +136,11 @@ struct CodexQuotaStatus: Decodable {
     @Published var browserSlotVisible: Bool = false
     @Published var browserReloadToken: Int = 0
     @Published var browserShortcutSignal: [String: Any] = [:]
+    @Published var codexDesktops: [String: CodexDesktopState] = [:]
+    @Published var activeCodexDesktopVM: String = ""
+    @Published var codexDesktopSlot: CGRect = .zero
+    @Published var codexDesktopSlotVisible: Bool = false
+    @Published var codexDesktopReloadToken: Int = 0
     @Published var chatRevision: Int = 0
     @Published var runningSessions: Set<String> = []
     @Published var runningSessionVMs: [String: String] = [:]
@@ -160,6 +165,7 @@ struct CodexQuotaStatus: Decodable {
     private var vmMihomoProcesses: [String: Process] = [:]
     private let codeEditorManager = CodeEditorManager()
     private let linuxBrowserManager = LinuxBrowserManager()
+    private let codexDesktopManager = CodexDesktopManager()
     private var terminationObserver: NSObjectProtocol?
     private var quotaTimer: Timer?
     private var usageTimer: Timer?
@@ -173,6 +179,10 @@ struct CodexQuotaStatus: Decodable {
         linuxBrowserManager.onChange = { [weak self] states in self?.linuxBrowsers = states }
         linuxBrowserManager.onOpen = { [weak self] vmName, _ in
             self?.activeBrowserVM = vmName
+        }
+        codexDesktopManager.onChange = { [weak self] states in self?.codexDesktops = states }
+        codexDesktopManager.onOpen = { [weak self] vmName, _ in
+            self?.activeCodexDesktopVM = vmName
         }
         remoteWorkbenchServer.onError = { [weak self] err in
             self?.remoteWorkbenchError = err
@@ -582,6 +592,7 @@ cat /var/lib/agent-vm-region/status
             let runningNames = Set(self.machines.filter { $0.status == "Running" }.map(\.name))
             self.codeEditorManager.retain(runningNames)
             self.linuxBrowserManager.retain(runningNames)
+            self.codexDesktopManager.retain(runningNames)
             self.vmUsage = self.vmUsage.filter { runningNames.contains($0.key) }
             self.usageErrors = self.usageErrors.filter { runningNames.contains($0) }
             self.pollRunningUsage()
@@ -759,6 +770,58 @@ cat /var/lib/agent-vm-region/status
         let dl = NSHomeDirectory() + "/AgentVM-Shared/Downloads"
         try? FileManager.default.createDirectory(atPath: dl, withIntermediateDirectories: true)
         NSWorkspace.shared.open(URL(fileURLWithPath: dl))
+    }
+    func checkCodexDesktop(_ vm: VM) {
+        guard vm.status == "Running", vm.name != "base", vm.name != "base-building" else { return }
+        codexDesktopManager.checkStatus(name: vm.name, config: sshConfigPath(for: vm.name))
+    }
+    func openCodexDesktop(_ vm: VM, width: Int = 1280, height: Int = 800, qualityMode: String? = nil) {
+        guard vm.status == "Running", vm.name != "base", vm.name != "base-building" else { return }
+        let w = width > 100 ? width : max(800, Int(codexDesktopSlot.width))
+        let h = height > 100 ? height : max(500, Int(codexDesktopSlot.height))
+        codexDesktopManager.open(name: vm.name, config: sshConfigPath(for: vm.name), width: w, height: h, qualityMode: qualityMode)
+    }
+    func resizeCodexDesktop(_ vm: VM, width: Int, height: Int) {
+        guard vm.status == "Running", width > 100, height > 100 else { return }
+        codexDesktopManager.resize(name: vm.name, config: sshConfigPath(for: vm.name), width: width, height: height)
+    }
+    func setCodexDesktopQuality(_ vm: VM, qualityMode: String) {
+        codexDesktopManager.setQuality(name: vm.name, qualityMode: qualityMode)
+    }
+    func setCodexDesktopAutoResize(_ vm: VM, enabled: Bool) {
+        let w = max(800, Int(codexDesktopSlot.width))
+        let h = max(500, Int(codexDesktopSlot.height))
+        codexDesktopManager.setAutoResize(name: vm.name, enabled: enabled, config: sshConfigPath(for: vm.name), width: w, height: h)
+    }
+    func requestCodexDesktopPicker() {
+        requestedPage = ["page": "codexDesktop", "pick": true, "nonce": UUID().uuidString]
+    }
+    func installCodexDesktop(_ vm: VM, width: Int = 1280, height: Int = 800) {
+        guard vm.status == "Running", vm.name != "base", vm.name != "base-building" else { return }
+        let w = width > 100 ? width : max(800, Int(codexDesktopSlot.width))
+        let h = height > 100 ? height : max(500, Int(codexDesktopSlot.height))
+        codexDesktopManager.install(name: vm.name, config: sshConfigPath(for: vm.name), width: w, height: h) { [weak self] ok, msg in
+            guard let self else { return }
+            if ok {
+                self.pushToast(title: "官方 Codex 桌面端已安装", message: "正在启动桌面窗口…", level: "ok", vmName: vm.name)
+            } else {
+                self.pushToast(title: "官方 Codex 桌面端安装失败", message: msg, level: "error", vmName: vm.name)
+            }
+        }
+    }
+    func restartCodexDesktop(_ vm: VM, width: Int = 0, height: Int = 0) {
+        guard vm.status == "Running" else { return }
+        let w = width > 100 ? width : max(800, Int(codexDesktopSlot.width))
+        let h = height > 100 ? height : max(500, Int(codexDesktopSlot.height))
+        codexDesktopManager.restartApp(name: vm.name, config: sshConfigPath(for: vm.name), width: w, height: h)
+    }
+    func codexDesktopSendText(_ vm: VM, text: String) {
+        guard vm.status == "Running", !text.isEmpty else { return }
+        codexDesktopManager.sendText(name: vm.name, config: sshConfigPath(for: vm.name), text: text)
+    }
+    func codexDesktopFetchLogs(_ vm: VM) {
+        guard vm.status == "Running" else { return }
+        codexDesktopManager.fetchLogs(name: vm.name, config: sshConfigPath(for: vm.name))
     }
     func pollRunningUsage() {
         for vm in machines where vm.status == "Running" && vm.name != "base" && vm.name != "base-building" {
@@ -1571,6 +1634,68 @@ cat /var/lib/agent-vm-region/status
                     self.refresh()
                 }
             }
+        }
+    }
+    func hostDiskAvailGB() -> Int {
+        let state = ProcessInfo.processInfo.environment["AGENT_VM_STATE_DIR"] ?? NSHomeDirectory() + "/.agent-vm"
+        let vals = try? URL(fileURLWithPath: state).resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey, .volumeAvailableCapacityKey])
+        let bytes = vals?.volumeAvailableCapacityForImportantUsage ?? Int64(vals?.volumeAvailableCapacity ?? 0)
+        return max(0, Int(bytes >> 30))
+    }
+    static func parseDiskGiB(_ raw: String) -> Int {
+        let digits = raw.prefix(while: { $0.isNumber })
+        return Int(digits) ?? 0
+    }
+    func resizeDisk(_ vm: VM, diskGiB: Int) {
+        guard !busy, vm.name != "base", vm.name != "base-building" else { return }
+        let curGiB = Self.parseDiskGiB(vm.disk)
+        guard diskGiB > curGiB, (10...1024).contains(diskGiB) else {
+            output = "目标磁盘容量必须大于当前容量（\(vm.disk)）且不超过 1024 GiB。"
+            operationFailed = true
+            pushToast(title: "无法调整磁盘容量", message: output, level: "error", vmName: vm.name)
+            return
+        }
+        guard let project = vmMounts[vm.name]?.first?.location else {
+            output = "无法确定该虚拟机的项目文件夹。"; operationFailed = true; return
+        }
+        busy = true
+        output = "正在为 \(displayName(for: vm)) 调整存储容量至 \(diskGiB) GiB…\n"
+        pushToast(title: "正在调整磁盘容量", message: "\(displayName(for: vm)) → \(diskGiB) GiB（完成后将自动重启）", level: "info", vmName: vm.name)
+
+        let applyResize = {
+            self.run(["name", project]) { code, name in
+                guard code == 0, name.trimmingCharacters(in: .whitespacesAndNewlines) == vm.name else {
+                    self.output = "项目文件夹与虚拟机身份不匹配，无法调整磁盘。\n" + name
+                    self.operationFailed = true; self.busy = false; self.refresh()
+                    return
+                }
+                self.run(["run", "--disk", String(diskGiB), "true"], cwd: project, vmName: vm.name) { code, text in
+                    self.output = text
+                    self.operationFailed = code != 0
+                    self.busy = false
+                    self.refresh()
+                    if code == 0 {
+                        self.checkCodexDesktop(vm)
+                        self.pushToast(title: "磁盘扩容完成", message: "\(self.displayName(for: vm)) 已扩展到 \(diskGiB) GiB", level: "ok", vmName: vm.name)
+                    } else {
+                        self.pushToast(title: "磁盘扩容失败", message: text, level: "error", vmName: vm.name)
+                    }
+                }
+            }
+        }
+
+        if vm.status == "Running" {
+            run(["stop", vm.name]) { code, text in
+                self.stopVMMihomo(vm.name)
+                guard code == 0 else {
+                    self.output = text; self.operationFailed = true; self.busy = false; self.refresh()
+                    self.pushToast(title: "停止虚拟机失败", message: text, level: "error", vmName: vm.name)
+                    return
+                }
+                applyResize()
+            }
+        } else {
+            applyResize()
         }
     }
     func changeFolder(_ vm: VM, action: String, path: String, mode: String) {
@@ -2957,12 +3082,42 @@ private struct MenuBarControls: View {
                    state.status == "ready",
                    let url = URL(string: state.url),
                    model.browserSlot.width > 20, model.browserSlot.height > 20 {
-                    LinuxBrowserWebView(url: url, reloadToken: model.browserReloadToken) { action in
-                        model.browserShortcutSignal = ["action": action, "vm": model.activeBrowserVM, "nonce": UUID().uuidString]
-                    }
+                    LinuxBrowserWebView(
+                        url: url,
+                        reloadToken: model.browserReloadToken,
+                        onBrowserShortcut: { action in
+                            model.browserShortcutSignal = ["action": action, "vm": model.activeBrowserVM, "nonce": UUID().uuidString]
+                        },
+                        onPasteText: { text in
+                            if let bVM = model.machines.first(where: { $0.name == model.activeBrowserVM }) {
+                                model.browserInsertText(bVM, text: text)
+                            }
+                        }
+                    )
                         .frame(width: model.browserSlot.width, height: model.browserSlot.height)
                         .clipShape(RoundedRectangle(cornerRadius: 12))
                         .offset(x: model.browserSlot.minX, y: model.browserSlot.minY)
+                }
+                if model.codexDesktopSlotVisible,
+                   let state = model.codexDesktops[model.activeCodexDesktopVM],
+                   state.status == "ready",
+                   let url = URL(string: state.url),
+                   model.codexDesktopSlot.width > 20, model.codexDesktopSlot.height > 20 {
+                    LinuxBrowserWebView(
+                        url: url,
+                        reloadToken: model.codexDesktopReloadToken,
+                        onPasteText: { text in
+                            if let desktopVM = model.machines.first(where: { $0.name == model.activeCodexDesktopVM }) {
+                                model.codexDesktopSendText(desktopVM, text: text)
+                            }
+                        }
+                    )
+                        .frame(width: model.codexDesktopSlot.width, height: model.codexDesktopSlot.height)
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .offset(x: model.codexDesktopSlot.minX, y: model.codexDesktopSlot.minY)
+                    if let desktopVM = model.machines.first(where: { $0.name == model.activeCodexDesktopVM }) {
+                        CodexDesktopFloatingOverlay(model: model, vm: desktopVM, slot: model.codexDesktopSlot)
+                    }
                 }
             }
             .frame(minWidth: 920, minHeight: 640)

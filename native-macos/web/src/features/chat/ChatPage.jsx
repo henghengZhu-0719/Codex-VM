@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
+  AppWindow,
   ArrowDown,
   Camera,
   Check,
@@ -408,19 +409,12 @@ export default function ChatPage({
   if (running.length === 0) {
     return (
       <div className="codex-page">
-        <div className="codex-header">
-          <div>
-            <h1>Agent 对话工作台</h1>
-            <p>在运行中的虚拟机内执行任务、查看实时命令与代码变更</p>
-          </div>
-        </div>
         <div className="empty" style={{ flex: 1 }}>
-          <Sparkles size={30} />
+          <Sparkles size={28} />
           <strong>暂无运行中的虚拟机</strong>
-          <span>请先在「虚拟机」页面启动至少一台虚拟机。</span>
           {!isRemoteWeb && (
             <button className="primary" onClick={() => onNavigateTab?.('vms')}>
-              前往虚拟机列表
+              前往虚拟机
             </button>
           )}
         </div>
@@ -440,23 +434,29 @@ export default function ChatPage({
           >
             <PanelLeft size={16} />
           </button>
-          <div>
-            <h1>Agent 对话工作台</h1>
-            <p>{selectedVM?.displayName || codexVM} · {workdirInput}</p>
-          </div>
+          <h1>{selectedVM?.displayName || codexVM}</h1>
         </div>
         <div className="heading-actions">
           {quota?.status === 'ok' && (
-            <div className="chat-quota-inline" title="当前虚拟机 Codex 剩余额度">
+            <div className="chat-quota-inline" title="Codex 剩余额度">
               <QuotaChip label="5h" win={quota.five_hour} compact />
               <QuotaChip label="7d" win={quota.weekly} compact />
             </div>
+          )}
+          {!isRemoteWeb && (
+            <button
+              type="button"
+              className="secondary"
+              onClick={() => onNavigateTab?.('codexDesktop', codexVM)}
+            >
+              <AppWindow size={14} /> 官方桌面
+            </button>
           )}
           {!isRemoteWeb && vmBrowser?.status === 'ready' && (
             <button
               type="button"
               className="secondary"
-              title={vmBrowser.activeURL || '切换到 Linux 浏览器'}
+              title={vmBrowser.activeURL || '浏览器'}
               onClick={() => onNavigateTab?.('browser', codexVM)}
             >
               <Globe size={14} /> 浏览器
@@ -482,7 +482,7 @@ export default function ChatPage({
           </button>
           {!isRemoteWeb && (
             <button type="button" className="secondary" onClick={() => bridge('codexTerminal', { vm: codexVM, agent: agentInput })}>
-              <Terminal size={14} /> 终端接管
+              <Terminal size={14} /> 终端
             </button>
           )}
         </div>
@@ -511,7 +511,7 @@ export default function ChatPage({
             </div>
             <div className="chat-sessions-list">
               {displayedSessions.length === 0 && (
-                <div className="chat-sessions-empty">暂无历史会话，发送第一条消息会自动保存。</div>
+                <div className="chat-sessions-empty">暂无会话</div>
               )}
               {displayedSessions.map(s => {
                 const isSelected = s.vmName === codexVM && s.id === activeSession?.id;
@@ -684,13 +684,12 @@ export default function ChatPage({
             <div className="codex-feed" ref={feedRef} onScroll={handleFeedScroll}>
               {msgs.length === 0 && (
                 <div className="codex-empty">
-                  <div className="codex-empty-badge"><Sparkles size={22} /></div>
+                  <div className="codex-empty-badge"><Sparkles size={20} /></div>
                   <strong>
                     {supportsChatAgents.length > 0
-                      ? `在 ${selectedVM?.displayName || codexVM} 中运行 ${agentLabel(agentInput)}`
-                      : `当前虚拟机未检测到 Codex / Claude`}
+                      ? agentLabel(agentInput)
+                      : '未检测到 Codex / Claude'}
                   </strong>
-                  <span>工作目录：{workdirInput} · 权限模式：{MODES.find(m => m.id === modeInput)?.label}</span>
 
                   {supportsChatAgents.length > 0 ? (
                     <div className="quick-prompts">
@@ -699,10 +698,10 @@ export default function ChatPage({
                           key={qp.title}
                           type="button"
                           className="quick-prompt-card"
+                          title={qp.text}
                           onClick={() => handleSend(qp.text)}
                         >
                           <strong>{qp.title}</strong>
-                          <span>{qp.text}</span>
                         </button>
                       ))}
                     </div>
@@ -711,7 +710,7 @@ export default function ChatPage({
                       <div className="heading-actions" style={{ marginTop: 10 }}>
                         {vmAgents.map(a => (
                           <button key={a} className="primary" onClick={() => bridge('resume', { name: codexVM, agent: a })}>
-                            <Terminal size={14} /> 在终端启动 {agentLabel(a)}
+                            <Terminal size={14} /> 启动 {agentLabel(a)}
                           </button>
                         ))}
                       </div>
@@ -890,7 +889,7 @@ export default function ChatPage({
             {modeInput === 'bypass' && (
               <div className="bypass-warning-bar">
                 <ShieldAlert size={13} />
-                <span>当前处于「完全放行」模式：Agent 将不经确认直接执行命令与修改文件</span>
+                <span>完全放行 · 直接执行命令与修改文件</span>
               </div>
             )}
 
@@ -933,7 +932,7 @@ export default function ChatPage({
               value={prompt}
               onChange={e => setPrompt(e.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder={`向 ${selectedVM?.displayName || codexVM} 的 ${agentLabel(agentInput)} 发送任务…（Enter 发送，Shift+Enter 换行，输入 / 查看快捷命令）`}
+              placeholder={`发送任务给 ${agentLabel(agentInput)}…（/ 命令）`}
             />
             <div className="codex-composer-foot">
               <div className="composer-left-tools">
@@ -941,7 +940,6 @@ export default function ChatPage({
                   <button
                     type="button"
                     className="small-button"
-                    title="附加本地文件或图片到共享目录"
                     onClick={() => bridge('codexAttachFile', { vm: codexVM })}
                   >
                     <Paperclip size={13} /> 附件
@@ -951,15 +949,11 @@ export default function ChatPage({
                   <button
                     type="button"
                     className="small-button"
-                    title="截取当前 Linux 浏览器页面并附加到对话"
                     onClick={() => bridge('browserScreenshotToChat', { name: codexVM, jump: false })}
                   >
                     <Camera size={13} /> 截屏
                   </button>
                 )}
-                <span className="codex-session-pill">
-                  {threadId ? `继续会话 · ${threadId.slice(0, 8)}` : '新会话'}
-                </span>
               </div>
               {activeRunning ? (
                 <button
@@ -1044,9 +1038,9 @@ export default function ChatPage({
       {bypassConfirmTarget && (
         <div className="modal-backdrop" onMouseDown={e => { if (e.target === e.currentTarget) setBypassConfirmTarget(false); }}>
           <div className="modal" role="dialog" aria-modal="true">
-            <h2>启用「完全放行」模式？</h2>
+            <h2>启用完全放行？</h2>
             <p className="muted">
-              此模式下，{agentLabel(agentInput)} 将绕过沙盒和人工审批，直接在虚拟机内执行命令并修改已挂载的项目文件。请确保当前目录已做好 Git 备份。
+              将跳过沙盒与审批，直接执行命令并修改项目文件。
             </p>
             <div className="dialog-actions">
               <button type="button" className="secondary" onClick={() => setBypassConfirmTarget(false)}>取消</button>

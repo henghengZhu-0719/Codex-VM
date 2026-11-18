@@ -56,6 +56,7 @@ struct LinuxBrowserWebView: NSViewRepresentable {
     let url: URL
     let reloadToken: Int
     var onBrowserShortcut: ((String) -> Void)? = nil
+    var onPasteText: ((String) -> Void)? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -65,12 +66,14 @@ struct LinuxBrowserWebView: NSViewRepresentable {
         let controller = WKUserContentController()
         controller.addUserScript(WKUserScript(source: Self.clipboardBridgeScript, injectionTime: .atDocumentEnd, forMainFrameOnly: true))
         controller.add(context.coordinator, name: "clipboard")
+        controller.add(context.coordinator, name: "imeCommit")
         config.userContentController = controller
 
         let web = LinuxBrowserWKWebView(frame: .zero, configuration: config)
         web.navigationDelegate = context.coordinator
         context.coordinator.webView = web
         context.coordinator.onBrowserShortcut = onBrowserShortcut
+        context.coordinator.onPasteText = onPasteText
         web.onCommandShortcut = { [weak coordinator = context.coordinator] key in
             coordinator?.handleCommandShortcut(key)
         }
@@ -86,6 +89,7 @@ struct LinuxBrowserWebView: NSViewRepresentable {
 
     func updateNSView(_ web: LinuxBrowserWKWebView, context: Context) {
         context.coordinator.onBrowserShortcut = onBrowserShortcut
+        context.coordinator.onPasteText = onPasteText
         if context.coordinator.lastLoadedURL != url || context.coordinator.lastReloadToken != reloadToken {
             context.coordinator.lastLoadedURL = url
             context.coordinator.lastReloadToken = reloadToken
@@ -96,11 +100,13 @@ struct LinuxBrowserWebView: NSViewRepresentable {
     static func dismantleNSView(_ web: LinuxBrowserWKWebView, coordinator: Coordinator) {
         coordinator.stopClipboardSync()
         web.configuration.userContentController.removeScriptMessageHandler(forName: "clipboard")
+        web.configuration.userContentController.removeScriptMessageHandler(forName: "imeCommit")
     }
 
     final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
         weak var webView: LinuxBrowserWKWebView?
         var onBrowserShortcut: ((String) -> Void)?
+        var onPasteText: ((String) -> Void)?
         var lastLoadedURL: URL?
         var lastReloadToken = 0
         private var clipboardTimer: Timer?
@@ -163,6 +169,13 @@ struct LinuxBrowserWebView: NSViewRepresentable {
             case "a":
                 sendCtrlKey(key: "a", code: "KeyA", keyCode: 65)
             case "v":
+                if let onPasteText,
+                   let text = NSPasteboard.general.string(forType: .string),
+                   !text.isEmpty,
+                   text.unicodeScalars.contains(where: { $0.value > 0x7f }) {
+                    onPasteText(text)
+                    return
+                }
                 let pushed = syncHostClipboardToVMIfChanged()
                 let delay: DispatchTimeInterval = pushed ? .milliseconds(60) : .milliseconds(0)
                 DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
@@ -181,10 +194,16 @@ struct LinuxBrowserWebView: NSViewRepresentable {
         }
 
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-            guard message.name == "clipboard",
-                  message.frameInfo.isMainFrame,
+            guard message.frameInfo.isMainFrame,
                   Self.isLoopbackHost(message.frameInfo.request.url?.host),
                   let text = message.body as? String else { return }
+            if message.name == "imeCommit" {
+                if !text.isEmpty {
+                    onPasteText?(text)
+                }
+                return
+            }
+            guard message.name == "clipboard" else { return }
             let pb = NSPasteboard.general
             if pb.string(forType: .string) == text {
                 lastSyncedToVM = text
@@ -269,13 +288,10 @@ struct LinuxBrowserWebView: NSViewRepresentable {
 
       window.__agentVMSendCtrlKey = function(key, code, keyCode) {
         var active = document.activeElement;
-        if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA')) {
+        if (active && active.id !== 'avm_ime_proxy' && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA')) {
           return false;
         }
         var target = document.querySelector('#noVNC_container canvas') || active || document;
-        if (target && typeof target.focus === 'function') {
-          target.focus();
-        }
         var base = { bubbles: true, cancelable: true, view: window };
         target.dispatchEvent(new KeyboardEvent('keydown', Object.assign({}, base, {
           key: 'Control', code: 'ControlLeft', keyCode: 17, which: 17, ctrlKey: true
@@ -291,6 +307,172 @@ struct LinuxBrowserWebView: NSViewRepresentable {
         })));
         return true;
       };
+
+      // Direct macOS IME proxy over noVNC canvas so Chinese Pinyin works directly in the guest window.
+      (function installIMEProxy() {
+        var proxy = null;
+        var composing = false;
+        var pendingKey = null;
+        var swallowKeyupCode = null;
+        var justEndedCompositionAt = 0;
+        var lastX = 160, lastY = 160;
+
+        function snapshotKey(e) {
+          return {
+            key: e.key,
+            code: e.code,
+            keyCode: e.keyCode,
+            which: e.which || e.keyCode,
+            location: e.location || 0,
+            ctrlKey: !!e.ctrlKey,
+            shiftKey: !!e.shiftKey,
+            altKey: !!e.altKey,
+            metaKey: !!e.metaKey,
+            repeat: !!e.repeat,
+            capsLock: e.getModifierState ? e.getModifierState('CapsLock') : false
+          };
+        }
+
+        function ensureProxy() {
+          if (proxy && document.body && document.body.contains(proxy)) return proxy;
+          if (!document.body) return null;
+          proxy = document.createElement('textarea');
+          proxy.id = 'avm_ime_proxy';
+          proxy.setAttribute('autocapitalize', 'off');
+          proxy.setAttribute('autocomplete', 'off');
+          proxy.setAttribute('autocorrect', 'off');
+          proxy.setAttribute('spellcheck', 'false');
+          proxy.style.cssText = 'position:fixed;left:160px;top:160px;width:48px;height:22px;font-size:16px;line-height:22px;opacity:0.001;pointer-events:none;resize:none;border:0;padding:0;margin:0;outline:none;overflow:hidden;background:transparent;color:transparent;caret-color:transparent;z-index:9999;';
+          document.body.appendChild(proxy);
+
+          function commitText(txt) {
+            if (!txt) return;
+            try {
+              if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.imeCommit) {
+                window.webkit.messageHandlers.imeCommit.postMessage(txt);
+              }
+            } catch (err) {}
+          }
+
+          function dispatchKey(type, k) {
+            var canvas = document.querySelector('#noVNC_container canvas');
+            if (!canvas || !k) return;
+            var evt = new KeyboardEvent(type, {
+              key: k.key,
+              code: k.code,
+              keyCode: k.keyCode,
+              which: k.which || k.keyCode,
+              location: k.location || 0,
+              ctrlKey: !!k.ctrlKey,
+              shiftKey: !!k.shiftKey,
+              altKey: !!k.altKey,
+              metaKey: !!k.metaKey,
+              repeat: !!k.repeat,
+              modifierCapsLock: !!k.capsLock,
+              bubbles: true,
+              cancelable: true,
+              view: window
+            });
+            canvas.dispatchEvent(evt);
+          }
+
+          proxy.addEventListener('compositionstart', function() {
+            composing = true;
+            pendingKey = null;
+          });
+          proxy.addEventListener('compositionend', function(e) {
+            composing = false;
+            pendingKey = null;
+            justEndedCompositionAt = Date.now();
+            var txt = (e && e.data) || proxy.value || '';
+            proxy.value = '';
+            commitText(txt);
+          });
+          proxy.addEventListener('input', function(e) {
+            if (composing || (e && (e.inputType === 'insertFromComposition' || e.isComposing))) return;
+            var txt = proxy.value || (e && e.data) || '';
+            proxy.value = '';
+            if (!txt) {
+              pendingKey = null;
+              return;
+            }
+            if (pendingKey && !pendingKey.ctrlKey && !pendingKey.altKey && txt === pendingKey.key &&
+                txt.length === 1 && txt.charCodeAt(0) >= 0x20 && txt.charCodeAt(0) <= 0x7e) {
+              swallowKeyupCode = pendingKey.code || null;
+              dispatchKey('keydown', pendingKey);
+              dispatchKey('keyup', pendingKey);
+            } else {
+              commitText(txt);
+            }
+            pendingKey = null;
+          });
+          proxy.addEventListener('paste', function(e) {
+            if (e && e.clipboardData) {
+              var txt = e.clipboardData.getData('text/plain');
+              if (txt) {
+                e.preventDefault();
+                proxy.value = '';
+                pendingKey = null;
+                commitText(txt);
+              }
+            }
+          });
+          proxy.addEventListener('keydown', function(e) {
+            if (e.metaKey) return;
+            if (composing || e.isComposing || e.key === 'Process' || e.keyCode === 229) {
+              pendingKey = null;
+              swallowKeyupCode = e.code || null;
+              return;
+            }
+            if (!e.ctrlKey && !e.altKey && e.key && e.key.length === 1) {
+              // Allow WKWebView NSTextInputContext to start Chinese IME composition instead of cancelling keydown.
+              pendingKey = snapshotKey(e);
+              return;
+            }
+            pendingKey = null;
+            e.preventDefault();
+            dispatchKey('keydown', snapshotKey(e));
+          });
+          proxy.addEventListener('keyup', function(e) {
+            if (e.metaKey) return;
+            if (composing || e.isComposing || e.key === 'Process' || e.keyCode === 229) return;
+            if (Date.now() - justEndedCompositionAt < 100) return;
+            if (swallowKeyupCode && e.code === swallowKeyupCode) {
+              swallowKeyupCode = null;
+              return;
+            }
+            if (!e.ctrlKey && !e.altKey && e.key && e.key.length === 1) return;
+            e.preventDefault();
+            dispatchKey('keyup', snapshotKey(e));
+          });
+          return proxy;
+        }
+
+        function focusProxyAt(clientX, clientY) {
+          lastX = Math.max(12, Math.min(window.innerWidth - 60, clientX || lastX));
+          lastY = Math.max(12, Math.min(window.innerHeight - 40, clientY || lastY));
+          var p = ensureProxy();
+          if (!p) return;
+          p.style.left = lastX + 'px';
+          p.style.top = lastY + 'px';
+          setTimeout(function() {
+            try { p.focus({ preventScroll: true }); } catch (err) { p.focus(); }
+          }, 25);
+        }
+
+        function isCanvasEvent(e) {
+          var canvas = document.querySelector('#noVNC_container canvas');
+          if (!canvas) return false;
+          return e.target === canvas || canvas.contains(e.target);
+        }
+
+        document.addEventListener('mouseup', function(e) {
+          if (isCanvasEvent(e)) focusProxyAt(e.clientX, e.clientY);
+        }, true);
+        document.addEventListener('click', function(e) {
+          if (isCanvasEvent(e)) focusProxyAt(e.clientX, e.clientY);
+        }, true);
+      })();
     })();
     """#
 }
@@ -321,16 +503,15 @@ struct LinuxBrowserWebView: NSViewRepresentable {
     private static func buildNoVNCURL(port: Int, qualityMode: String) -> String {
         let q: Int
         let c: Int
-        let resize: String
         switch qualityMode {
         case "sharp":
-            q = 9; c = 1; resize = "scale"
+            q = 9; c = 1
         case "smooth":
-            q = 4; c = 5; resize = "remote"
+            q = 4; c = 5
         default:
-            q = 7; c = 2; resize = "remote"
+            q = 7; c = 2
         }
-        return "http://127.0.0.1:\(port)/vnc.html?autoconnect=1&resize=\(resize)&quality=\(q)&compression=\(c)"
+        return "http://127.0.0.1:\(port)/vnc.html?autoconnect=1&resize=remote&quality=\(q)&compression=\(c)"
     }
 
     private static func clampedSize(_ width: Int, _ height: Int) -> (Int, Int) {
@@ -664,7 +845,7 @@ struct LinuxBrowserWebView: NSViewRepresentable {
         onChange?(states)
 
         let installCmd = """
-        sudo apt-get update && sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends chromium fonts-liberation fonts-dejavu-core xvfb xauth openbox x11vnc novnc websockify x11-xserver-utils </dev/null && \
+        sudo apt-get update && sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends chromium fonts-liberation fonts-dejavu-core fonts-noto-cjk xvfb xauth openbox x11vnc novnc websockify x11-xserver-utils </dev/null && \
         sudo ln -sf /usr/bin/chromium /usr/bin/google-chrome && \
         sudo ln -sf /usr/bin/chromium /usr/bin/google-chrome-stable && \
         sudo mkdir -p /opt/google/chrome && \
@@ -823,7 +1004,24 @@ try:
     profile_dir = log_dir / 'profile'
     profile_dir.mkdir(parents=True, exist_ok=True)
     ensure_download_prefs(profile_dir)
-    env = dict(os.environ, DISPLAY=':99')
+    try:
+        fc_dir = pathlib.Path.home() / '.config/fontconfig'
+        fc_file = fc_dir / 'fonts.conf'
+        if not fc_file.exists() or 'Noto Sans CJK SC' not in fc_file.read_text(errors='ignore'):
+            fc_dir.mkdir(parents=True, exist_ok=True)
+            fc_file.write_text('''<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
+<fontconfig>
+  <alias><family>sans-serif</family><prefer><family>Noto Sans CJK SC</family><family>DejaVu Sans</family></prefer></alias>
+  <alias><family>system-ui</family><prefer><family>Noto Sans CJK SC</family><family>DejaVu Sans</family></prefer></alias>
+  <alias><family>serif</family><prefer><family>Noto Serif CJK SC</family><family>DejaVu Serif</family></prefer></alias>
+  <alias><family>monospace</family><prefer><family>Noto Sans Mono CJK SC</family><family>DejaVu Sans Mono</family></prefer></alias>
+</fontconfig>
+''')
+            subprocess.run(['fc-cache', '-f'], capture_output=True)
+    except Exception:
+        pass
+    env = dict(os.environ, DISPLAY=':99', LANG='en_US.UTF-8', LC_CTYPE='en_US.UTF-8')
 
     emit({'stage': 'display', 'message': f'正在启动虚拟显示 ({w}×{h})…'})
     if not proc_running(lambda a: any('Xvfb' in x for x in a[:2]) and ':99' in a):

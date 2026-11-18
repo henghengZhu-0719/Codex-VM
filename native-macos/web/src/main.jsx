@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import {
   Activity,
   AlertTriangle,
+  AppWindow,
   ArrowRight,
   ChartNoAxesCombined,
   CheckCircle2,
@@ -32,6 +33,7 @@ import { IconButton, KV, QuotaBar, SectionTitle, VMCard } from './components/Sha
 import ToastStack from './components/ToastStack.jsx';
 import ChatPage from './features/chat/ChatPage.jsx';
 import BrowserPage from './features/browser/BrowserPage.jsx';
+import CodexDesktopPage from './features/codexDesktop/CodexDesktopPage.jsx';
 
 const blank = {
   vms: [],
@@ -41,6 +43,8 @@ const blank = {
   usage: {},
   editors: {},
   browsers: {},
+  codexDesktops: {},
+  activeCodexDesktopVM: '',
   mounts: {},
   agents: {},
   vmProxyRoutes: {},
@@ -70,6 +74,7 @@ const blank = {
 const tabs = [
   { id: 'vms', label: '虚拟机', icon: Monitor },
   { id: 'codex', label: 'Agent 对话', icon: Sparkles },
+  { id: 'codexDesktop', label: 'Codex 官方桌面', icon: AppWindow },
   { id: 'browser', label: '浏览器', icon: Globe },
   { id: 'proxy', label: '网络代理', icon: Network },
   { id: 'quota', label: 'AI 额度', icon: ChartNoAxesCombined },
@@ -85,6 +90,7 @@ function App() {
   const [remotePortInput, setRemotePortInput] = useState('18080');
   const [modal, setModal] = useState(null);
   const [filter, setFilter] = useState('');
+  const [vmScope, setVmScope] = useState('all');
   const [create, setCreate] = useState({
     name: '',
     cpus: 2,
@@ -101,10 +107,13 @@ function App() {
   const [manual, setManual] = useState({ name: '', type: 'socks5', server: '', port: 1080, username: '', password: '' });
   const [importUrl, setImportUrl] = useState('');
   const [renameText, setRenameText] = useState('');
+  const [diskTarget, setDiskTarget] = useState(20);
   const [nodeFilter, setNodeFilter] = useState('');
   const [showAllNodes, setShowAllNodes] = useState(false);
   const [nodesExpanded, setNodesExpanded] = useState(false);
   const [codexVM, setCodexVM] = useState('');
+  const [desktopVM, setDesktopVM] = useState('');
+  const [desktopPicked, setDesktopPicked] = useState(false);
   const [browserVM, setBrowserVM] = useState('');
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
     try { return localStorage.getItem('agentvm.sidebarCollapsed') === '1'; } catch { return false; }
@@ -185,30 +194,67 @@ function App() {
     }
   }, [state.proxy, proxyDirty]);
 
-  // Handle cross-page navigation requests from Swift (e.g. screenshot to chat)
+  // Handle cross-page navigation requests from Swift (e.g. screenshot to chat, desktop VM picker)
   useEffect(() => {
     const req = state.requestedPage;
     if (!req?.nonce || req.nonce === lastRequestedNonceRef.current) return;
     lastRequestedNonceRef.current = req.nonce;
     if (req.vm) {
       setCodexVM(req.vm);
+      setDesktopVM(req.vm);
+      setDesktopPicked(true);
       setBrowserVM(req.vm);
     }
     if (req.page) setPage(req.page);
+    if (req.pick) setModal({ type: 'codexDesktopPick' });
   }, [state.requestedPage?.nonce]);
 
   const vms = useMemo(() => state.vms.filter(v => v.name !== 'base' && v.name !== 'base-building'), [state.vms]);
-  const visible = vms.filter(v => (v.displayName || v.name).toLowerCase().includes(filter.toLowerCase()));
   const running = useMemo(() => vms.filter(v => v.status === 'Running'), [vms]);
+  const stoppedCount = vms.length - running.length;
+  const visible = vms.filter(v => {
+    if (vmScope === 'running' && v.status !== 'Running') return false;
+    if (vmScope === 'stopped' && v.status === 'Running') return false;
+    return (v.displayName || v.name).toLowerCase().includes(filter.toLowerCase());
+  });
+  const codexVMs = useMemo(
+    () =>
+      running.filter(v => {
+        const agents = state.agents?.[v.name];
+        return !Array.isArray(agents) || agents.includes('codex');
+      }),
+    [running, state.agents]
+  );
 
   useEffect(() => {
     if (running.length && (!codexVM || !running.some(v => v.name === codexVM))) {
       setCodexVM(running[0].name);
     }
+    if (codexVMs.length && (!desktopVM || !codexVMs.some(v => v.name === desktopVM))) {
+      setDesktopVM(codexVMs[0].name);
+      if (codexVMs.length === 1) setDesktopPicked(true);
+    }
+    if (!codexVMs.length) {
+      setDesktopVM('');
+      setDesktopPicked(false);
+    }
     if (running.length && (!browserVM || !running.some(v => v.name === browserVM))) {
       setBrowserVM(running[0].name);
     }
-  }, [running, codexVM, browserVM]);
+  }, [running, codexVMs, codexVM, desktopVM, browserVM]);
+
+  const openCodexDesktopTab = () => {
+    setPage('codexDesktop');
+    if (codexVMs.length > 1 && !desktopPicked) {
+      setModal({ type: 'codexDesktopPick' });
+    } else if (codexVMs.length === 1) {
+      setDesktopVM(codexVMs[0].name);
+      setDesktopPicked(true);
+      setSidebarCollapsed(true);
+    } else if (desktopPicked) {
+      setSidebarCollapsed(true);
+    }
+  };
 
   // Global keyboard shortcuts (Cmd+1..6, Cmd+N)
   useEffect(() => {
@@ -218,7 +264,9 @@ function App() {
       const num = Number(e.key);
       if (num >= 1 && num <= tabs.length) {
         e.preventDefault();
-        setPage(tabs[num - 1].id);
+        const tid = tabs[num - 1].id;
+        if (tid === 'codexDesktop') openCodexDesktopTab();
+        else setPage(tid);
         return;
       }
       if (e.key.toLowerCase() === 'n' && page === 'codex' && codexVM) {
@@ -273,7 +321,13 @@ function App() {
   const navigateTab = (targetPage, targetVM) => {
     if (targetVM) {
       setCodexVM(targetVM);
+      setDesktopVM(targetVM);
+      setDesktopPicked(true);
       setBrowserVM(targetVM);
+    }
+    if (targetPage === 'codexDesktop' && !targetVM) {
+      openCodexDesktopTab();
+      return;
     }
     setPage(targetPage);
   };
@@ -314,22 +368,20 @@ function App() {
       {!isRemoteWeb && (
         <aside className={'sidebar' + (sidebarCollapsed ? ' collapsed' : '')}>
           <div className="brand">
-            <div className="brand-icon"><Monitor size={19} /></div>
+            <div className="brand-icon"><Monitor size={18} /></div>
             <div className="brand-text">
               <strong>Agent VM</strong>
-              <span>DESKTOP</span>
             </div>
           </div>
-          <div className="nav-label">工作空间</div>
           <nav>
             {tabs.map((t, idx) => (
               <button
                 key={t.id}
                 title={`${t.label} (⌘${idx + 1})`}
                 className={'nav-item ' + (page === t.id ? 'selected' : '')}
-                onClick={() => setPage(t.id)}
+                onClick={() => (t.id === 'codexDesktop' ? openCodexDesktopTab() : setPage(t.id))}
               >
-                <t.icon size={17} />
+                <t.icon size={16} />
                 <span className="nav-text">{t.label}</span>
                 {t.id === 'vms' && <span className="nav-count">{vms.length}</span>}
                 {t.id === 'codex' && runningTaskCount > 0 && (
@@ -340,23 +392,22 @@ function App() {
           </nav>
           <div className="sidebar-bottom">
             <div className="sidebar-separator" />
-            <div className="small-label">运行概览</div>
             <div className="side-status">
               <span className="status-dot active" />
-              <span>{running.length} 台虚拟机运行中</span>
+              <span>{running.length} 运行中</span>
             </div>
             {runningTaskCount > 0 && (
               <div className="side-status">
                 <LoaderCircle size={12} className="spin" color="var(--blue)" />
-                <span>{runningTaskCount} 个 Agent 任务运行中</span>
+                <span>{runningTaskCount} 任务</span>
               </div>
             )}
             <div className="side-status">
               <span className={'status-dot ' + (proxy?.use_proxy ? 'active' : '')} />
-              <span>代理 {proxy?.use_proxy ? '已配置' : '未启用'}</span>
+              <span>{proxy?.use_proxy ? '代理已开' : '直连'}</span>
             </div>
             <button className="sidebar-refresh" onClick={() => bridge('refresh')}>
-              <RefreshCw size={14} /> 刷新状态
+              <RefreshCw size={13} /> 刷新
             </button>
           </div>
         </aside>
@@ -370,15 +421,15 @@ function App() {
                 <PanelLeft size={16} />
               </IconButton>
               <div className="breadcrumbs">
-                工作空间 <span>/</span> {tabs.find(x => x.id === page)?.label}
+                {tabs.find(x => x.id === page)?.label}
               </div>
             </div>
             <div className="top-right">
-              <span className="live-marker">
-                <span className="status-dot active" /> 本地运行
+              <span className="live-marker" title="本地运行">
+                <span className="status-dot active" /> 本地
               </span>
               <IconButton
-                title="刷新当前页面"
+                title="刷新"
                 disabled={state.busy || state.proxyBusy}
                 onClick={() => bridge(refreshAction)}
               >
@@ -388,38 +439,41 @@ function App() {
           </div>
         )}
 
-        <div className={'content' + (page === 'codex' ? ' codex-content' : page === 'browser' ? ' browser-content' : '')}>
+        <div className={'content' + (page === 'codex' ? ' codex-content' : page === 'codexDesktop' ? ' codex-desktop-content' : page === 'browser' ? ' browser-content' : '')}>
           {!isRemoteWeb && page === 'vms' && (
             <>
-              <SectionTitle title="虚拟机" sub="隔离运行 AI Agent，统一管理资源、会话与项目环境。">
+              <SectionTitle title="虚拟机">
                 <button className="primary" onClick={() => setModal({ type: 'create' })}>
-                  <Plus size={17} /> 新建虚拟机
+                  <Plus size={16} /> 新建
                 </button>
               </SectionTitle>
-              <div className="stat-grid">
-                <div className="stat">
-                  <span>虚拟机总数</span>
-                  <strong>{vms.length}</strong>
-                  <small>已创建实例</small>
-                </div>
-                <div className="stat">
-                  <span>正在运行</span>
-                  <strong>{running.length}</strong>
-                  <small>活跃工作环境</small>
-                </div>
-                <div className="stat">
-                  <span>已停止</span>
-                  <strong>{vms.length - running.length}</strong>
-                  <small>不运行来宾进程</small>
-                </div>
-              </div>
               <div className="section-row">
-                <h2>
-                  所有虚拟机 <span>{visible.length}</span>
-                </h2>
+                <div className="mode-segmented" role="tablist" aria-label="状态筛选">
+                  <button
+                    type="button"
+                    className={'mode-seg-btn' + (vmScope === 'all' ? ' active' : '')}
+                    onClick={() => setVmScope('all')}
+                  >
+                    全部 {vms.length}
+                  </button>
+                  <button
+                    type="button"
+                    className={'mode-seg-btn' + (vmScope === 'running' ? ' active' : '')}
+                    onClick={() => setVmScope('running')}
+                  >
+                    运行中 {running.length}
+                  </button>
+                  <button
+                    type="button"
+                    className={'mode-seg-btn' + (vmScope === 'stopped' ? ' active' : '')}
+                    onClick={() => setVmScope('stopped')}
+                  >
+                    已停止 {stoppedCount}
+                  </button>
+                </div>
                 <label className="search">
-                  <Search size={15} />
-                  <input value={filter} onChange={e => setFilter(e.target.value)} placeholder="搜索虚拟机" />
+                  <Search size={14} />
+                  <input value={filter} onChange={e => setFilter(e.target.value)} placeholder="搜索" />
                 </label>
               </div>
               {visible.length ? (
@@ -433,12 +487,20 @@ function App() {
                         if (type === 'rename') {
                           setRenameText(vm.displayName === vm.name ? '' : vm.displayName);
                           setModal({ type, vm });
+                        } else if (type === 'resizeDisk') {
+                          const cur = parseInt(String(vm.disk || '10'), 10) || 10;
+                          setDiskTarget(Math.max(20, cur + 10));
+                          setModal({ type, vm });
                         } else if (type === 'mounts' || type === 'proxyRoute') {
                           setNodeFilter('');
                           setModal({ type, vm });
                         } else if (type === 'chatOpen') {
                           setCodexVM(vm.name);
                           setPage('codex');
+                        } else if (type === 'codexDesktopOpen') {
+                          setDesktopVM(vm.name);
+                          setDesktopPicked(true);
+                          setPage('codexDesktop');
                         } else if (type === 'browserOpen') {
                           setBrowserVM(vm.name);
                           setPage('browser');
@@ -452,14 +514,16 @@ function App() {
                 </div>
               ) : (
                 <div className="empty">
-                  <Monitor size={30} />
-                  <strong>暂无匹配的虚拟机</strong>
-                  <span>点击「新建虚拟机」开始创建。</span>
+                  <Monitor size={28} />
+                  <strong>暂无虚拟机</strong>
+                  <button className="primary" onClick={() => setModal({ type: 'create' })}>
+                    <Plus size={15} /> 新建虚拟机
+                  </button>
                 </div>
               )}
               {state.buildStarted && (
                 <div className="notice">
-                  <LoaderCircle size={16} /> {state.buildComplete ? '创建完成' : '正在准备虚拟机 · 阶段 ' + state.buildStage}
+                  <LoaderCircle size={16} /> {state.buildComplete ? '创建完成' : `正在创建 · 阶段 ${state.buildStage}`}
                 </div>
               )}
             </>
@@ -471,6 +535,23 @@ function App() {
               running={running}
               codexVM={codexVM}
               setCodexVM={setCodexVM}
+              onNavigateTab={navigateTab}
+            />
+          )}
+
+          {!isRemoteWeb && page === 'codexDesktop' && (
+            <CodexDesktopPage
+              state={state}
+              codexVMs={codexVMs}
+              desktopVM={desktopPicked || codexVMs.length === 1 ? desktopVM : ''}
+              sidebarCollapsed={sidebarCollapsed}
+              modalOpen={!!modal}
+              onOpenPicker={() => setModal({ type: 'codexDesktopPick' })}
+              onResizeDisk={vm => {
+                const cur = parseInt(String(vm.disk || '10'), 10) || 10;
+                setDiskTarget(Math.max(20, cur + 10));
+                setModal({ type: 'resizeDisk', vm });
+              }}
               onNavigateTab={navigateTab}
             />
           )}
@@ -489,14 +570,11 @@ function App() {
 
           {page === 'quota' && (
             <>
-              <SectionTitle title="AI 额度" sub="查看运行中虚拟机的 AI 额度与已安装工具状态（当前支持 Codex 额度查询）。">
+              <SectionTitle title="AI 额度">
                 <button className="secondary" onClick={() => bridge('refreshQuotas')}>
-                  <RefreshCw size={16} /> 刷新额度
+                  <RefreshCw size={15} /> 刷新
                 </button>
               </SectionTitle>
-              <div className="info-strip">
-                <Activity size={17} /> 数据从各虚拟机内部查询；登录状态、网络和服务限制可能影响结果。
-              </div>
               <div className="quota-grid">
                 {vms.map(vm => {
                   const q = state.quotas[vm.name];
@@ -516,17 +594,16 @@ function App() {
                       </div>
                       {q?.status === 'ok' ? (
                         <>
-                          <QuotaBar label="5 小时窗口" window={q.five_hour} />
-                          <QuotaBar label="每周窗口" window={q.weekly} />
-                          <p className="muted text-xs">查询于 {q.fetchedAt || '最近一次刷新'}</p>
+                          <QuotaBar label="5 小时" window={q.five_hour} />
+                          <QuotaBar label="每周" window={q.weekly} />
                         </>
                       ) : (
                         <p className="muted">
-                          {!hasCodex && vm.status === 'Running'
-                            ? agents.length
-                              ? `当前仅安装了 ${agents.map(agentLabel).join(' / ')}，暂无可查询额度`
-                              : '未检测到 Codex，暂无可查询额度'
-                            : q?.error || (vm.status === 'Running' ? '正在等待额度数据' : '虚拟机已停止')}
+                          {vm.status !== 'Running'
+                            ? '已停止'
+                            : !hasCodex
+                              ? '未安装 Codex'
+                              : q?.error || '暂无数据'}
                         </p>
                       )}
                       {hasCodex && (
@@ -535,7 +612,7 @@ function App() {
                           disabled={vm.status !== 'Running'}
                           onClick={() => bridge('quota', { name: vm.name })}
                         >
-                          <RefreshCw size={13} /> 刷新该实例
+                          <RefreshCw size={13} /> 刷新
                         </button>
                       )}
                     </section>
@@ -547,10 +624,10 @@ function App() {
 
           {page === 'proxy' && (
             <>
-              <SectionTitle title="网络代理" sub="按配置、节点、检查、连接的顺序管理代理出口。" />
+              <SectionTitle title="网络代理" />
               {state.proxyError && (
                 <div className="notice error">
-                  <AlertTriangle size={17} />
+                  <AlertTriangle size={16} />
                   {state.proxyError}
                 </div>
               )}
@@ -562,9 +639,10 @@ function App() {
               )}
               <section className="panel">
                 <div className="section-row">
-                  <h2>01 · 网关配置</h2>
+                  <h2>网关</h2>
                   <span className={'status ' + (proxy?.running ? 'running' : '')}>
-                    {proxy?.running ? '核心运行中' : '核心未运行'}
+                    <span className="status-dot" />
+                    {proxy?.running ? '运行中' : '未运行'}
                   </span>
                 </div>
                 {proxyForm && (
@@ -654,16 +732,14 @@ function App() {
               </section>
               <section className="panel">
                 <div className="section-row">
-                  <h2>02 · 节点与路由</h2>
+                  <h2>节点与路由</h2>
                   <div className="inline-actions" style={{ marginTop: 0 }}>
                     <span className="muted">
-                      {filteredNodes.length === nodes.length
-                        ? `${nodes.length} 个节点`
-                        : `${filteredNodes.length} / ${nodes.length} 个节点`}
+                      {nodes.length} 个节点
                     </span>
                     {nodes.length > 0 && (
                       <button className="small-button" onClick={() => setNodesExpanded(x => !x)}>
-                        {nodesExpanded ? '收起节点' : `展开节点 (${nodes.length})`}
+                        {nodesExpanded ? '收起' : `展开 (${nodes.length})`}
                       </button>
                     )}
                   </div>
@@ -817,52 +893,55 @@ function App() {
               <div className="proxy-bottom-grid">
                 <section className="panel">
                   <div className="section-row">
-                    <h2>03 · 安全自检</h2>
+                    <h2>安全自检</h2>
                     <button className="secondary" onClick={() => bridge('proxyProbe')} disabled={state.proxyBusy}>
-                      <ShieldCheck size={16} /> 运行检查
+                      <ShieldCheck size={15} /> 检查
                     </button>
                   </div>
-                  <KV name="探测出口 IP" value={proxy?.last_probe?.exit_ip || '未获得'} />
-                  <KV name="网络门禁" value={(proxy?.gates || []).map(g => g.state).join(' / ') || '无运行中的托管实例'} />
-                  <div className="check-list">
-                    {(proxy?.last_probe?.report?.checks || []).map(c => (
-                      <div className="check-line" key={c.id}>
-                        {c.state === 'passed' ? (
-                          <CheckCircle2 size={15} color="var(--ok)" />
-                        ) : (
-                          <ShieldAlert size={15} color="var(--warn)" />
-                        )}
-                        <span>{c.id}</span>
-                        <span className="muted">{c.state}</span>
-                      </div>
-                    ))}
+                  <KV name="出口 IP" value={proxy?.last_probe?.exit_ip || '—'} />
+                  <KV name="门禁状态" value={(proxy?.gates || []).map(g => g.state).join(' / ') || '无'} />
+                  {(proxy?.last_probe?.report?.checks || []).length > 0 && (
+                    <div className="check-list">
+                      {(proxy?.last_probe?.report?.checks || []).map(c => (
+                        <div className="check-line" key={c.id}>
+                          {c.state === 'passed' ? (
+                            <CheckCircle2 size={14} color="var(--ok)" />
+                          ) : (
+                            <ShieldAlert size={14} color="var(--warn)" />
+                          )}
+                          <span>{c.id}</span>
+                          <span className="muted">{c.state}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  <div className="inline-actions">
+                    <button className="small-button" onClick={() => setModal({ type: 'closeGate' })}>
+                      关闭门禁
+                    </button>
                   </div>
-                  <p className="muted text-xs">主机检测不能证明虚拟机完全隔离；未知项不会被视为通过。</p>
-                  <button className="small-button" onClick={() => setModal({ type: 'closeGate' })}>
-                    关闭网络门禁
-                  </button>
                 </section>
                 <section className="panel">
                   <div className="section-row">
-                    <h2>04 · 代理连接</h2>
+                    <h2>活跃连接</h2>
                     <button className="secondary" onClick={() => bridge('proxyConnections')}>
-                      <RefreshCw size={15} /> 更新连接
+                      <RefreshCw size={15} /> 刷新
                     </button>
                   </div>
-                  <KV name="累计上行" value={((state.proxyUploadTotal || 0) / 1048576).toFixed(2) + ' MB'} />
-                  <KV name="累计下行" value={((state.proxyDownloadTotal || 0) / 1048576).toFixed(2) + ' MB'} />
+                  <KV name="上行" value={((state.proxyUploadTotal || 0) / 1048576).toFixed(2) + ' MB'} />
+                  <KV name="下行" value={((state.proxyDownloadTotal || 0) / 1048576).toFixed(2) + ' MB'} />
                   {(state.proxyConnections || []).slice(0, 30).map(c => (
                     <div key={c.id} className="connection-row">
                       <span>
                         {c.host}:{c.port}
                       </span>
                       <small>
-                        {c.network} · ↑{Math.round(c.upload / 1024)}KB ↓{Math.round(c.download / 1024)}KB
+                        {c.network} · ↑{Math.round(c.upload / 1024)}K ↓{Math.round(c.download / 1024)}K
                       </small>
                     </div>
                   ))}
                   {(!state.proxyConnections || state.proxyConnections.length === 0) && (
-                    <p className="muted">暂无活跃代理连接。</p>
+                    <p className="muted">暂无连接</p>
                   )}
                 </section>
               </div>
@@ -871,15 +950,12 @@ function App() {
 
           {!isRemoteWeb && page === 'settings' && (
             <>
-              <SectionTitle title="设置" sub="原生应用与当前工作环境。" />
+              <SectionTitle title="设置" />
               <section className="panel">
                 <h2>手机远程工作台</h2>
-                <p className="muted">
-                  开启后可通过 EasyTier 或局域网 IP 在手机浏览器中直接使用工作台聊天（仅开放工作台对话与状态，需口令鉴权）。
-                </p>
                 <div className="form-grid">
                   <label className="checkbox">
-                    <span>启用远程工作台</span>
+                    <span>启用远程访问</span>
                     <input
                       type="checkbox"
                       checked={!!state.remoteWorkbench?.enabled}
@@ -887,8 +963,8 @@ function App() {
                     />
                   </label>
                   <label>
-                    监听端口
-                    <div className="inline-actions">
+                    端口
+                    <div className="inline-actions" style={{ marginTop: 0 }}>
                       <input
                         type="number"
                         min="1024"
@@ -900,7 +976,7 @@ function App() {
                         className="secondary"
                         onClick={() => bridge('remoteWorkbenchSetPort', { port: Number(remotePortInput) })}
                       >
-                        应用端口
+                        应用
                       </button>
                     </div>
                   </label>
@@ -919,9 +995,6 @@ function App() {
                 )}
                 {state.remoteWorkbench?.enabled && (state.remoteWorkbench?.urls || []).length > 0 && (
                   <div style={{ marginTop: 12 }}>
-                    <div className="small-label" style={{ marginBottom: 6 }}>
-                      远程访问链接（含 EasyTier / 局域网 IP）
-                    </div>
                     {(state.remoteWorkbench.urls || []).map(u => (
                       <div key={u} className="web-code-row">
                         <span>{u}</span>
@@ -931,26 +1004,17 @@ function App() {
                 )}
               </section>
               <section className="panel">
-                <h2>桌面集成</h2>
-                <KV name="窗口框架" value="SwiftUI + WKWebView" />
-                <KV name="内部界面" value="React" />
-                <KV name="核心引擎" value="Go · Lima" />
-                <KV name="会话持久化" value="~/.agent-vm/sessions" />
+                <h2>工作区与诊断</h2>
                 <KV name="共享工作区" value="~/AgentVM-Shared" />
+                <KV name="会话目录" value="~/.agent-vm/sessions" />
                 <div className="inline-actions">
                   <button className="secondary" onClick={() => bridge('doctor')}>
-                    运行环境诊断
+                    运行诊断
                   </button>
                   <button className="secondary" onClick={() => bridge('openShared')}>
                     <FolderOpen size={15} /> 打开共享文件夹
                   </button>
                 </div>
-              </section>
-              <section className="panel">
-                <h2>安全原则</h2>
-                <p className="muted">
-                  所有虚拟机、代理和文件操作都由 Swift 原生桥接校验并交给已有 Go 核心。React 不直接接触宿主机文件和认证凭据。
-                </p>
               </section>
             </>
           )}
@@ -985,7 +1049,6 @@ function App() {
             {modal.type === 'create' && (
               <>
                 <h2>新建虚拟机</h2>
-                <p className="muted">默认使用 Agent VM 共享目录，无需额外挂载项目。</p>
                 <div className="form-grid">
                   <label className="form-wide">
                     虚拟机名称
@@ -1183,10 +1246,9 @@ function App() {
 
             {modal.type === 'rename' && (
               <>
-                <h2>修改虚拟机名称</h2>
-                <p className="muted">仅更改界面显示名称，不影响实例 ID 与共享目录。</p>
+                <h2>修改名称</h2>
                 <label className="dialog-field">
-                  显示名称
+                  名称
                   <input
                     autoFocus
                     maxLength="80"
@@ -1212,16 +1274,74 @@ function App() {
               </>
             )}
 
+            {modal.type === 'resizeDisk' &&
+              (() => {
+                const curDisk = parseInt(String(modal.vm.disk || '10'), 10) || 10;
+                const targetNum = Number(diskTarget);
+                const validTarget = Number.isInteger(targetNum) && targetNum > curDisk && targetNum <= 1024;
+                const presets = [curDisk + 10, 20, 30, 40].filter(
+                  (v, i, arr) => v > curDisk && v <= 1024 && arr.indexOf(v) === i
+                );
+                return (
+                  <>
+                    <h2>扩容磁盘 · {modal.vm.displayName || modal.vm.name}</h2>
+                    <div className="form-grid">
+                      <label className="form-wide">
+                        目标容量（当前 {modal.vm.disk || curDisk + 'GiB'}，单位 GiB）
+                        <input
+                          autoFocus
+                          type="number"
+                          min={curDisk + 1}
+                          max="1024"
+                          value={diskTarget}
+                          onChange={e => setDiskTarget(Number(e.target.value))}
+                        />
+                      </label>
+                    </div>
+                    {presets.length > 0 && (
+                      <div className="inline-actions" style={{ marginTop: 0, marginBottom: 10 }}>
+                        {presets.map(gb => (
+                          <button
+                            key={gb}
+                            type="button"
+                            className={targetNum === gb ? 'primary' : 'secondary'}
+                            onClick={() => setDiskTarget(gb)}
+                          >
+                            {gb} GiB
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    <p className="muted text-xs" style={{ marginTop: 4 }}>
+                      {modal.vm.status === 'Running' ? '将自动重启以扩展分区，数据保留' : '将自动扩展分区，数据保留'}
+                      {state.hostDiskAvailGB > 0 ? ` · 宿主机可用 ${state.hostDiskAvailGB} GB` : ''}
+                    </p>
+                    <div className="dialog-actions">
+                      <button className="secondary" onClick={() => setModal(null)}>
+                        取消
+                      </button>
+                      <button
+                        className="primary"
+                        disabled={!validTarget || state.busy}
+                        onClick={() => {
+                          bridge('resizeDisk', { name: modal.vm.name, disk: targetNum });
+                          setModal(null);
+                        }}
+                      >
+                        扩容
+                      </button>
+                    </div>
+                  </>
+                );
+              })()}
+
             {modal.type === 'mounts' && (
               <>
-                <h2>共享文件夹</h2>
-                <p className="muted">
-                  虚拟机：{modal.vm.displayName || modal.vm.name}。挂载变更需要重新启动虚拟机才能生效。
-                </p>
+                <h2>共享文件夹 · {modal.vm.displayName || modal.vm.name}</h2>
                 <div className="mount-list">
                   <div className="mount-entry">
                     <span>~/AgentVM-Shared</span>
-                    <small>所有虚拟机共享 · 读写</small>
+                    <small>共享 · 读写</small>
                   </div>
                   {(state.mounts[modal.vm.name] || []).map(m => (
                     <div className="mount-entry" key={m.path + ':' + m.mode}>
@@ -1363,6 +1483,47 @@ function App() {
                   </>
                 );
               })()}
+
+            {modal.type === 'codexDesktopPick' && (
+              <>
+                <h2>选择 Codex 虚拟机</h2>
+                <div className="picker-vm-list">
+                  {codexVMs.map(v => {
+                    const d = state.codexDesktops?.[v.name];
+                    const isCur = desktopPicked && desktopVM === v.name;
+                    const name = v.displayName || v.name;
+                    return (
+                      <button
+                        key={v.name}
+                        type="button"
+                        className={'picker-vm-item' + (isCur ? ' active' : '')}
+                        onClick={() => {
+                          setDesktopVM(v.name);
+                          setDesktopPicked(true);
+                          setModal(null);
+                          setSidebarCollapsed(true);
+                          bridge('codexDesktopOpen', { name: v.name });
+                        }}
+                      >
+                        <Monitor size={16} />
+                        <div className="picker-vm-info">
+                          <strong>{name}</strong>
+                          {!v.standalone && v.projectPath && <span>{v.projectPath}</span>}
+                        </div>
+                        <span className="picker-vm-badge">
+                          {d?.status === 'ready' ? '运行中' : d?.installed ? '已安装' : '需安装'}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+                <div className="dialog-actions">
+                  <button className="secondary" onClick={() => setModal(null)}>
+                    关闭
+                  </button>
+                </div>
+              </>
+            )}
 
             {modal.type === 'manual' && (
               <>

@@ -93,7 +93,7 @@
 .codex-session-pill{font-size:11px;color:var(--muted);background:var(--bg);padding:3px 9px;border-radius:999px;border:1px solid var(--line)}
 
 .top-left{display:flex;align-items:center;gap:12px;min-width:0}
-.sidebar{transition:width .18s ease,flex-basis .18s ease,padding .18s ease}
+.sidebar{transition:none}
 .sidebar.collapsed{width:64px;flex-basis:64px;padding:18px 8px}
 .sidebar.collapsed .brand{justify-content:center;padding:2px 0 24px}
 .sidebar.collapsed .brand-text,.sidebar.collapsed .nav-label,.sidebar.collapsed .nav-text,.sidebar.collapsed .nav-count,.sidebar.collapsed .sidebar-bottom{display:none}
@@ -323,3 +323,63 @@
   .chat-diff-pane{position:absolute;right:12px;top:64px;bottom:12px;z-index:9;width:min(360px,calc(100vw - 24px));box-shadow:0 16px 40px rgba(0,0,0,.25)}
   .quick-prompts{grid-template-columns:1fr}
 }
+
+/* Codex Official Linux Desktop Setup Card */
+.codex-desktop-setup{width:min(560px,92%);display:flex;flex-direction:column;gap:14px;padding:22px;border-radius:14px;border:1px solid var(--line);background:var(--bg)}
+.codex-desktop-setup-head{display:flex;align-items:center;gap:13px}
+.codex-desktop-setup-head>div:last-child{display:flex;flex-direction:column;gap:4px;min-width:0}
+.codex-desktop-setup-head strong{font-size:15px;font-weight:650}
+.codex-desktop-setup-head span{font-size:12px;color:var(--muted);line-height:1.45}
+.codex-desktop-checks{border:1px solid var(--line);border-radius:10px;background:var(--card);padding:4px 12px}
+.codex-desktop-install-log{margin:0;height:240px;overflow:auto;padding:12px;border-radius:10px;background:var(--card);border:1px solid var(--line);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;line-height:1.5;white-space:pre-wrap;word-break:break-word}
+
+/* Pure Full-Bleed Codex Official Desktop Page & Picker Modal */
+.content.codex-desktop-content{padding:6px;height:calc(100vh - 59px);display:flex;flex-direction:column;overflow:hidden;max-width:none;width:100%}
+.codex-desktop-pure{display:flex;flex-direction:column;flex:1;min-height:0;width:100%;height:100%}
+.codex-desktop-slot{flex:1;min-height:0;border-radius:10px;border:1px solid var(--line);background:var(--card);overflow:hidden;display:flex;align-items:center;justify-content:center}
+.codex-desktop-slot.ready{border-color:transparent;background:transparent}
+.picker-vm-list{display:flex;flex-direction:column;gap:8px;max-height:320px;overflow-y:auto}
+.picker-vm-item{display:flex;align-items:center;gap:11px;width:100%;padding:11px 13px;border-radius:11px;border:1px solid var(--line);background:var(--bg);color:var(--text);text-align:left;justify-content:flex-start}
+.picker-vm-item:hover{background:var(--blue-soft);border-color:var(--blue)}
+.picker-vm-item.active{background:var(--blue-soft);border-color:var(--blue)}
+.picker-vm-info{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.picker-vm-info strong{font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.picker-vm-info span{font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.picker-vm-badge{font-size:11px;color:var(--muted);background:var(--card);border:1px solid var(--line);padding:2px 8px;border-radius:999px;flex-shrink:0}
+
+/* === Linear / Apple Notes Minimal Refinement === */
+:root{--bg:#f6f6f7;--card:#ffffff;--side:#fafafb;--text:#18181b;--muted:#71717a;--line:rgba(0,0,0,.075);--blue:#0066cc;--blue-soft:rgba(0,102,204,.09);--nav-hover:rgba(0,0,0,.04)}
+@media(prefers-color-scheme:dark){:root{--bg:#0f1012;--card:#17181c;--side:#131417;--text:#f4f4f5;--muted:#8b8d97;--line:rgba(255,255,255,.085);--blue:#4ea1ff;--blue-soft:rgba(78,161,255,.14);--nav-hover:rgba(255,255,255,.05)}}
+.sidebar{width:208px;flex-basis:208px;padding:18px 10px 14px}
+.brand{padding:2px 8px 20px;gap:9px}
+.brand-icon{width:28px;height:28px;border-radius:8px}
+.nav-item{height:34px;padding:0 10px;border-radius:8px;font-size:13px}
+.sidebar-refresh{margin-top:12px;padding:6px 10px;font-size:12px}
+.topbar{height:50px;padding:0 24px;background:var(--card)}
+.breadcrumbs{font-size:13px;color:var(--text);font-weight:600;letter-spacing:-.2px}
+.live-marker{border:0;background:transparent;padding:0 2px;font-size:12px}
+.content{padding:24px 24px 56px}
+.content.codex-content{height:calc(100vh - 50px);padding:14px 24px 16px}
+.content.browser-content{height:calc(100vh - 50px)}
+.content.codex-desktop-content{height:calc(100vh - 50px)}
+.heading{margin-bottom:18px;align-items:center}
+.heading h1{font-size:22px;font-weight:650;letter-spacing:-.5px;margin:0}
+.vm-card,.panel{border-radius:12px;padding:16px;box-shadow:0 1px 2px rgba(0,0,0,.02)}
+.vm-glyph{width:32px;height:32px;border-radius:8px}
+.metrics{margin-top:14px;padding:10px 12px;border-radius:9px}
+.metrics-3{grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.metrics>div{gap:4px}
+.metrics strong{font-size:13px;font-variant-numeric:tabular-nums}
+.metric-action{border:0;background:transparent;padding:0;justify-content:flex-start;align-items:baseline;gap:5px;color:var(--text)}
+.metric-action small{font-size:11px;color:var(--blue);font-weight:500}
+.metric-action:hover small{text-decoration:underline}
+.quota-inline{padding:11px 2px}
+.vm-meta-agents{font-size:11px;color:var(--muted)}
+.vm-sub-links{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 2px 0;min-width:0}
+.card-actions{padding-top:12px}
+.codex-header h1{font-size:17px;font-weight:600;letter-spacing:-.3px;margin:0}
+.quick-prompts{max-width:440px}
+.quick-prompt-card{padding:9px 12px;align-items:center;text-align:center}
+.empty{min-height:220px;border-style:solid;border-color:var(--line);background:var(--card)}
+.modal{border-radius:14px;padding:22px}
+.modal h2{font-size:17px;font-weight:650;letter-spacing:-.2px;margin:0 0 14px}
