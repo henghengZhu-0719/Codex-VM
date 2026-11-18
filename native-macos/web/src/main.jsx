@@ -12,6 +12,7 @@ import {
   LoaderCircle,
   Monitor,
   Network,
+  Package,
   PanelLeft,
   Plus,
   RefreshCw,
@@ -49,6 +50,15 @@ const blank = {
   agents: {},
   vmProxyRoutes: {},
   remoteWorkbench: { enabled: false, port: 18080, token: '', urls: [], error: '' },
+  cliMonitor: {
+    autoUpdate: true,
+    checking: false,
+    updating: false,
+    latest: {},
+    latestCheckedAt: 0,
+    pendingCount: 0,
+    vms: {},
+  },
   codex: {
     runningVM: '',
     runningVMs: [],
@@ -77,6 +87,7 @@ const tabs = [
   { id: 'browser', label: '浏览器', icon: Globe },
   { id: 'proxy', label: '网络代理', icon: Network },
   { id: 'quota', label: 'AI 额度', icon: ChartNoAxesCombined },
+  { id: 'versions', label: '版本监控', icon: Package },
   { id: 'settings', label: '设置', icon: Settings2 },
 ];
 
@@ -327,7 +338,8 @@ function App() {
   }, [nodes, nodeFilter, activeNodeId]);
   const displayedNodes = showAllNodes ? filteredNodes : filteredNodes.slice(0, 40);
 
-  const refreshAction = page === 'proxy' ? 'proxyRefresh' : page === 'quota' ? 'refreshQuotas' : 'refresh';
+  const refreshAction =
+    page === 'proxy' ? 'proxyRefresh' : page === 'quota' ? 'refreshQuotas' : page === 'versions' ? 'cliCheck' : 'refresh';
 
   const act = (type, vm) => {
     if (type === 'stop' || type === 'delete') setModal({ type, vm });
@@ -410,6 +422,9 @@ function App() {
                 <t.icon size={16} />
                 <span className="nav-text">{t.label}</span>
                 {t.id === 'vms' && <span className="nav-count">{vms.length}</span>}
+                {t.id === 'versions' && (state.cliMonitor?.pendingCount || 0) > 0 && (
+                  <span className="nav-count nav-count-live">{state.cliMonitor.pendingCount}</span>
+                )}
               </button>
             ))}
           </nav>
@@ -447,10 +462,17 @@ function App() {
               </span>
               <IconButton
                 title="刷新"
-                disabled={state.busy || state.proxyBusy}
+                disabled={state.busy || state.proxyBusy || (page === 'versions' && (state.cliMonitor?.checking || state.cliMonitor?.updating))}
                 onClick={() => bridge(refreshAction)}
               >
-                <RefreshCw size={15} className={state.busy || state.proxyBusy ? 'spin' : ''} />
+                <RefreshCw
+                  size={15}
+                  className={
+                    state.busy || state.proxyBusy || (page === 'versions' && (state.cliMonitor?.checking || state.cliMonitor?.updating))
+                      ? 'spin'
+                      : ''
+                  }
+                />
               </IconButton>
             </div>
           </div>
@@ -667,6 +689,161 @@ function App() {
               </div>
             </>
           )}
+
+          {!isRemoteWeb && page === 'versions' && (() => {
+            const cli = state.cliMonitor || {};
+            const cliAuto = cli.autoUpdate !== false;
+            const cliChecking = !!cli.checking;
+            const cliUpdating = !!cli.updating;
+            const latestMap = cli.latest || {};
+            const vmStates = cli.vms || {};
+            const pendingCount = cli.pendingCount || 0;
+            const formatTime = ts => (ts > 0 ? new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—');
+            return (
+              <>
+                <SectionTitle title="版本监控">
+                  <div className="heading-actions">
+                    <label className="cli-auto-toggle">
+                      <input
+                        type="checkbox"
+                        checked={cliAuto}
+                        onChange={e => bridge('cliSetAutoUpdate', { enabled: e.target.checked })}
+                      />
+                      <span>自动更新</span>
+                    </label>
+                    <button
+                      className="secondary"
+                      disabled={cliChecking || cliUpdating || running.length === 0}
+                      onClick={() => bridge('cliCheck')}
+                    >
+                      <RefreshCw size={14} className={cliChecking ? 'spin' : ''} />
+                      {cliChecking ? '检查中' : '检查'}
+                    </button>
+                    <button
+                      className="primary"
+                      disabled={cliUpdating || pendingCount === 0}
+                      onClick={() => bridge('cliUpdateAll')}
+                    >
+                      {cliUpdating ? '更新中...' : pendingCount > 0 ? `全部更新 (${pendingCount})` : '全部最新'}
+                    </button>
+                  </div>
+                </SectionTitle>
+
+                <div className="stat-grid">
+                  {['codex', 'agy', 'claude'].map(agent => {
+                    const latestVer = latestMap[agent] || '—';
+                    let outdatedCount = 0;
+                    let installedCount = 0;
+                    running.forEach(vm => {
+                      const rawAgents = state.agents?.[vm.name];
+                      if (Array.isArray(rawAgents) && !rawAgents.includes(agent)) return;
+                      const entry = vmStates[vm.name]?.entries?.[agent];
+                      if (entry?.installed) installedCount += 1;
+                      if (entry?.hasUpdate) outdatedCount += 1;
+                    });
+                    return (
+                      <div className="stat" key={agent}>
+                        <span>{agentLabel(agent)}</span>
+                        <strong>{latestVer}</strong>
+                        <small>
+                          {cli.latestCheckedAt > 0
+                            ? outdatedCount > 0
+                              ? `${outdatedCount} 台待更新 · ${installedCount} 台虚拟机`
+                              : `${installedCount} 台虚拟机 · 上次 ${formatTime(cli.latestCheckedAt)}`
+                            : '待检查'}
+                        </small>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {vms.length === 0 ? (
+                  <div className="empty">
+                    <strong>暂无虚拟机</strong>
+                  </div>
+                ) : (
+                  <div className="quota-grid">
+                    {vms.map(vm => {
+                      const vst = vmStates[vm.name] || {};
+                      const entries = vst.entries || {};
+                      const rawAgents = state.agents?.[vm.name];
+                      const trackedApps = ['codex', 'agy', 'claude'].filter(a =>
+                        Array.isArray(rawAgents) ? rawAgents.includes(a) : !!entries[a]
+                      );
+                      const rightStatus =
+                        vm.status !== 'Running'
+                          ? '已停止'
+                          : vst.updating
+                            ? '更新中'
+                            : vst.checking
+                              ? '检测中'
+                              : vst.checkedAt > 0
+                                ? formatTime(vst.checkedAt)
+                                : '未检测';
+                      return (
+                        <section className="panel" key={vm.name}>
+                          <div className="flex-between">
+                            <strong>{vm.displayName || vm.name}</strong>
+                            <span className="muted text-xs">{rightStatus}</span>
+                          </div>
+                          {vm.status !== 'Running' ? (
+                            <p className="muted">已停止</p>
+                          ) : trackedApps.length === 0 ? (
+                            <p className="muted">未启用 Codex / Antigravity / Claude</p>
+                          ) : (
+                            <div className="cli-vm-list">
+                              {trackedApps.map(agent => {
+                                const e = entries[agent];
+                                return (
+                                  <div className="cli-vm-row" key={agent}>
+                                    <span className="cli-agent-name">{agentLabel(agent)}</span>
+                                    <span className="cli-ver-text">
+                                      {!e
+                                        ? '—'
+                                        : !e.installed
+                                          ? '未安装'
+                                          : e.hasUpdate && e.latest
+                                            ? `${e.current || '?'} → ${e.latest}`
+                                            : e.current || '—'}
+                                    </span>
+                                    <div className="cli-row-action">
+                                      {e?.updating ? (
+                                        <span className="cli-pill updating">
+                                          <LoaderCircle size={12} className="spin" /> 更新中
+                                        </span>
+                                      ) : e?.error ? (
+                                        <button
+                                          className="small-button"
+                                          title={e.error}
+                                          onClick={() => bridge('cliUpdateOne', { vm: vm.name, agent })}
+                                        >
+                                          重试
+                                        </button>
+                                      ) : e?.hasUpdate ? (
+                                        <button
+                                          className="small-button cli-update-btn"
+                                          onClick={() => bridge('cliUpdateOne', { vm: vm.name, agent })}
+                                        >
+                                          更新
+                                        </button>
+                                      ) : e?.installed ? (
+                                        <span className="cli-pill ok">最新</span>
+                                      ) : null}
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
+                          {vst.error && <p className="muted text-xs" style={{ color: 'var(--bad)', marginBottom: 0 }}>{vst.error}</p>}
+                        </section>
+                      );
+                    })}
+                  </div>
+                )}
+              </>
+            );
+          })()}
 
           {page === 'proxy' && (
             <>

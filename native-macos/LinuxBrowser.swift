@@ -15,7 +15,7 @@ struct LinuxBrowserState {
     var appRunning = false
     var missingComponents: [String] = []
     var resolution = "1280x800"
-    var qualityMode = "sharp"
+    var qualityMode = "balanced"
     var autoResize = true
     var tabs: [[String: Any]] = []
     var activeTabId = ""
@@ -470,6 +470,13 @@ struct LinuxBrowserWebView: NSViewRepresentable {
           return e.target === canvas || canvas.contains(e.target);
         }
 
+        if (!document.getElementById('avm-novnc-clean-style')) {
+          var st = document.createElement('style');
+          st.id = 'avm-novnc-clean-style';
+          st.textContent = '#noVNC_control_bar_handle{display:none!important}';
+          (document.head || document.documentElement).appendChild(st);
+        }
+
         document.addEventListener('mouseup', function(e) {
           if (isCanvasEvent(e)) focusProxyAt(e.clientX, e.clientY);
         }, true);
@@ -514,7 +521,7 @@ struct LinuxBrowserWebView: NSViewRepresentable {
         case "smooth":
             q = 4; c = 5
         default:
-            q = 7; c = 2
+            q = 6; c = 2
         }
         return "http://127.0.0.1:\(port)/vnc.html?autoconnect=1&resize=remote&quality=\(q)&compression=\(c)"
     }
@@ -581,7 +588,7 @@ struct LinuxBrowserWebView: NSViewRepresentable {
     }
 
     func open(name: String, config: String, width: Int = 1280, height: Int = 800, qualityMode: String? = nil) {
-        let qMode = qualityMode ?? states[name]?.qualityMode ?? "sharp"
+        let qMode = qualityMode ?? states[name]?.qualityMode ?? "balanced"
         if let existing = states[name], existing.status == "ready", existing.port > 0 {
             let url = Self.buildNoVNCURL(port: existing.port, qualityMode: qMode)
             states[name]?.qualityMode = qMode
@@ -622,7 +629,7 @@ struct LinuxBrowserWebView: NSViewRepresentable {
 
     func restartApp(name: String, config: String, width: Int, height: Int) {
         guard !preparing.contains(name), states[name]?.installing != true else { return }
-        let qMode = states[name]?.qualityMode ?? "sharp"
+        let qMode = states[name]?.qualityMode ?? "balanced"
         start(name: name, config: config, width: width, height: height, qualityMode: qMode, restartApp: true)
     }
 
@@ -1203,9 +1210,10 @@ try:
                 subprocess.Popen([
                     xtigervnc, ':99', '-localhost', '-rfbport', '5999',
                     '-SecurityTypes', 'None', '-geometry', f'{w}x{h}', '-depth', '24',
+                    '-dpi', '96', '-FrameRate=60', '-CompareFB=1',
                     '-AcceptSetDesktopSize=1', '-AlwaysShared=1'
                 ], stdin=subprocess.DEVNULL, stdout=f, stderr=f, start_new_session=True)
-            time.sleep(0.55)
+            time.sleep(0.45)
     elif not proc_running(lambda a: any('Xvfb' in x for x in a[:2]) and ':99' in a):
         with open(log_dir / 'xvfb.log', 'ab') as f:
             subprocess.Popen(['Xvfb', ':99', '-screen', '0', f'{w}x{h}x24', '-nolisten', 'tcp', '+extension', 'RANDR'],
@@ -1233,7 +1241,8 @@ try:
         with open(log_dir / 'chromium.log', 'ab') as f:
             subprocess.Popen([
                 chromium, '--no-sandbox', '--test-type', '--disable-dev-shm-usage',
-                '--disable-gpu', '--disable-smooth-scrolling',
+                '--disable-gpu', '--ozone-platform=x11',
+                '--disable-backgrounding-occluded-windows',
                 '--force-webrtc-ip-handling-policy=disable_non_proxied_udp',
                 '--no-first-run', '--no-default-browser-check',
                 '--remote-debugging-port=9222',

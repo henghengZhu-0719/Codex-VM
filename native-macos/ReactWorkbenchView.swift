@@ -248,6 +248,42 @@ struct ReactWorkbenchView: NSViewRepresentable {
                 },
                 "proxyUploadTotal":model.proxyUploadTotal, "proxyDownloadTotal":model.proxyDownloadTotal,
                 "codex":codexPayload,
+                "cliMonitor": {
+                    let cliMgr = model.cliVersionManager
+                    var cliVMs: [String: [String: Any]] = [:]
+                    var pendingCount = 0
+                    for (vmName, st) in cliMgr.vmStates {
+                        var entriesPayload: [String: [String: Any]] = [:]
+                        for (agent, e) in st.entries {
+                            if e.hasUpdate { pendingCount += 1 }
+                            entriesPayload[agent] = [
+                                "agent": e.agent,
+                                "installed": e.installed,
+                                "current": e.current,
+                                "latest": e.latest,
+                                "hasUpdate": e.hasUpdate,
+                                "updating": e.updating,
+                                "error": e.error
+                            ]
+                        }
+                        cliVMs[vmName] = [
+                            "checking": st.checking,
+                            "updating": st.updating,
+                            "checkedAt": st.checkedAt.map { Int($0.timeIntervalSince1970 * 1000) } ?? 0,
+                            "error": st.error,
+                            "entries": entriesPayload
+                        ]
+                    }
+                    return [
+                        "autoUpdate": cliMgr.autoUpdate,
+                        "checking": cliMgr.checkingAll,
+                        "updating": cliMgr.updatingAll,
+                        "latest": cliMgr.latestVersions,
+                        "latestCheckedAt": cliMgr.latestCheckedAt.map { Int($0.timeIntervalSince1970 * 1000) } ?? 0,
+                        "pendingCount": pendingCount,
+                        "vms": cliVMs
+                    ] as [String: Any]
+                }(),
                 "remoteWorkbench":[
                     "enabled":model.remoteWorkbenchEnabled,
                     "port":model.remoteWorkbenchPort,
@@ -657,6 +693,20 @@ struct ReactWorkbenchView: NSViewRepresentable {
                 if let port = (payload["port"] as? NSNumber)?.intValue {
                     model.setRemoteWorkbenchPort(port)
                 }
+            case "cliCheck":
+                let trigger = payload["autoUpdate"] as? Bool ?? model.cliVersionManager.autoUpdate
+                model.checkCLIVersions(triggerAutoUpdate: trigger)
+            case "cliUpdateAll":
+                model.updateAllCLIs()
+            case "cliUpdateOne":
+                if let vmName = payload["vm"] as? String,
+                   let agent = payload["agent"] as? String,
+                   let vm = model.machines.first(where: { $0.name == vmName && $0.status == "Running" }) {
+                    model.updateSingleCLI(vm, agent: agent)
+                }
+            case "cliSetAutoUpdate":
+                let enabled = payload["enabled"] as? Bool ?? true
+                model.setCLIAutoUpdate(enabled)
             default:
                 break
             }

@@ -188,12 +188,14 @@ struct CodexQuotaStatus: Decodable {
     @Published var browserSlot: CGRect = .zero
     @Published var browserSlotVisible: Bool = false
     @Published var browserReloadToken: Int = 0
+    @Published var browserFocusAddressNonce: Int = 0
     @Published var browserShortcutSignal: [String: Any] = [:]
     @Published var codexDesktops: [String: CodexDesktopState] = [:]
     @Published var activeCodexDesktopVM: String = ""
     @Published var codexDesktopSlot: CGRect = .zero
     @Published var codexDesktopSlotVisible: Bool = false
     @Published var codexDesktopReloadToken: Int = 0
+    @Published var cliRevision: Int = 0
     @Published var chatRevision: Int = 0
     @Published var runningSessions: Set<String> = []
     @Published var runningSessionVMs: [String: String] = [:]
@@ -219,8 +221,10 @@ struct CodexQuotaStatus: Decodable {
     private let codeEditorManager = CodeEditorManager()
     private let linuxBrowserManager = LinuxBrowserManager()
     private let codexDesktopManager = CodexDesktopManager()
+    let cliVersionManager = CLIVersionManager()
     private var terminationObserver: NSObjectProtocol?
     private var quotaTimer: Timer?
+    private var cliTimer: Timer?
     private var usageTimer: Timer?
     private var usagePolling: Set<String> = []
     private var codexDesktopLastActiveAt: [String: Date] = [:]
@@ -239,6 +243,17 @@ struct CodexQuotaStatus: Decodable {
         codexDesktopManager.onChange = { [weak self] states in self?.codexDesktops = states }
         codexDesktopManager.onOpen = { [weak self] vmName, _ in
             self?.activeCodexDesktopVM = vmName
+        }
+        cliVersionManager.onChange = { [weak self] in
+            self?.cliRevision += 1
+        }
+        cliVersionManager.onAutoUpdateComplete = { [weak self] updatedCount, failedCount in
+            guard let self else { return }
+            if failedCount == 0 && updatedCount > 0 {
+                self.pushToast(title: "CLI 自动更新完成", message: "已更新 \(updatedCount) 项工具", level: "ok")
+            } else if failedCount > 0 {
+                self.pushToast(title: "部分 CLI 更新失败", message: "成功 \(updatedCount) · 失败 \(failedCount)", level: "error")
+            }
         }
         remoteWorkbenchServer.onError = { [weak self] err in
             self?.remoteWorkbenchError = err
@@ -264,6 +279,11 @@ struct CodexQuotaStatus: Decodable {
         quotaTimer = Timer.scheduledTimer(withTimeInterval: 20 * 60, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.pollAllRunningQuotas()
+            }
+        }
+        cliTimer = Timer.scheduledTimer(withTimeInterval: 30 * 60, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.checkCLIVersions(triggerAutoUpdate: true)
             }
         }
         usageTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
@@ -559,12 +579,8 @@ cat /var/lib/agent-vm-region/status
                 startProject()
                 return
             }
-            var packages: [String] = []
-            if self.includeCodex { packages.append("codex") }
-            if self.includeClaude { packages.append("claude") }
-            if self.includeClaude && self.includeBrowser { packages.append("chromium") }
-            if self.includeCodeServer { packages.append("code-server") }
-            let preinstall = packages.isEmpty ? "none" : packages.joined(separator: ",")
+            // Keep shared base free of per-app CLIs (codex/claude) so unchecked apps don't leak into cloned VMs.
+            let preinstall = self.includeCodeServer ? "code-server" : "none"
             let args = ["setup", "--preinstall=" + preinstall, "--memory", String(self.memory), "--cpus", String(self.cpus), "--disk", String(self.disk)]
             self.run(args, progress: { text in
                 if text.contains("Installing packages inside VM") { self.buildStage = max(self.buildStage, 2) }
@@ -591,6 +607,12 @@ cat /var/lib/agent-vm-region/status
               sudo npm i -g @openai/codex </dev/null
             fi
             """)
+        } else {
+            steps.append("""
+            if command -v npm >/dev/null 2>&1 && command -v codex >/dev/null 2>&1; then
+              sudo npm uninstall -g @openai/codex </dev/null || true
+            fi
+            """)
         }
         if includeClaude {
             steps.append("""
@@ -601,11 +623,15 @@ cat /var/lib/agent-vm-region/status
               printf '{"permissions":{"defaultMode":"bypassPermissions"},"tui":"fullscreen"}\n' | sudo tee /etc/claude-code/managed-settings.json >/dev/null
             fi
             """)
+        } else {
+            steps.append("""
+            rm -f "$HOME/.local/bin/claude" "$HOME/.claude/local/bin/claude"
+            """)
         }
         if includeClaude && includeBrowser {
             steps.append("""
-            if ! command -v chromium >/dev/null 2>&1 || ! command -v websockify >/dev/null 2>&1 || [ ! -f /usr/share/novnc/vnc.html ]; then
-              sudo apt-get update && sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends chromium fonts-liberation fonts-dejavu-core xvfb xauth openbox x11vnc novnc websockify </dev/null
+            if ! command -v chromium >/dev/null 2>&1 || ! command -v Xtigervnc >/dev/null 2>&1 || ! command -v websockify >/dev/null 2>&1 || [ ! -f /usr/share/novnc/vnc.html ]; then
+              sudo apt-get update && sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends chromium fonts-liberation fonts-dejavu-core fonts-noto-cjk tigervnc-standalone-server xvfb xauth openbox x11vnc novnc websockify x11-xserver-utils xclip xdotool </dev/null
               sudo ln -sf /usr/bin/chromium /usr/bin/google-chrome
               sudo ln -sf /usr/bin/chromium /usr/bin/google-chrome-stable
               sudo mkdir -p /opt/google/chrome
@@ -655,6 +681,7 @@ cat /var/lib/agent-vm-region/status
             self.codeEditorManager.retain(runningNames)
             self.linuxBrowserManager.retain(runningNames)
             self.codexDesktopManager.retain(runningNames)
+            self.cliVersionManager.retain(runningNames)
             self.vmUsage = self.vmUsage.filter { runningNames.contains($0.key) }
             self.usageErrors = self.usageErrors.filter { runningNames.contains($0) }
             self.pollRunningUsage()
@@ -678,6 +705,50 @@ cat /var/lib/agent-vm-region/status
                 }
             }
             self.refreshManagedFolders()
+            let runningCheckable = self.machines.filter { $0.status == "Running" && $0.name != "base" && $0.name != "base-building" }
+            if self.cliVersionManager.latestCheckedAt == nil,
+               !runningCheckable.isEmpty,
+               runningCheckable.allSatisfy({ self.allowedCLIAgents(for: $0.name) != nil }) {
+                self.checkCLIVersions(triggerAutoUpdate: true)
+            }
+        }
+    }
+    func allowedCLIAgents(for vmName: String) -> [String]? {
+        if let saved = vmSelectedAgents[vmName], !saved.isEmpty { return saved }
+        if let effective = vmAgents[vmName] { return effective }
+        return nil
+    }
+    func checkCLIVersions(triggerAutoUpdate: Bool = true) {
+        cliVersionManager.checkAll(
+            vms: machines,
+            sshConfigForVM: { self.sshConfigPath(for: $0) },
+            allowedAgentsForVM: { self.allowedCLIAgents(for: $0) ?? CLIVersionManager.trackedAgents },
+            triggerAutoUpdate: triggerAutoUpdate
+        )
+    }
+    func updateAllCLIs() {
+        cliVersionManager.updateAllOutdated(
+            vms: machines,
+            sshConfigForVM: { self.sshConfigPath(for: $0) },
+            allowedAgentsForVM: { self.allowedCLIAgents(for: $0) ?? CLIVersionManager.trackedAgents }
+        )
+    }
+    func updateSingleCLI(_ vm: VM, agent: String) {
+        guard vm.status == "Running" else { return }
+        cliVersionManager.updateSingle(vmName: vm.name, agent: agent, config: sshConfigPath(for: vm.name)) { [weak self] ok, _ in
+            guard let self else { return }
+            if ok {
+                self.pushToast(title: "\(agent) 更新完成", message: self.displayName(for: vm), level: "ok", vmName: vm.name)
+            } else {
+                self.pushToast(title: "\(agent) 更新失败", message: self.displayName(for: vm), level: "error", vmName: vm.name)
+            }
+        }
+    }
+    func setCLIAutoUpdate(_ enabled: Bool) {
+        cliVersionManager.autoUpdate = enabled
+        cliRevision += 1
+        if enabled && cliVersionManager.hasAnyUpdate() {
+            updateAllCLIs()
         }
     }
     func refreshCodeEditors() {
@@ -1085,9 +1156,16 @@ cat /var/lib/agent-vm-region/status
                 let prev = self.vmAgents[name]
                 if detectedAgents != nil || !effective.isEmpty {
                     self.vmAgents[name] = effective
+                    self.cliVersionManager.pruneUnallowed(vmName: name, allowed: effective)
                     if prev != effective, let vmObj = self.machines.first(where: { $0.name == name }) {
                         self.pollQuota(for: vmObj)
                     }
+                }
+                let runningCheckable = self.machines.filter { $0.status == "Running" && $0.name != "base" && $0.name != "base-building" }
+                if (self.cliVersionManager.latestCheckedAt == nil || !self.cliVersionManager.hasChecked(vmName: name)),
+                   !runningCheckable.isEmpty,
+                   runningCheckable.allSatisfy({ self.allowedCLIAgents(for: $0.name) != nil }) {
+                    self.checkCLIVersions(triggerAutoUpdate: true)
                 }
             }
         }
@@ -3445,7 +3523,11 @@ private struct MenuBarControls: View {
                         url: url,
                         reloadToken: model.browserReloadToken,
                         onBrowserShortcut: { action in
-                            model.browserShortcutSignal = ["action": action, "vm": model.activeBrowserVM, "nonce": UUID().uuidString]
+                            if action == "focusAddress" {
+                                model.browserFocusAddressNonce += 1
+                            } else {
+                                model.browserShortcutSignal = ["action": action, "vm": model.activeBrowserVM, "nonce": UUID().uuidString]
+                            }
                         },
                         onPasteText: { text in
                             if let bVM = model.machines.first(where: { $0.name == model.activeBrowserVM }) {

@@ -36,6 +36,7 @@ export default function BrowserPage({
 
   // Open or select VM browser when browserVM is set
   useEffect(() => {
+    lastResizeRef.current = { w: 0, h: 0 };
     if (!browserVM || modalOpen) return;
     const el = slotRef.current;
     const rect = el ? el.getBoundingClientRect() : { width: 1280, height: 800 };
@@ -48,6 +49,9 @@ export default function BrowserPage({
       });
     } else {
       bridge('browserSelect', { name: browserVM });
+      if (st === 'ready') {
+        bridge('browserInspect', { name: browserVM });
+      }
     }
   }, [browserVM, modalOpen]);
 
