@@ -1204,6 +1204,9 @@ try:
         stop_procs(lambda a: any('Xvfb' in x for x in a[:2]) and ':99' in a)
 
     if restart_app:
+        if shutil.which('systemctl'):
+            subprocess.run(['systemctl', '--user', 'stop', 'agent-vm-chromium.service'],
+                           capture_output=True, timeout=8)
         stop_procs(lambda a: any('chromium' in x or 'chrome' in x for x in a[:2]) and '--remote-debugging-port=9222' in a)
 
     emit({'stage': 'display', 'message': f'正在启动虚拟显示 ({w}×{h})…'})
@@ -1242,7 +1245,7 @@ try:
     emit({'stage': 'chromium', 'message': '正在启动 Chromium 浏览器…'})
     if not proc_running(lambda a: any('chromium' in x or 'chrome' in x for x in a[:2]) and '--remote-debugging-port=9222' in a):
         with open(log_dir / 'chromium.log', 'ab') as f:
-            subprocess.Popen([
+            browser_args = [
                 chromium, '--no-sandbox', '--test-type', '--disable-dev-shm-usage',
                 '--disable-gpu', '--ozone-platform=x11',
                 # Keep active agent pages alive, but allow Chromium to throttle idle tabs.
@@ -1254,7 +1257,29 @@ try:
                 '--user-data-dir=' + str(profile_dir),
                 f'--window-size={w},{h}',
                 '--start-maximized'
-            ], env=env, stdin=subprocess.DEVNULL, stdout=f, stderr=f, start_new_session=True)
+            ]
+            # A transient user service survives workbench disconnections and provides
+            # restart-on-failure. When the user manager is unavailable (minimal guests),
+            # retain the previous detached-process implementation.
+            systemd_run = shutil.which('systemd-run')
+            managed = False
+            if systemd_run and pathlib.Path('/run/user/' + str(os.getuid()) + '/bus').exists():
+                service_cmd = [
+                    systemd_run, '--user', '--unit=agent-vm-chromium',
+                    '--collect', '--property=Restart=on-failure',
+                    '--property=RestartSec=3s',
+                    '--property=TimeoutStopSec=8s',
+                    '--setenv=DISPLAY=:99',
+                    '--setenv=LANG=en_US.UTF-8',
+                    '--'
+                ] + browser_args
+                attempt = subprocess.run(service_cmd, env=env, capture_output=True, text=True, timeout=8)
+                managed = attempt.returncode == 0
+                if not managed:
+                    f.write(('systemd-run fallback: ' + attempt.stderr + '\\n').encode())
+            if not managed:
+                subprocess.Popen(browser_args, env=env, stdin=subprocess.DEVNULL,
+                                 stdout=f, stderr=f, start_new_session=True)
         time.sleep(0.8)
 
     emit({'stage': 'vnc', 'message': '正在启动 noVNC 画面服务…'})
@@ -1340,6 +1365,11 @@ def stop_procs(match, wait_sec=3.0):
         try: os.kill(pid, signal.SIGKILL)
         except OSError: pass
 
+# Stop the managed service first, then clean up any legacy detached browser.
+import subprocess, shutil
+if shutil.which('systemctl'):
+    subprocess.run(['systemctl', '--user', 'stop', 'agent-vm-chromium.service'],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=8)
 stop_procs(lambda a: any('chromium' in x or 'chrome' in x for x in a[:2]) and '--remote-debugging-port=9222' in a)
 stop_procs(lambda a: any('websockify' in x for x in a[:3]) and '127.0.0.1:5999' in a)
 stop_procs(lambda a: any('openbox' in x for x in a[:2]) and 'agent-vm-browser' in ' '.join(a))
