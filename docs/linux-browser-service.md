@@ -59,3 +59,34 @@ A user-level systemd service can restart while its user manager exists.
 For reboot-time unattended startup, configure user lingering and the guest VM
 boot policy separately, with explicit user consent. This change does not
 enable lingering or automatically start VMs.
+
+## Built-in MCP adapter (guest/browser/agent_vm_browser_mcp.py)
+
+A dependency-free MCP stdio adapter is included in the repository. It supports
+`browser_tabs`, `browser_new_tab`, `browser_activate_tab` and
+`browser_close_tab` over the guest-local CDP HTTP endpoint. The MCP process
+runs **inside the guest**, under the same Linux user as Chromium. It does not
+listen on any TCP port.
+
+Copy the script into the guest (for example via the existing authenticated
+`limactl shell <vm>` workflow), then register it as a stdio MCP server:
+
+```json
+{
+  "mcpServers": {
+    "agent-vm-browser": {
+      "command": "python3",
+      "args": ["/home/ubuntu/agent_vm_browser_mcp.py"]
+    }
+  }
+}
+```
+
+Replace the script path with its actual location in your guest. MCP uses
+newline-delimited JSON-RPC on stdin/stdout. The adapter intentionally exposes
+only a limited tab-management API and does not provide arbitrary JavaScript
+execution, filesystem access or remote CDP forwarding.
+
+The adapter is not yet automatically installed into every VM. Installing it
+must not bypass guest network isolation, and access should be limited to
+trusted local agent processes.
