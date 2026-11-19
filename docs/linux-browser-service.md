@@ -90,3 +90,18 @@ execution, filesystem access or remote CDP forwarding.
 The adapter is not yet automatically installed into every VM. Installing it
 must not bypass guest network isolation, and access should be limited to
 trusted local agent processes.
+
+## One-click MCP installation
+
+The browser workbench now includes **安装 MCP**. It copies the bundled adapter
+over the existing authenticated guest SSH connection into:
+
+`~/.config/agent-vm-browser/agent_vm_browser_mcp.py`
+
+The guest directory and script are private to its user. Register the server
+with the agent's MCP configuration using that path and `python3` as the
+command. This installation does not modify arbitrary agent configuration files
+or grant new privileges. Registration remains a separate user-controlled step.
+
+Do not run the adapter outside the guest: its loopback CDP address resolves
+relative to the process running the adapter.
