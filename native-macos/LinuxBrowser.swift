@@ -1102,6 +1102,61 @@ struct LinuxBrowserWebView: NSViewRepresentable {
         }
     }
 
+    func registerMCP(name: String, config: String, completion: @escaping (Bool, String) -> Void) {
+        // Opt-in registration: do not silently change agent settings.
+        let script = #"""
+import json, pathlib, shutil, subprocess
+path = pathlib.Path.home() / '.config/agent-vm-browser/agent_vm_browser_mcp.py'
+results = {}
+if not path.is_file():
+    print(json.dumps({'ok': False, 'message': '请先安装 MCP 服务端'}))
+    raise SystemExit(0)
+for agent, argv in (
+    ('codex', ['codex', 'mcp', 'add', 'agent-vm-browser', '--', 'python3', str(path)]),
+    ('claude', ['claude', 'mcp', 'add', '--scope', 'user', 'agent-vm-browser', '--', 'python3', str(path)]),
+):
+    if not shutil.which(agent):
+        results[agent] = 'not_installed'
+        continue
+    try:
+        run = subprocess.run(argv, capture_output=True, text=True, timeout=15)
+        if run.returncode == 0:
+            results[agent] = 'registered'
+        elif 'already exists' in (run.stdout + run.stderr).lower():
+            results[agent] = 'already_registered'
+        else:
+            results[agent] = 'failed: ' + (run.stderr or run.stdout)[-240:]
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        results[agent] = 'failed: ' + str(exc)
+print(json.dumps({'ok': any(v in ('registered', 'already_registered') for v in results.values()), 'agents': results}))
+"""#
+        DispatchQueue.global(qos: .utility).async {
+            let process = Process(), output = Pipe(), input = Pipe()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+            process.arguments = Self.sshControlArgs(config: config, timeout: 8) + ["lima-" + name, "python3 -"]
+            process.standardInput = input
+            process.standardOutput = output
+            process.standardError = output
+            do {
+                try process.run()
+                try input.fileHandleForWriting.write(contentsOf: Data(script.utf8))
+                try input.fileHandleForWriting.close()
+                let raw = output.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+                let message = String(data: raw, encoding: .utf8) ?? ""
+                let line = message.components(separatedBy: .newlines).last(where: { $0.hasPrefix("{") })
+                let parsed = line?.data(using: .utf8).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+                let agents = parsed?["agents"] as? [String: String] ?? [:]
+                let summary = agents.sorted { $0.key < $1.key }.map { "\($0.key): \($0.value)" }.joined(separator: "；")
+                DispatchQueue.main.async {
+                    completion(parsed?["ok"] as? Bool ?? false, summary.isEmpty ? "未找到可注册的 Agent CLI" : summary)
+                }
+            } catch {
+                DispatchQueue.main.async { completion(false, error.localizedDescription) }
+            }
+        }
+    }
+
     private static let mcpServerScript = #"""
 #!/usr/bin/env python3
 """Minimal stdio MCP adapter for the existing guest-local Chromium CDP endpoint.
