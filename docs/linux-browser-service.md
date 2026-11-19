@@ -105,3 +105,16 @@ or grant new privileges. Registration remains a separate user-controlled step.
 
 Do not run the adapter outside the guest: its loopback CDP address resolves
 relative to the process running the adapter.
+
+## Product direction (personal browser, not agent automation)
+
+The primary purpose of the browser is a persistent, user-controlled Linux
+Chromium session. Browser automation by AI agents is **not** a product goal.
+The workbench no longer presents MCP install or registration controls.
+
+The optional MCP adapter remains in the repository for compatibility with
+existing installations, but must not be auto-installed, auto-registered or
+started by the application. CDP remains guest-loopback only and may be used
+internally for tab/session management. Future development prioritizes
+persistent profiles, safe disconnect/reconnect, resource monitoring and
+authenticated private remote viewing without weakening Fail-Closed egress.
