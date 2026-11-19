@@ -201,6 +201,7 @@ struct ReactWorkbenchView: NSViewRepresentable {
                         "browserProcessCount": browser.browserProcessCount,
                         "browserCPUSeconds": browser.browserCPUSeconds,
                         "cdpAvailable": browser.cdpAvailable,
+                        "mcpInstalled": browser.mcpInstalled,
                         "missing": browser.missingComponents,
                         "resolution": browser.resolution,
                         "qualityMode": browser.qualityMode,
