@@ -70,7 +70,7 @@ def call(name, args):
 
 def respond(payload):
     raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    sys.stdout.buffer.write(raw + b"\\n")
+    sys.stdout.buffer.write(raw + b"\n")
     sys.stdout.buffer.flush()
 
 
