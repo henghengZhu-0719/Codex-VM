@@ -382,6 +382,10 @@ struct ReactWorkbenchView: NSViewRepresentable {
                 if let vm = existingVM(payload), let mode = payload["qualityMode"] as? String {
                     model.setBrowserQuality(vm, qualityMode: mode)
                 }
+            case "browserInstallMCP":
+                if let vm = existingVM(payload) {
+                    model.installBrowserMCP(vm)
+                }
             case "browserInspect":
                 if let vm = existingVM(payload) {
                     model.checkLinuxBrowser(vm)
