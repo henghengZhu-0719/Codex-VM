@@ -839,6 +839,13 @@ cat /var/lib/agent-vm-region/status
                             message: message, level: ok ? "ok" : "error", vmName: vm.name)
         }
     }
+    func registerBrowserMCP(_ vm: VM) {
+        guard vm.status == "Running", vm.name != "base", vm.name != "base-building" else { return }
+        linuxBrowserManager.registerMCP(name: vm.name, config: sshConfigPath(for: vm.name)) { [weak self] ok, message in
+            self?.pushToast(title: ok ? "Agent MCP 已注册" : "Agent MCP 注册未完成",
+                            message: message, level: ok ? "ok" : "error", vmName: vm.name)
+        }
+    }
     func browserInspect(_ vm: VM) {
         guard vm.status == "Running" else { return }
         linuxBrowserManager.inspect(name: vm.name, config: sshConfigPath(for: vm.name))
