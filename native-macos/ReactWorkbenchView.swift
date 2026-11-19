@@ -384,6 +384,7 @@ struct ReactWorkbenchView: NSViewRepresentable {
                 }
             case "browserInspect":
                 if let vm = existingVM(payload) {
+                    model.checkLinuxBrowser(vm)
                     model.browserInspect(vm)
                 }
             case "browserNavigate":
