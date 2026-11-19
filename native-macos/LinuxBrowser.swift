@@ -19,6 +19,7 @@ struct LinuxBrowserState {
     var browserProcessCount = 0
     var browserCPUSeconds = 0.0
     var cdpAvailable = false
+    var mcpInstalled = false
     var missingComponents: [String] = []
     var resolution = "1280x800"
     var qualityMode = "balanced"
@@ -586,6 +587,7 @@ struct LinuxBrowserWebView: NSViewRepresentable {
                     st.browserProcessCount = obj["browserProcessCount"] as? Int ?? 0
                     st.browserCPUSeconds = obj["browserCPUSeconds"] as? Double ?? 0
                     st.cdpAvailable = obj["cdpAvailable"] as? Bool ?? false
+                    st.mcpInstalled = obj["mcpInstalled"] as? Bool ?? false
                     st.missingComponents = missing
                     if st.status == "idle" && !missing.isEmpty {
                         st.status = "idle"
@@ -1372,6 +1374,7 @@ print(json.dumps({
     'browserProcessCount': tree_count,
     'browserCPUSeconds': browser_cpu_seconds,
     'cdpAvailable': cdp_available,
+    'mcpInstalled': (pathlib.Path.home() / '.config/agent-vm-browser/agent_vm_browser_mcp.py').is_file(),
     'missing': missing
 }))
 """#
