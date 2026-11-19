@@ -15,6 +15,8 @@ struct LinuxBrowserState {
     var appRunning = false
     var browserPID = 0
     var browserRSSMB = 0
+    var browserTreeRSSMB = 0
+    var browserProcessCount = 0
     var browserCPUSeconds = 0.0
     var cdpAvailable = false
     var missingComponents: [String] = []
@@ -580,6 +582,8 @@ struct LinuxBrowserWebView: NSViewRepresentable {
                     st.appRunning = appRunning
                     st.browserPID = obj["browserPID"] as? Int ?? 0
                     st.browserRSSMB = obj["browserRSSMB"] as? Int ?? 0
+                    st.browserTreeRSSMB = obj["browserTreeRSSMB"] as? Int ?? 0
+                    st.browserProcessCount = obj["browserProcessCount"] as? Int ?? 0
                     st.browserCPUSeconds = obj["browserCPUSeconds"] as? Double ?? 0
                     st.cdpAvailable = obj["cdpAvailable"] as? Bool ?? false
                     st.missingComponents = missing
@@ -1324,13 +1328,51 @@ for d in os.listdir('/proc'):
     except Exception:
         pass
 
+# Account for Chromium's renderer, GPU and utility processes. This is
+# observational only; no automatic suspension or termination is performed.
+tree_rss_kb = 0
+tree_count = 0
+if browser_pid:
+    parent = {}
+    rss = {}
+    for d in os.listdir('/proc'):
+        if not d.isdigit(): continue
+        try:
+            if os.stat('/proc/' + d).st_uid != os.getuid(): continue
+            stat = open('/proc/' + d + '/stat').read().rsplit(')', 1)[1].split()
+            parent[int(d)] = int(stat[1])
+            for line in open('/proc/' + d + '/status'):
+                if line.startswith('VmRSS:'):
+                    rss[int(d)] = int(line.split()[1])
+                    break
+        except (OSError, ValueError, IndexError):
+            continue
+    descendants = {browser_pid}
+    changed = True
+    while changed:
+        expanded = descendants | {pid for pid, ppid in parent.items() if ppid in descendants}
+        changed = len(expanded) != len(descendants)
+        descendants = expanded
+    tree_count = len(descendants)
+    tree_rss_kb = sum(rss.get(pid, 0) for pid in descendants)
+
+cdp_available = False
+if app_running:
+    try:
+        with socket.create_connection(('127.0.0.1', 9222), timeout=0.4):
+            cdp_available = True
+    except OSError:
+        pass
+
 print(json.dumps({
     'installed': chromium is not None,
     'appRunning': app_running,
     'browserPID': browser_pid,
     'browserRSSMB': browser_rss_mb,
+    'browserTreeRSSMB': tree_rss_kb // 1024,
+    'browserProcessCount': tree_count,
     'browserCPUSeconds': browser_cpu_seconds,
-    'cdpAvailable': bool(app_running and socket.socket().connect_ex(('127.0.0.1', 9222)) == 0),
+    'cdpAvailable': cdp_available,
     'missing': missing
 }))
 """#
