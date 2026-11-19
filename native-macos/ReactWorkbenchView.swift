@@ -351,6 +351,10 @@ struct ReactWorkbenchView: NSViewRepresentable {
                     let qMode = payload["qualityMode"] as? String
                     model.openLinuxBrowser(vm, width: w, height: h, qualityMode: qMode)
                 }
+            case "browserStopService":
+                if let vm = existingVM(payload) {
+                    model.stopLinuxBrowser(vm)
+                }
             case "browserRestart":
                 if let vm = existingVM(payload) {
                     let w = (payload["width"] as? NSNumber)?.intValue ?? 1280
