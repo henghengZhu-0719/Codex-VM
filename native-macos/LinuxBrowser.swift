@@ -1173,6 +1173,9 @@ try:
     log_dir.mkdir(parents=True, exist_ok=True)
     profile_dir = log_dir / 'profile'
     profile_dir.mkdir(parents=True, exist_ok=True)
+    # Chromium profiles contain authenticated sessions. Never expose them to other guest users.
+    os.chmod(log_dir, 0o700)
+    os.chmod(profile_dir, 0o700)
     ensure_download_prefs(profile_dir)
     try:
         fc_dir = pathlib.Path.home() / '.config/fontconfig'
@@ -1242,9 +1245,11 @@ try:
             subprocess.Popen([
                 chromium, '--no-sandbox', '--test-type', '--disable-dev-shm-usage',
                 '--disable-gpu', '--ozone-platform=x11',
-                '--disable-backgrounding-occluded-windows',
+                # Keep active agent pages alive, but allow Chromium to throttle idle tabs.
                 '--force-webrtc-ip-handling-policy=disable_non_proxied_udp',
                 '--no-first-run', '--no-default-browser-check',
+                # CDP is a privileged browser-control interface: bind only inside the guest.
+                '--remote-debugging-address=127.0.0.1',
                 '--remote-debugging-port=9222',
                 '--user-data-dir=' + str(profile_dir),
                 f'--window-size={w},{h}',
