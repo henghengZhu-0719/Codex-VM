@@ -197,6 +197,8 @@ struct ReactWorkbenchView: NSViewRepresentable {
                         "appRunning": browser.appRunning,
                         "browserPID": browser.browserPID,
                         "browserRSSMB": browser.browserRSSMB,
+                        "browserTreeRSSMB": browser.browserTreeRSSMB,
+                        "browserProcessCount": browser.browserProcessCount,
                         "browserCPUSeconds": browser.browserCPUSeconds,
                         "cdpAvailable": browser.cdpAvailable,
                         "missing": browser.missingComponents,
