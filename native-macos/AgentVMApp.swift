@@ -991,17 +991,11 @@ cat /var/lib/agent-vm-region/status
                 codexDesktopLastActiveAt.removeValue(forKey: vm.name)
             }
 
-            let browserActive = browserSlotVisible && activeBrowserVM == vm.name
-            if browserActive {
+            // Browser is a personal service: hiding the noVNC viewer must never
+            // stop Chromium, which may be serving active agents or downloads.
+            // Explicit Stop remains available to the user.
+            if browserSlotVisible && activeBrowserVM == vm.name {
                 browserLastActiveAt[vm.name] = now
-            } else if let bst = linuxBrowsers[vm.name], (bst.status == "ready" || bst.appRunning), !bst.installing {
-                if let last = browserLastActiveAt[vm.name] {
-                    if now.timeIntervalSince(last) >= guiIdleLimitSeconds {
-                        stopLinuxBrowser(vm, reasonToast: "已休眠闲置浏览器以释放内存")
-                    }
-                } else {
-                    browserLastActiveAt[vm.name] = now
-                }
             } else {
                 browserLastActiveAt.removeValue(forKey: vm.name)
             }
