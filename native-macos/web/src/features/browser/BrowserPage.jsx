@@ -165,7 +165,7 @@ export default function BrowserPage({
         <strong style={{ fontSize: 13 }}>Linux Chromium</strong>
         <span style={{ fontSize: 12, opacity: .7 }}>{isReady ? '已连接' : browser.appRunning ? '浏览器进程运行中' : '未连接'}</span>
         <span style={{ fontSize: 12, opacity: .6 }}>{browser.tabs?.length ? `${browser.tabs.length} 个标签页` : ''}</span>
-        <span style={{ fontSize: 12, opacity: .7 }} title="仅 Chromium 主进程 RSS，不包含子进程">{browser.browserRSSMB > 0 ? `主进程 ${browser.browserRSSMB} MiB` : ''}</span>
+        <span style={{ fontSize: 12, opacity: .7 }} title="Chromium 主进程及子进程的 RSS 总和（可能包含共享内存重复计数）">{browser.browserProcessCount > 0 ? `浏览器 ${browser.browserTreeRSSMB} MiB · ${browser.browserProcessCount} 进程` : ''}</span>
         <span style={{ fontSize: 12, opacity: .7 }} title="Chrome DevTools Protocol（虚拟机回环地址）">{browser.cdpAvailable ? 'CDP 就绪' : 'CDP 未连接'}</span>
         <span style={{ flex: 1 }} />
         <button type="button" className="secondary" title="刷新浏览器状态" onClick={() => bridge('browserInspect', { name: browserVM })}>
