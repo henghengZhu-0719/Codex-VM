@@ -5,6 +5,7 @@ import {
   Globe,
   LoaderCircle,
   Monitor,
+  RefreshCw,
   Wrench,
 } from 'lucide-react';
 import { bridge } from '../../bridge.js';
@@ -159,6 +160,17 @@ export default function BrowserPage({
 
   return (
     <div className="codex-desktop-pure">
+      <div role="toolbar" aria-label="浏览器服务管理" style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 14px', borderBottom: '1px solid var(--border, #d0d0d0)', flexShrink: 0 }}>
+        <Globe size={16} />
+        <strong style={{ fontSize: 13 }}>Linux Chromium</strong>
+        <span style={{ fontSize: 12, opacity: .7 }}>{isReady ? '已连接' : browser.appRunning ? '浏览器进程运行中' : '未连接'}</span>
+        <span style={{ fontSize: 12, opacity: .6 }}>{browser.tabs?.length ? `${browser.tabs.length} 个标签页` : ''}</span>
+        <span style={{ flex: 1 }} />
+        <button type="button" className="secondary" title="刷新浏览器状态" onClick={() => bridge('browserInspect', { name: browserVM })}>
+          <RefreshCw size={14} /> 刷新状态
+        </button>
+        <button type="button" className="secondary" onClick={onOpenPicker}>切换环境</button>
+      </div>
       <div ref={slotRef} className={'codex-desktop-slot' + (isReady ? ' ready' : '')}>
         {browser.installing ? (
           <div className="empty" style={{ border: 0, maxWidth: 460 }}>
