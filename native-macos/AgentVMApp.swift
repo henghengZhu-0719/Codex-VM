@@ -832,6 +832,13 @@ cat /var/lib/agent-vm-region/status
             }
         }
     }
+    func installBrowserMCP(_ vm: VM) {
+        guard vm.status == "Running", vm.name != "base", vm.name != "base-building" else { return }
+        linuxBrowserManager.installMCP(name: vm.name, config: sshConfigPath(for: vm.name)) { [weak self] ok, message in
+            self?.pushToast(title: ok ? "浏览器 MCP 已安装" : "浏览器 MCP 安装失败",
+                            message: message, level: ok ? "ok" : "error", vmName: vm.name)
+        }
+    }
     func browserInspect(_ vm: VM) {
         guard vm.status == "Running" else { return }
         linuxBrowserManager.inspect(name: vm.name, config: sshConfigPath(for: vm.name))
