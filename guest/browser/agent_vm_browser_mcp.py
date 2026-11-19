@@ -70,34 +70,17 @@ def call(name, args):
 
 def respond(payload):
     raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    sys.stdout.buffer.write(
-        b"Content-Length: " + str(len(raw)).encode("ascii") + b"\r\n\r\n" + raw
-    )
+    sys.stdout.buffer.write(raw + b"\\n")
     sys.stdout.buffer.flush()
 
 
 def serve():
     stream = sys.stdin.buffer
     while True:
-        headers = {}
-        while True:
-            line = stream.readline(8192)
-            if not line:
-                return
-            if line in (b"\r\n", b"\n"):
-                break
-            if b":" not in line:
-                return
-            key, value = line.split(b":", 1)
-            headers[key.strip().lower()] = value.strip()
-        try:
-            size = int(headers.get(b"content-length", b"0"))
-        except ValueError:
+        body = stream.readline(MAX_MESSAGE + 1)
+        if not body:
             return
-        if size <= 0 or size > MAX_MESSAGE:
-            return
-        body = stream.read(size)
-        if len(body) != size:
+        if len(body) > MAX_MESSAGE:
             return
         try:
             request = json.loads(body)
