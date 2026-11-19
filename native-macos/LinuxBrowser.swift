@@ -13,6 +13,10 @@ struct LinuxBrowserState {
     var checked = false
     var installed = false
     var appRunning = false
+    var browserPID = 0
+    var browserRSSMB = 0
+    var browserCPUSeconds = 0.0
+    var cdpAvailable = false
     var missingComponents: [String] = []
     var resolution = "1280x800"
     var qualityMode = "balanced"
@@ -574,6 +578,10 @@ struct LinuxBrowserWebView: NSViewRepresentable {
                     st.checked = true
                     st.installed = installed
                     st.appRunning = appRunning
+                    st.browserPID = obj["browserPID"] as? Int ?? 0
+                    st.browserRSSMB = obj["browserRSSMB"] as? Int ?? 0
+                    st.browserCPUSeconds = obj["browserCPUSeconds"] as? Double ?? 0
+                    st.cdpAvailable = obj["cdpAvailable"] as? Bool ?? false
                     st.missingComponents = missing
                     if st.status == "idle" && !missing.isEmpty {
                         st.status = "idle"
@@ -1059,7 +1067,7 @@ struct LinuxBrowserWebView: NSViewRepresentable {
     // MARK: - Guest Python Scripts
 
     static let statusScript = #"""
-import json, os, shutil
+import json, os, shutil, socket
 
 chromium = shutil.which('chromium') or shutil.which('chromium-browser') or shutil.which('google-chrome')
 websockify = shutil.which('websockify')
@@ -1076,6 +1084,9 @@ if not openbox: missing.append('openbox')
 if not websockify or not os.path.isfile('/usr/share/novnc/vnc.html'): missing.append('novnc')
 
 app_running = False
+browser_pid = 0
+browser_rss_mb = 0
+browser_cpu_seconds = 0.0
 for d in os.listdir('/proc'):
     if not d.isdigit(): continue
     try:
@@ -1084,6 +1095,16 @@ for d in os.listdir('/proc'):
         args = [x for x in raw.split('\0') if x]
         if any('chromium' in x or 'chrome' in x for x in args[:2]) and '--remote-debugging-port=9222' in args:
             app_running = True
+            browser_pid = int(d)
+            try:
+                for line in open(f'/proc/{d}/status'):
+                    if line.startswith('VmRSS:'):
+                        browser_rss_mb = int(line.split()[1]) // 1024
+                        break
+                ticks = os.sysconf('SC_CLK_TCK')
+                raw_stat = open(f'/proc/{d}/stat').read().rsplit(')', 1)[1].split()
+                browser_cpu_seconds = round((int(raw_stat[11]) + int(raw_stat[12])) / ticks, 2)
+            except (OSError, ValueError, IndexError): pass
             break
     except Exception:
         pass
@@ -1091,6 +1112,10 @@ for d in os.listdir('/proc'):
 print(json.dumps({
     'installed': chromium is not None,
     'appRunning': app_running,
+    'browserPID': browser_pid,
+    'browserRSSMB': browser_rss_mb,
+    'browserCPUSeconds': browser_cpu_seconds,
+    'cdpAvailable': bool(app_running and socket.socket().connect_ex(('127.0.0.1', 9222)) == 0),
     'missing': missing
 }))
 """#
