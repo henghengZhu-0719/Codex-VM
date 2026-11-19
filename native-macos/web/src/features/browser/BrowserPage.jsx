@@ -171,6 +171,7 @@ export default function BrowserPage({
         <button type="button" className="secondary" title="刷新浏览器状态" onClick={() => bridge('browserInspect', { name: browserVM })}>
           <RefreshCw size={14} /> 刷新状态
         </button>
+        <button type="button" className="secondary" onClick={() => bridge('browserInstallMCP', { name: browserVM })} title="安装虚拟机内的本地 MCP 服务端">安装 MCP</button>
         <button type="button" className="secondary" onClick={() => bridge('browserRestart', { name: browserVM })} disabled={!browser.appRunning} title="重启 Chromium，保留用户资料">重启</button>
         <button type="button" className="secondary" onClick={() => {
           if (window.confirm('停止该虚拟机中的 Chromium 与画面服务？正在运行的浏览器自动化任务会中断。')) {
