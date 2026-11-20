@@ -246,6 +246,7 @@ struct CodexQuotaStatus: Decodable {
         return hosts
     }()
     @Published var remoteHostStatus = "未连接"
+    @Published var remoteHostConnectionState = "disconnected"
     let remoteHostConnection = RemoteHostConnection()
     let chatStore = AgentChatStore()
     private var codexProcesses: [String: Process] = [:]
@@ -295,6 +296,9 @@ struct CodexQuotaStatus: Decodable {
         }
         remoteHostConnection.onStatus = { [weak self] status in
             self?.remoteHostStatus = status
+        }
+        remoteHostConnection.onChange = { [weak self] in
+            self?.remoteHostConnectionState = self?.remoteHostConnection.state ?? "disconnected"
         }
         remoteWorkbenchServer.onError = { [weak self] err in
             self?.remoteWorkbenchError = err
@@ -1814,13 +1818,18 @@ print(json.dumps({
         let title = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let target = hostname.trimmingCharacters(in: .whitespacesAndNewlines)
         let user = username.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !title.isEmpty, !target.isEmpty, !user.isEmpty,
-              (1...65535).contains(sshPort), (1024...65535).contains(workbenchPort) else {
+        let profile = RemoteHostProfile(id: UUID().uuidString, name: title,
+            hostname: target, username: user, sshPort: sshPort, workbenchPort: workbenchPort)
+        guard RemoteHostProfile.isValid(profile) else {
             remoteHostStatus = "请填写有效的远程主机信息"
             return
         }
-        remoteHosts.append(RemoteHostProfile(id: UUID().uuidString, name: title,
-            hostname: target, username: user, sshPort: sshPort, workbenchPort: workbenchPort))
+        if remoteHosts.contains(where: { $0.hostname == target && $0.username == user && $0.sshPort == sshPort }) {
+            remoteHostStatus = "此远程主机已添加"
+            return
+        }
+        remoteHosts.append(profile)
+        remoteHostStatus = "已添加远程主机：\(title)"
         persistRemoteHosts()
     }
     func removeRemoteHost(_ id: String) {
@@ -1835,7 +1844,7 @@ print(json.dumps({
     }
     static func generateToken() -> String {
         let chars = Array("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
-        return String((0..<24).map { _ in chars[Int.random(in: 0..<chars.count)] })
+        return String((0..<32).map { _ in chars.randomElement()! })
     }
     func toggleRemoteWorkbench(_ enabled: Bool) {
         remoteWorkbenchEnabled = enabled
