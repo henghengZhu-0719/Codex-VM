@@ -64,6 +64,7 @@ const blank = {
   remoteWorkbench: { enabled: false, port: 18080, token: '', urls: [], error: '' },
   remoteHosts: [],
   remoteHostStatus: '未连接',
+  remoteHostConnectionState: 'disconnected',
   activeRemoteHostID: '',
   cliMonitor: {
     autoUpdate: true,
@@ -1259,14 +1260,22 @@ function App() {
                     workbenchPort: Number(remoteHostForm.workbenchPort),
                   })}>添加远程主机</button>
                 </div>
-                <div className="muted" style={{ margin: '10px 0' }}>{state.remoteHostStatus || '未连接'}</div>
+                <div className={state.remoteHostConnectionState === 'error' ? 'notice error' : 'muted'} style={{ margin: '10px 0' }} role="status">
+                  {state.remoteHostStatus || '未连接'}
+                </div>
                 {(state.remoteHosts || []).map(h => (
                   <div className="web-code-row" key={h.id} style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
                     <span style={{ flex: 1, minWidth: 160 }}>{h.name} · {h.username}@{h.hostname}:{h.sshPort}</span>
-                    <button className="secondary" onClick={() => bridge('remoteHostConnect', { id: h.id })}>
-                      {state.activeRemoteHostID === h.id ? '重新连接' : '连接'}
+                    <button className="secondary" disabled={state.remoteHostConnectionState === 'connecting'}
+                      onClick={() => bridge('remoteHostConnect', { id: h.id })}>
+                      {state.activeRemoteHostID === h.id ? (state.remoteHostConnectionState === 'connecting' ? '正在连接…' : '重新连接') : '连接'}
                     </button>
-                    <button className="secondary" onClick={() => bridge('remoteHostRemove', { id: h.id })}>移除</button>
+                    {state.activeRemoteHostID === h.id && state.remoteHostConnectionState === 'connected' && (
+                      <button className="secondary" onClick={() => bridge('remoteHostOpen')}>打开工作台</button>
+                    )}
+                    <button className="secondary" onClick={() => {
+                      if (window.confirm(`确定移除远程主机「${h.name}」？`)) bridge('remoteHostRemove', { id: h.id });
+                    }}>移除</button>
                   </div>
                 ))}
                 {!!state.activeRemoteHostID && <div className="inline-actions">
