@@ -10,9 +10,10 @@
 - SSH 连接失败、认证失败及远端工作台无法访问时会显示错误，不再在固定延迟后误报连接成功。
 - 主机列表防止重复添加，并校验主机名、用户及端口；删除前需确认。
 - 连接成功后打开系统浏览器，通过远端工作台访问口令查看/操作已有的 Agent 工作台。
+- 已添加远程 VM 卡片，支持列出状态、资源信息和启动/停止；停止需要客户端二次确认，服务器再次核对 VM 存在及当前状态。
 - 不复制远端 VM 磁盘、浏览器 Profile 或项目目录；原有本地 VM 操作不受影响。
 
-**当前限制：**现有 RemoteWorkbenchServer 仅开放受限的 Agent/Codex 工作台操作（非完整 VM 管理 API）。本阶段尚未实现远程 VM 卡片的创建/启动/停止、完整 Linux 浏览器画面、SSH PTY 集成、独立 Server 守护进程或跨设备文件自动同步。SSH 隧道只在客户端 App 运行期间存活，断开后需要手动重连。远端 Mac 需要持续运行 Agent-VM App 并保持唤醒。
+**当前限制：**现有 RemoteWorkbenchServer 仅开放受限的 Agent/Codex 工作台操作和 VM 列表、启动、停止（非完整 VM 管理 API）。本阶段尚未实现远程 VM 创建/删除、完整 Linux 浏览器画面、SSH PTY 集成、独立 Server 守护进程或跨设备文件自动同步。SSH 隧道只在客户端 App 运行期间存活，断开后需要手动重连。远端 Mac 需要持续运行 Agent-VM App 并保持唤醒。
 
 ## 配置
 
@@ -31,7 +32,7 @@
 
 ## 下一阶段
 
-- 引入共享 HostProvider，将 VM list/start/stop/create/remove 统一路由到本地或远端。
+- 完善共享 HostProvider，将 VM list/start/stop/create/remove 统一路由到本地或远端；目前仅通过认证远程工作台提供 list/start/stop。
 - 远程原生终端（SSH PTY）、Agent 会话附着/恢复、浏览器安全转发。
 - 对远程操作增加权限边界、运行状态确认及断线恢复。
 - 将远端服务迁移为独立受认证的后台服务，明确与 GUI 会话的关系。
