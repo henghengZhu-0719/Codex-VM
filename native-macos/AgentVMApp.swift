@@ -192,6 +192,7 @@ struct CodexQuotaStatus: Decodable {
     @Published var browserShortcutSignal: [String: Any] = [:]
     @Published var codexDesktops: [String: CodexDesktopState] = [:]
     @Published var activeCodexDesktopVM: String = ""
+    @Published var activeCodexDesktopApp: DesktopAppKind = .codex
     @Published var codexDesktopSlot: CGRect = .zero
     @Published var codexDesktopSlotVisible: Bool = false
     @Published var codexDesktopReloadToken: Int = 0
@@ -241,8 +242,9 @@ struct CodexQuotaStatus: Decodable {
             self?.activeBrowserVM = vmName
         }
         codexDesktopManager.onChange = { [weak self] states in self?.codexDesktops = states }
-        codexDesktopManager.onOpen = { [weak self] vmName, _ in
+        codexDesktopManager.onOpen = { [weak self] vmName, app, _ in
             self?.activeCodexDesktopVM = vmName
+            self?.activeCodexDesktopApp = app
         }
         cliVersionManager.onChange = { [weak self] in
             self?.cliRevision += 1
@@ -696,8 +698,11 @@ cat /var/lib/agent-vm-region/status
                     if self.vmAgentQuotas[vm.name] == nil {
                         self.pollQuota(for: vm)
                     }
-                    if self.codexDesktops[vm.name]?.checked != true {
-                        self.checkCodexDesktop(vm)
+                    for app in DesktopAppKind.allCases {
+                        let key = CodexDesktopManager.stateKey(name: vm.name, app: app)
+                        if self.codexDesktops[key]?.checked != true {
+                            self.checkCodexDesktop(vm, app: app)
+                        }
                     }
                     if self.linuxBrowsers[vm.name]?.checked != true {
                         self.checkLinuxBrowser(vm)
@@ -953,56 +958,62 @@ cat /var/lib/agent-vm-region/status
         try? FileManager.default.createDirectory(atPath: dl, withIntermediateDirectories: true)
         NSWorkspace.shared.open(URL(fileURLWithPath: dl))
     }
-    func checkCodexDesktop(_ vm: VM) {
+    func checkCodexDesktop(_ vm: VM, app: DesktopAppKind = .codex) {
         guard vm.status == "Running", vm.name != "base", vm.name != "base-building" else { return }
-        codexDesktopManager.checkStatus(name: vm.name, config: sshConfigPath(for: vm.name))
+        codexDesktopManager.checkStatus(name: vm.name, config: sshConfigPath(for: vm.name), app: app)
     }
-    func openCodexDesktop(_ vm: VM, width: Int = 1280, height: Int = 800, qualityMode: String? = nil) {
+    func openCodexDesktop(_ vm: VM, app: DesktopAppKind = .codex, width: Int = 1280, height: Int = 800, qualityMode: String? = nil) {
         guard vm.status == "Running", vm.name != "base", vm.name != "base-building" else { return }
+        activeCodexDesktopVM = vm.name
+        activeCodexDesktopApp = app
         let w = width > 100 ? width : max(800, Int(codexDesktopSlot.width))
         let h = height > 100 ? height : max(500, Int(codexDesktopSlot.height))
-        codexDesktopManager.open(name: vm.name, config: sshConfigPath(for: vm.name), width: w, height: h, qualityMode: qualityMode)
+        codexDesktopManager.open(name: vm.name, config: sshConfigPath(for: vm.name), app: app, width: w, height: h, qualityMode: qualityMode)
     }
-    func resizeCodexDesktop(_ vm: VM, width: Int, height: Int) {
+    func resizeCodexDesktop(_ vm: VM, app: DesktopAppKind = .codex, width: Int, height: Int) {
         guard vm.status == "Running", width > 100, height > 100 else { return }
-        codexDesktopManager.resize(name: vm.name, config: sshConfigPath(for: vm.name), width: width, height: height)
+        codexDesktopManager.resize(name: vm.name, config: sshConfigPath(for: vm.name), app: app, width: width, height: height)
     }
-    func setCodexDesktopQuality(_ vm: VM, qualityMode: String) {
-        codexDesktopManager.setQuality(name: vm.name, qualityMode: qualityMode)
+    func setCodexDesktopQuality(_ vm: VM, app: DesktopAppKind = .codex, qualityMode: String) {
+        codexDesktopManager.setQuality(name: vm.name, app: app, qualityMode: qualityMode)
     }
-    func setCodexDesktopAutoResize(_ vm: VM, enabled: Bool) {
+    func setCodexDesktopAutoResize(_ vm: VM, app: DesktopAppKind = .codex, enabled: Bool) {
         let w = max(800, Int(codexDesktopSlot.width))
         let h = max(500, Int(codexDesktopSlot.height))
-        codexDesktopManager.setAutoResize(name: vm.name, enabled: enabled, config: sshConfigPath(for: vm.name), width: w, height: h)
+        codexDesktopManager.setAutoResize(name: vm.name, app: app, enabled: enabled, config: sshConfigPath(for: vm.name), width: w, height: h)
     }
     func requestCodexDesktopPicker() {
         requestedPage = ["page": "codexDesktop", "pick": true, "nonce": UUID().uuidString]
     }
-    func stopCodexDesktop(_ vm: VM, reasonToast: String? = nil) {
-        codexDesktopLastActiveAt.removeValue(forKey: vm.name)
-        codexDesktopManager.stopSession(name: vm.name, config: sshConfigPath(for: vm.name)) { [weak self] in
+    func stopCodexDesktop(_ vm: VM, app: DesktopAppKind = .codex, reasonToast: String? = nil) {
+        let key = CodexDesktopManager.stateKey(name: vm.name, app: app)
+        codexDesktopLastActiveAt.removeValue(forKey: key)
+        codexDesktopManager.stopSession(name: vm.name, config: sshConfigPath(for: vm.name), app: app) { [weak self] in
             self?.pollUsage(for: vm)
             if let reasonToast {
-                self?.pushToast(title: reasonToast, message: self?.displayName(for: vm) ?? vm.name, level: "info", vmName: vm.name)
+                self?.pushToast(title: reasonToast, message: "\(self?.displayName(for: vm) ?? vm.name) · \(app.shortName)", level: "info", vmName: vm.name)
             }
         }
     }
     func reclaimIdleGUIs() {
         let now = Date()
         for vm in machines where vm.status == "Running" && vm.name != "base" && vm.name != "base-building" {
-            let desktopActive = codexDesktopSlotVisible && activeCodexDesktopVM == vm.name
-            if desktopActive {
-                codexDesktopLastActiveAt[vm.name] = now
-            } else if let st = codexDesktops[vm.name], (st.status == "ready" || st.appRunning), !st.installing {
-                if let last = codexDesktopLastActiveAt[vm.name] {
-                    if now.timeIntervalSince(last) >= guiIdleLimitSeconds {
-                        stopCodexDesktop(vm, reasonToast: "已休眠闲置桌面以释放内存")
+            for app in DesktopAppKind.allCases {
+                let key = CodexDesktopManager.stateKey(name: vm.name, app: app)
+                let desktopActive = codexDesktopSlotVisible && activeCodexDesktopVM == vm.name && activeCodexDesktopApp == app
+                if desktopActive {
+                    codexDesktopLastActiveAt[key] = now
+                } else if let st = codexDesktops[key], (st.status == "ready" || st.appRunning), !st.installing {
+                    if let last = codexDesktopLastActiveAt[key] {
+                        if now.timeIntervalSince(last) >= guiIdleLimitSeconds {
+                            stopCodexDesktop(vm, app: app, reasonToast: "已休眠闲置桌面以释放内存")
+                        }
+                    } else {
+                        codexDesktopLastActiveAt[key] = now
                     }
                 } else {
-                    codexDesktopLastActiveAt[vm.name] = now
+                    codexDesktopLastActiveAt.removeValue(forKey: key)
                 }
-            } else {
-                codexDesktopLastActiveAt.removeValue(forKey: vm.name)
             }
 
             // Browser is a personal service: hiding the noVNC viewer must never
@@ -1015,32 +1026,34 @@ cat /var/lib/agent-vm-region/status
             }
         }
     }
-    func installCodexDesktop(_ vm: VM, width: Int = 1280, height: Int = 800) {
+    func installCodexDesktop(_ vm: VM, app: DesktopAppKind = .codex, width: Int = 1280, height: Int = 800) {
         guard vm.status == "Running", vm.name != "base", vm.name != "base-building" else { return }
+        activeCodexDesktopVM = vm.name
+        activeCodexDesktopApp = app
         let w = width > 100 ? width : max(800, Int(codexDesktopSlot.width))
         let h = height > 100 ? height : max(500, Int(codexDesktopSlot.height))
-        codexDesktopManager.install(name: vm.name, config: sshConfigPath(for: vm.name), width: w, height: h) { [weak self] ok, msg in
+        codexDesktopManager.install(name: vm.name, config: sshConfigPath(for: vm.name), app: app, width: w, height: h) { [weak self] ok, msg in
             guard let self else { return }
             if ok {
-                self.pushToast(title: "官方 Codex 桌面端已安装", message: "正在启动桌面窗口…", level: "ok", vmName: vm.name)
+                self.pushToast(title: "\(app.displayName)已安装", message: "正在启动桌面窗口…", level: "ok", vmName: vm.name)
             } else {
-                self.pushToast(title: "官方 Codex 桌面端安装失败", message: msg, level: "error", vmName: vm.name)
+                self.pushToast(title: "\(app.displayName)安装失败", message: msg, level: "error", vmName: vm.name)
             }
         }
     }
-    func restartCodexDesktop(_ vm: VM, width: Int = 0, height: Int = 0) {
+    func restartCodexDesktop(_ vm: VM, app: DesktopAppKind = .codex, width: Int = 0, height: Int = 0) {
         guard vm.status == "Running" else { return }
         let w = width > 100 ? width : max(800, Int(codexDesktopSlot.width))
         let h = height > 100 ? height : max(500, Int(codexDesktopSlot.height))
-        codexDesktopManager.restartApp(name: vm.name, config: sshConfigPath(for: vm.name), width: w, height: h)
+        codexDesktopManager.restartApp(name: vm.name, config: sshConfigPath(for: vm.name), app: app, width: w, height: h)
     }
-    func codexDesktopSendText(_ vm: VM, text: String) {
+    func codexDesktopSendText(_ vm: VM, app: DesktopAppKind = .codex, text: String) {
         guard vm.status == "Running", !text.isEmpty else { return }
-        codexDesktopManager.sendText(name: vm.name, config: sshConfigPath(for: vm.name), text: text)
+        codexDesktopManager.sendText(name: vm.name, config: sshConfigPath(for: vm.name), app: app, text: text)
     }
-    func codexDesktopFetchLogs(_ vm: VM) {
+    func codexDesktopFetchLogs(_ vm: VM, app: DesktopAppKind = .codex) {
         guard vm.status == "Running" else { return }
-        codexDesktopManager.fetchLogs(name: vm.name, config: sshConfigPath(for: vm.name))
+        codexDesktopManager.fetchLogs(name: vm.name, config: sshConfigPath(for: vm.name), app: app)
     }
     func pollRunningUsage() {
         for vm in machines where vm.status == "Running" && vm.name != "base" && vm.name != "base-building" {
@@ -1944,7 +1957,9 @@ cat /var/lib/agent-vm-region/status
                     self.busy = false
                     self.refresh()
                     if code == 0 {
-                        self.checkCodexDesktop(vm)
+                        for app in DesktopAppKind.allCases {
+                            self.checkCodexDesktop(vm, app: app)
+                        }
                         self.pushToast(title: "磁盘扩容完成", message: "\(self.displayName(for: vm)) 已扩展到 \(diskGiB) GiB", level: "ok", vmName: vm.name)
                     } else {
                         self.pushToast(title: "磁盘扩容失败", message: text, level: "error", vmName: vm.name)
@@ -3551,7 +3566,7 @@ private struct MenuBarControls: View {
                     }
                 }
                 if model.codexDesktopSlotVisible,
-                   let state = model.codexDesktops[model.activeCodexDesktopVM],
+                   let state = model.codexDesktops[CodexDesktopManager.stateKey(name: model.activeCodexDesktopVM, app: model.activeCodexDesktopApp)],
                    state.status == "ready",
                    let url = URL(string: state.url),
                    model.codexDesktopSlot.width > 20, model.codexDesktopSlot.height > 20 {
@@ -3560,7 +3575,7 @@ private struct MenuBarControls: View {
                         reloadToken: model.codexDesktopReloadToken,
                         onPasteText: { text in
                             if let desktopVM = model.machines.first(where: { $0.name == model.activeCodexDesktopVM }) {
-                                model.codexDesktopSendText(desktopVM, text: text)
+                                model.codexDesktopSendText(desktopVM, app: model.activeCodexDesktopApp, text: text)
                             }
                         }
                     )
@@ -3568,7 +3583,7 @@ private struct MenuBarControls: View {
                         .clipShape(RoundedRectangle(cornerRadius: 12))
                         .offset(x: model.codexDesktopSlot.minX, y: model.codexDesktopSlot.minY)
                     if let desktopVM = model.machines.first(where: { $0.name == model.activeCodexDesktopVM }) {
-                        CodexDesktopFloatingOverlay(model: model, vm: desktopVM, slot: model.codexDesktopSlot)
+                        CodexDesktopFloatingOverlay(model: model, vm: desktopVM, app: model.activeCodexDesktopApp, slot: model.codexDesktopSlot)
                     }
                 }
             }

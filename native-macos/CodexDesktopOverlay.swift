@@ -3,6 +3,7 @@ import SwiftUI
 struct CodexDesktopFloatingOverlay: View {
     @ObservedObject var model: Model
     let vm: VM
+    let app: DesktopAppKind
     let slot: CGRect
 
     @State private var showControls = false
@@ -12,7 +13,7 @@ struct CodexDesktopFloatingOverlay: View {
     @FocusState private var imeFocused: Bool
 
     private var state: CodexDesktopState {
-        model.codexDesktops[vm.name] ?? CodexDesktopState()
+        model.codexDesktops[CodexDesktopManager.stateKey(name: vm.name, app: app)] ?? CodexDesktopState(app: app.rawValue)
     }
 
     var body: some View {
@@ -28,7 +29,7 @@ struct CodexDesktopFloatingOverlay: View {
                                 .font(.caption.weight(.semibold))
                             Spacer()
                             Button {
-                                model.codexDesktopFetchLogs(vm)
+                                model.codexDesktopFetchLogs(vm, app: app)
                             } label: {
                                 Image(systemName: "arrow.clockwise")
                                     .font(.caption)
@@ -86,12 +87,32 @@ struct CodexDesktopFloatingOverlay: View {
                         Divider()
 
                         VStack(alignment: .leading, spacing: 5) {
+                            Text("官方桌面应用")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Picker("", selection: Binding(
+                                get: { app },
+                                set: { newApp in
+                                    guard newApp != app else { return }
+                                    showControls = false
+                                    showLogs = false
+                                    model.openCodexDesktop(vm, app: newApp)
+                                }
+                            )) {
+                                Text("Codex").tag(DesktopAppKind.codex)
+                                Text("Claude Code").tag(DesktopAppKind.claude)
+                            }
+                            .pickerStyle(.segmented)
+                            .labelsHidden()
+                        }
+
+                        VStack(alignment: .leading, spacing: 5) {
                             Text("画面清晰度")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                             Picker("", selection: Binding(
                                 get: { state.qualityMode },
-                                set: { model.setCodexDesktopQuality(vm, qualityMode: $0) }
+                                set: { model.setCodexDesktopQuality(vm, app: app, qualityMode: $0) }
                             )) {
                                 Text("高清").tag("sharp")
                                 Text("均衡").tag("balanced")
@@ -103,7 +124,7 @@ struct CodexDesktopFloatingOverlay: View {
 
                         Toggle("自适应窗口分辨率", isOn: Binding(
                             get: { state.autoResize },
-                            set: { model.setCodexDesktopAutoResize(vm, enabled: $0) }
+                            set: { model.setCodexDesktopAutoResize(vm, app: app, enabled: $0) }
                         ))
                         .font(.caption)
                         .toggleStyle(.switch)
@@ -114,7 +135,7 @@ struct CodexDesktopFloatingOverlay: View {
                         HStack(spacing: 6) {
                             Button {
                                 showControls = false
-                                model.restartCodexDesktop(vm)
+                                model.restartCodexDesktop(vm, app: app)
                             } label: {
                                 Label("重启", systemImage: "power")
                             }
@@ -123,7 +144,7 @@ struct CodexDesktopFloatingOverlay: View {
 
                             Button {
                                 showControls = false
-                                model.stopCodexDesktop(vm)
+                                model.stopCodexDesktop(vm, app: app)
                             } label: {
                                 Label("休眠", systemImage: "moon.zzz")
                             }
@@ -141,7 +162,7 @@ struct CodexDesktopFloatingOverlay: View {
 
                             Button {
                                 showLogs.toggle()
-                                if showLogs { model.codexDesktopFetchLogs(vm) }
+                                if showLogs { model.codexDesktopFetchLogs(vm, app: app) }
                             } label: {
                                 Label("日志", systemImage: "doc.text")
                             }
@@ -161,7 +182,7 @@ struct CodexDesktopFloatingOverlay: View {
                         Image(systemName: "keyboard")
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                        TextField("输入中文，按 Enter 直接粘贴到 Codex…", text: $imeText)
+                        TextField("输入中文，按 Enter 直接粘贴到 \(app.shortName)…", text: $imeText)
                             .textFieldStyle(.plain)
                             .font(.system(size: 13))
                             .focused($imeFocused)
@@ -169,13 +190,13 @@ struct CodexDesktopFloatingOverlay: View {
                                 let text = imeText
                                 guard !text.isEmpty else { return }
                                 imeText = ""
-                                model.codexDesktopSendText(vm, text: text)
+                                model.codexDesktopSendText(vm, app: app, text: text)
                             }
                         Button {
                             let text = imeText
                             guard !text.isEmpty else { return }
                             imeText = ""
-                            model.codexDesktopSendText(vm, text: text)
+                            model.codexDesktopSendText(vm, app: app, text: text)
                         } label: {
                             Image(systemName: "arrow.up.circle.fill")
                                 .font(.system(size: 17))
@@ -229,10 +250,10 @@ struct CodexDesktopFloatingOverlay: View {
                         if !showControls { showLogs = false }
                     } label: {
                         HStack(spacing: 4) {
-                            Text(model.displayName(for: vm))
+                            Text("\(app.shortName) · \(model.displayName(for: vm))")
                                 .lineLimit(1)
                                 .truncationMode(.tail)
-                                .frame(maxWidth: 92)
+                                .frame(maxWidth: 148)
                             Image(systemName: "slider.horizontal.3")
                         }
                         .font(.caption.weight(.medium))

@@ -46,6 +46,7 @@ const blank = {
   browsers: {},
   codexDesktops: {},
   activeCodexDesktopVM: '',
+  activeCodexDesktopApp: 'codex',
   mounts: {},
   agents: {},
   vmProxyRoutes: {},
@@ -83,7 +84,7 @@ const blank = {
 
 const tabs = [
   { id: 'vms', label: '虚拟机', icon: Monitor },
-  { id: 'codexDesktop', label: 'Codex 官方桌面', icon: AppWindow },
+  { id: 'codexDesktop', label: '官方桌面', icon: AppWindow },
   { id: 'browser', label: '浏览器', icon: Globe },
   { id: 'proxy', label: '网络代理', icon: Network },
   { id: 'quota', label: 'AI 额度', icon: ChartNoAxesCombined },
@@ -123,6 +124,7 @@ function App() {
   const [nodesExpanded, setNodesExpanded] = useState(false);
   const [codexVM, setCodexVM] = useState('');
   const [desktopVM, setDesktopVM] = useState('');
+  const [desktopApp, setDesktopApp] = useState('');
   const [desktopPicked, setDesktopPicked] = useState(false);
   const [browserVM, setBrowserVM] = useState('');
   const [browserPicked, setBrowserPicked] = useState(false);
@@ -231,14 +233,13 @@ function App() {
     if (vmScope === 'stopped' && v.status === 'Running') return false;
     return (v.displayName || v.name).toLowerCase().includes(filter.toLowerCase());
   });
-  const codexVMs = useMemo(
-    () =>
-      running.filter(v => {
-        const agents = state.agents?.[v.name];
-        return !Array.isArray(agents) || agents.includes('codex');
-      }),
-    [running, state.agents]
-  );
+  const codexVMs = running;
+
+  useEffect(() => {
+    if (desktopApp && state.activeCodexDesktopApp && state.activeCodexDesktopApp !== desktopApp) {
+      setDesktopApp(state.activeCodexDesktopApp);
+    }
+  }, [state.activeCodexDesktopApp]);
 
   useEffect(() => {
     if (running.length && (!codexVM || !running.some(v => v.name === codexVM))) {
@@ -264,7 +265,10 @@ function App() {
 
   useEffect(() => {
     if (modal?.type === 'codexDesktopPick') {
-      codexVMs.forEach(v => bridge('codexDesktopCheck', { name: v.name }));
+      codexVMs.forEach(v => {
+        bridge('codexDesktopCheck', { name: v.name, app: 'codex' });
+        bridge('codexDesktopCheck', { name: v.name, app: 'claude' });
+      });
     } else if (modal?.type === 'browserPick') {
       running.forEach(v => bridge('browserCheck', { name: v.name }));
     }
@@ -272,7 +276,10 @@ function App() {
 
   const openCodexDesktopTab = () => {
     setPage('codexDesktop');
-    codexVMs.forEach(v => bridge('codexDesktopCheck', { name: v.name }));
+    codexVMs.forEach(v => {
+      bridge('codexDesktopCheck', { name: v.name, app: 'codex' });
+      bridge('codexDesktopCheck', { name: v.name, app: 'claude' });
+    });
     if (codexVMs.length > 1 && !desktopPicked) {
       setModal({ type: 'codexDesktopPick' });
     } else if (codexVMs.length === 1) {
@@ -583,6 +590,8 @@ function App() {
               state={state}
               codexVMs={codexVMs}
               desktopVM={desktopPicked || codexVMs.length === 1 ? desktopVM : ''}
+              desktopApp={desktopApp}
+              onSelectDesktopApp={setDesktopApp}
               sidebarCollapsed={sidebarCollapsed}
               modalOpen={!!modal}
               onOpenPicker={() => setModal({ type: 'codexDesktopPick' })}
@@ -1715,12 +1724,19 @@ function App() {
 
             {modal.type === 'codexDesktopPick' && (
               <>
-                <h2>选择 Codex 虚拟机</h2>
+                <h2>选择虚拟机</h2>
                 <div className="picker-vm-list">
                   {codexVMs.map(v => {
-                    const d = state.codexDesktops?.[v.name];
+                    const dc = state.codexDesktops?.[`${v.name}::codex`];
+                    const dl = state.codexDesktops?.[`${v.name}::claude`];
                     const isCur = desktopPicked && desktopVM === v.name;
                     const name = v.displayName || v.name;
+                    const parts = [];
+                    if (dc?.status === 'ready' || dc?.appRunning) parts.push('Codex 运行中');
+                    else if (dc?.installed) parts.push('Codex 已装');
+                    if (dl?.status === 'ready' || dl?.appRunning) parts.push('Claude 运行中');
+                    else if (dl?.installed) parts.push('Claude 已装');
+                    const badge = parts.length ? parts.join(' · ') : (!dc?.checked && !dl?.checked ? '检查中…' : '未安装');
                     return (
                       <button
                         key={v.name}
@@ -1729,9 +1745,8 @@ function App() {
                         onClick={() => {
                           setDesktopVM(v.name);
                           setDesktopPicked(true);
+                          setDesktopApp('');
                           setModal(null);
-                          setSidebarCollapsed(true);
-                          bridge('codexDesktopOpen', { name: v.name });
                         }}
                       >
                         <Monitor size={16} />
@@ -1739,17 +1754,7 @@ function App() {
                           <strong>{name}</strong>
                           {!v.standalone && v.projectPath && <span>{v.projectPath}</span>}
                         </div>
-                        <span className="picker-vm-badge">
-                          {d?.status === 'ready' || d?.appRunning
-                            ? '运行中'
-                            : !d?.checked
-                              ? '检查中…'
-                              : d?.installed && (d?.missing || []).length === 0
-                                ? '已安装'
-                                : d?.installed
-                                  ? '待补齐'
-                                  : '需安装'}
-                        </span>
+                        <span className="picker-vm-badge">{badge}</span>
                       </button>
                     );
                   })}

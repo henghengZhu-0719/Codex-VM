@@ -218,6 +218,7 @@ struct ReactWorkbenchView: NSViewRepresentable {
                 "activeBrowserVM":model.activeBrowserVM,
                 "codexDesktops":model.codexDesktops.mapValues { d in
                     [
+                        "app": d.app,
                         "status": d.status,
                         "stage": d.stage,
                         "stageMessage": d.stageMessage,
@@ -238,6 +239,7 @@ struct ReactWorkbenchView: NSViewRepresentable {
                     ] as [String: Any]
                 },
                 "activeCodexDesktopVM":model.activeCodexDesktopVM,
+                "activeCodexDesktopApp":model.activeCodexDesktopApp.rawValue,
                 "browserShortcut":model.browserShortcutSignal,
                 "requestedPage":model.requestedPage,
                 "toasts":model.toasts,
@@ -455,51 +457,62 @@ struct ReactWorkbenchView: NSViewRepresentable {
                 model.browserSlot = CGRect(x: x, y: y, width: w, height: h)
             case "codexDesktopCheck":
                 if let vm = existingVM(payload) {
-                    model.checkCodexDesktop(vm)
+                    let app = DesktopAppKind.from(payload["app"] as? String)
+                    model.checkCodexDesktop(vm, app: app)
                 }
             case "codexDesktopOpen":
                 if let vm = existingVM(payload) {
+                    let app = DesktopAppKind.from(payload["app"] as? String)
                     model.activeCodexDesktopVM = vm.name
+                    model.activeCodexDesktopApp = app
                     let w = (payload["width"] as? NSNumber)?.intValue ?? 1280
                     let h = (payload["height"] as? NSNumber)?.intValue ?? 800
                     let qMode = payload["qualityMode"] as? String
-                    model.openCodexDesktop(vm, width: w, height: h, qualityMode: qMode)
+                    model.openCodexDesktop(vm, app: app, width: w, height: h, qualityMode: qMode)
                 }
             case "codexDesktopSelect":
                 if let vm = existingVM(payload) {
+                    let app = DesktopAppKind.from(payload["app"] as? String)
                     model.activeCodexDesktopVM = vm.name
+                    model.activeCodexDesktopApp = app
                 }
             case "codexDesktopReload":
                 model.codexDesktopReloadToken += 1
             case "codexDesktopResize":
                 if let vm = existingVM(payload) {
+                    let app = DesktopAppKind.from(payload["app"] as? String)
                     let w = (payload["width"] as? NSNumber)?.intValue ?? 1280
                     let h = (payload["height"] as? NSNumber)?.intValue ?? 800
-                    model.resizeCodexDesktop(vm, width: w, height: h)
+                    model.resizeCodexDesktop(vm, app: app, width: w, height: h)
                 }
             case "codexDesktopSetQuality":
                 if let vm = existingVM(payload), let mode = payload["qualityMode"] as? String {
-                    model.setCodexDesktopQuality(vm, qualityMode: mode)
+                    let app = DesktopAppKind.from(payload["app"] as? String)
+                    model.setCodexDesktopQuality(vm, app: app, qualityMode: mode)
                 }
             case "codexDesktopInstall":
                 if let vm = existingVM(payload) {
+                    let app = DesktopAppKind.from(payload["app"] as? String)
                     let w = (payload["width"] as? NSNumber)?.intValue ?? 1280
                     let h = (payload["height"] as? NSNumber)?.intValue ?? 800
-                    model.installCodexDesktop(vm, width: w, height: h)
+                    model.installCodexDesktop(vm, app: app, width: w, height: h)
                 }
             case "codexDesktopRestart":
                 if let vm = existingVM(payload) {
+                    let app = DesktopAppKind.from(payload["app"] as? String)
                     let w = (payload["width"] as? NSNumber)?.intValue ?? 1280
                     let h = (payload["height"] as? NSNumber)?.intValue ?? 800
-                    model.restartCodexDesktop(vm, width: w, height: h)
+                    model.restartCodexDesktop(vm, app: app, width: w, height: h)
                 }
             case "codexDesktopSendText":
                 if let vm = existingVM(payload), let text = payload["text"] as? String {
-                    model.codexDesktopSendText(vm, text: text)
+                    let app = DesktopAppKind.from(payload["app"] as? String)
+                    model.codexDesktopSendText(vm, app: app, text: text)
                 }
             case "codexDesktopFetchLogs":
                 if let vm = existingVM(payload) {
-                    model.codexDesktopFetchLogs(vm)
+                    let app = DesktopAppKind.from(payload["app"] as? String)
+                    model.codexDesktopFetchLogs(vm, app: app)
                 }
             case "codexDesktopSlot":
                 let visible = payload["visible"] as? Bool ?? false

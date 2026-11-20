@@ -1,7 +1,85 @@
 import Foundation
 import SwiftUI
 
+enum DesktopAppKind: String, CaseIterable {
+    case codex
+    case claude
+
+    static func from(_ raw: String?) -> DesktopAppKind {
+        raw == "claude" ? .claude : .codex
+    }
+
+    var displayName: String {
+        switch self {
+        case .codex: return "Codex 官方桌面"
+        case .claude: return "Claude Code 官方桌面"
+        }
+    }
+
+    var shortName: String {
+        switch self {
+        case .codex: return "Codex"
+        case .claude: return "Claude Code"
+        }
+    }
+
+    var displayNumber: String {
+        switch self {
+        case .codex: return ":98"
+        case .claude: return ":97"
+        }
+    }
+
+    var vncPort: Int {
+        switch self {
+        case .codex: return 5998
+        case .claude: return 5997
+        }
+    }
+
+    var websockifyPortBase: Int {
+        switch self {
+        case .codex: return 22000
+        case .claude: return 23000
+        }
+    }
+
+    var configDirName: String {
+        switch self {
+        case .codex: return "agent-vm-codex-desktop"
+        case .claude: return "agent-vm-claude-desktop"
+        }
+    }
+
+    var packageId: String {
+        switch self {
+        case .codex: return "chatgpt"
+        case .claude: return "claude-desktop"
+        }
+    }
+
+    var logFileName: String {
+        switch self {
+        case .codex: return "chatgpt.log"
+        case .claude: return "claude-desktop.log"
+        }
+    }
+
+    var scriptSettings: [String: Any] {
+        [
+            "app": rawValue,
+            "display": displayNumber,
+            "vncPort": vncPort,
+            "portBase": websockifyPortBase,
+            "configDir": configDirName,
+            "pkg": packageId,
+            "logFile": logFileName
+        ]
+    }
+}
+
 struct CodexDesktopState {
+    var app = "codex"
     var status = "idle" // idle, missing, starting, ready, error
     var stage = "idle"  // checking, display, app, vnc, ready, error
     var stageMessage = ""
@@ -22,18 +100,23 @@ struct CodexDesktopState {
     var installOutput = ""
 }
 
-// Installs and runs OpenAI's official Linux desktop app (`chatgpt` .deb) inside the VM
-// on an isolated virtual display (:98, VNC 5998, websockify 22000..22010),
-// and streams it over loopback noVNC to the native macOS shell.
+// Installs and runs official Linux desktop apps inside the VM:
+// - Codex (`chatgpt` .deb): virtual display :98, VNC 5998, websockify 22000+
+// - Claude Code (`claude-desktop` .deb): virtual display :97, VNC 5997, websockify 23000+
+// Streams over loopback noVNC to the native macOS shell.
 @MainActor final class CodexDesktopManager {
     var onChange: (([String: CodexDesktopState]) -> Void)?
-    var onOpen: ((String, URL) -> Void)?
+    var onOpen: ((String, DesktopAppKind, URL) -> Void)?
     private(set) var states: [String: CodexDesktopState] = [:]
     private var preparing: Set<String> = []
     private var checking: Set<String> = []
     private var generations: [String: UUID] = [:]
     private var resizeWorkItems: [String: DispatchWorkItem] = [:]
     private let imeQueue = DispatchQueue(label: "org.agentvm.codex-desktop.ime")
+
+    static func stateKey(name: String, app: DesktopAppKind) -> String {
+        "\(name)::\(app.rawValue)"
+    }
 
     nonisolated private static func sshControlArgs(config: String, timeout: Int = 6) -> [String] {
         [
@@ -55,35 +138,50 @@ struct CodexDesktopState {
         case "sharp":
             q = 9; c = 1
         case "smooth":
-            q = 4; c = 5
+            q = 5; c = 4
         default:
-            q = 7; c = 2
+            q = 8; c = 2
         }
-        return "http://127.0.0.1:\(port)/vnc.html?autoconnect=1&resize=remote&quality=\(q)&compression=\(c)"
+        return "http://127.0.0.1:\(port)/vnc.html?autoconnect=1&resize=scale&quality=\(q)&compression=\(c)"
     }
 
-    private static func clampedSize(_ width: Int, _ height: Int) -> (Int, Int) {
-        let w = max(800, min(2560, (width / 2) * 2))
-        let h = max(500, min(1600, (height / 2) * 2))
+    private static func displayScaleFactor() -> Double {
+        let raw = NSScreen.main?.backingScaleFactor ?? 2.0
+        return min(2.0, max(1.0, Double(raw)))
+    }
+
+    private static func clampedSize(_ width: Int, _ height: Int, scale: Double? = nil) -> (Int, Int) {
+        let s = scale ?? displayScaleFactor()
+        let w = max(800, min(4096, (Int(round(Double(width) * s)) / 2) * 2))
+        let h = max(500, min(2560, (Int(round(Double(height) * s)) / 2) * 2))
         return (w, h)
     }
 
+    private static func wrapScript(_ body: String, settings: [String: Any]) -> String? {
+        guard let data = try? JSONSerialization.data(withJSONObject: settings) else { return nil }
+        return "import json, base64\nsettings = json.loads(base64.b64decode('" + data.base64EncodedString() + "'))\n" + body
+    }
+
     func retain(_ names: Set<String>) {
-        for name in Array(states.keys) where !names.contains(name) {
-            generations.removeValue(forKey: name)
-            preparing.remove(name)
-            checking.remove(name)
-            resizeWorkItems[name]?.cancel()
-            resizeWorkItems.removeValue(forKey: name)
-            states.removeValue(forKey: name)
+        for key in Array(states.keys) {
+            let vmName = key.components(separatedBy: "::").first ?? key
+            if !names.contains(vmName) {
+                generations.removeValue(forKey: key)
+                preparing.remove(key)
+                checking.remove(key)
+                resizeWorkItems[key]?.cancel()
+                resizeWorkItems.removeValue(forKey: key)
+                states.removeValue(forKey: key)
+            }
         }
         onChange?(states)
     }
 
-    func checkStatus(name: String, config: String) {
-        guard !checking.contains(name), !preparing.contains(name), states[name]?.installing != true else { return }
-        checking.insert(name)
-        let script = Self.statusScript
+    func checkStatus(name: String, config: String, app: DesktopAppKind = .codex) {
+        let key = Self.stateKey(name: name, app: app)
+        guard !checking.contains(key), !preparing.contains(key), states[key]?.installing != true else { return }
+        guard let script = Self.wrapScript(Self.statusScript, settings: app.scriptSettings) else { return }
+        checking.insert(key)
         DispatchQueue.global(qos: .utility).async {
             let proc = Process(), out = Pipe(), stdin = Pipe()
             proc.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
@@ -101,12 +199,13 @@ struct CodexDesktopState {
                 let line = text.components(separatedBy: .newlines).last(where: { $0.trimmingCharacters(in: .whitespaces).hasPrefix("{") })
                 let obj = line.flatMap { $0.data(using: .utf8) }.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
                 DispatchQueue.main.async {
-                    self.checking.remove(name)
+                    self.checking.remove(key)
                     guard let obj else { return }
-                    var st = self.states[name] ?? CodexDesktopState()
+                    var st = self.states[key] ?? CodexDesktopState(app: app.rawValue)
                     let installed = obj["installed"] as? Bool ?? false
                     let appRunning = obj["appRunning"] as? Bool ?? false
                     let missing = obj["missing"] as? [String] ?? []
+                    st.app = app.rawValue
                     st.checked = true
                     st.installed = installed
                     st.appRunning = appRunning
@@ -116,73 +215,79 @@ struct CodexDesktopState {
                     if st.status == "idle" || st.status == "missing" {
                         st.status = missing.isEmpty ? "idle" : "missing"
                     }
-                    self.states[name] = st
+                    self.states[key] = st
                     self.onChange?(self.states)
                 }
             } catch {
-                DispatchQueue.main.async { self.checking.remove(name) }
+                DispatchQueue.main.async { self.checking.remove(key) }
             }
         }
     }
 
-    func open(name: String, config: String, width: Int = 1280, height: Int = 800, qualityMode: String? = nil) {
-        guard states[name]?.installing != true else { return }
-        let qMode = qualityMode ?? states[name]?.qualityMode ?? "balanced"
-        if let existing = states[name], existing.status == "ready", existing.port > 0 {
+    func open(name: String, config: String, app: DesktopAppKind = .codex, width: Int = 1280, height: Int = 800, qualityMode: String? = nil) {
+        let key = Self.stateKey(name: name, app: app)
+        guard states[key]?.installing != true else { return }
+        let qMode = qualityMode ?? states[key]?.qualityMode ?? "sharp"
+        if let existing = states[key], existing.status == "ready", existing.port > 0 {
             let url = Self.buildNoVNCURL(port: existing.port, qualityMode: qMode)
-            states[name]?.qualityMode = qMode
-            states[name]?.url = url
+            states[key]?.qualityMode = qMode
+            states[key]?.url = url
             onChange?(states)
-            verifyAndOpen(name: name, port: existing.port, url: url, config: config, width: width, height: height, qualityMode: qMode, fallbackPrepare: true)
+            verifyAndOpen(name: name, app: app, port: existing.port, url: url, config: config, width: width, height: height, qualityMode: qMode, fallbackPrepare: true)
             return
         }
-        guard !preparing.contains(name) else { return }
-        start(name: name, config: config, width: width, height: height, qualityMode: qMode)
+        guard !preparing.contains(key) else { return }
+        start(name: name, config: config, app: app, width: width, height: height, qualityMode: qMode)
     }
 
-    func setQuality(name: String, qualityMode: String) {
+    func setQuality(name: String, app: DesktopAppKind = .codex, qualityMode: String) {
         guard ["balanced", "sharp", "smooth"].contains(qualityMode) else { return }
-        var st = states[name] ?? CodexDesktopState()
+        let key = Self.stateKey(name: name, app: app)
+        var st = states[key] ?? CodexDesktopState(app: app.rawValue)
         st.qualityMode = qualityMode
         if st.status == "ready", st.port > 0 {
             let newURL = Self.buildNoVNCURL(port: st.port, qualityMode: qualityMode)
             st.url = newURL
-            states[name] = st
+            states[key] = st
             onChange?(states)
-            if let target = URL(string: newURL) { onOpen?(name, target) }
+            if let target = URL(string: newURL) { onOpen?(name, app, target) }
         } else {
-            states[name] = st
+            states[key] = st
             onChange?(states)
         }
     }
 
-    func setAutoResize(name: String, enabled: Bool, config: String, width: Int, height: Int) {
-        var st = states[name] ?? CodexDesktopState()
+    func setAutoResize(name: String, app: DesktopAppKind = .codex, enabled: Bool, config: String, width: Int, height: Int) {
+        let key = Self.stateKey(name: name, app: app)
+        var st = states[key] ?? CodexDesktopState(app: app.rawValue)
         st.autoResize = enabled
-        states[name] = st
+        states[key] = st
         onChange?(states)
         if enabled && width > 100 && height > 100 {
-            resize(name: name, config: config, width: width, height: height)
+            resize(name: name, config: config, app: app, width: width, height: height)
         }
     }
 
-    func resize(name: String, config: String, width: Int, height: Int) {
+    func resize(name: String, config: String, app: DesktopAppKind = .codex, width: Int, height: Int) {
+        let key = Self.stateKey(name: name, app: app)
         let (w, h) = Self.clampedSize(width, height)
         let targetRes = "\(w)x\(h)"
-        guard states[name]?.status == "ready", states[name]?.resolution != targetRes else { return }
-        resizeWorkItems[name]?.cancel()
+        guard states[key]?.status == "ready", states[key]?.resolution != targetRes else { return }
+        resizeWorkItems[key]?.cancel()
         let item = DispatchWorkItem { [weak self] in
-            self?.performResize(name: name, config: config, width: w, height: h)
+            self?.performResize(name: name, config: config, app: app, width: w, height: h)
         }
-        resizeWorkItems[name] = item
+        resizeWorkItems[key] = item
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.45, execute: item)
     }
 
-    private func performResize(name: String, config: String, width: Int, height: Int) {
-        guard states[name]?.status == "ready" else { return }
-        let input: [String: Any] = ["width": width, "height": height]
-        guard let data = try? JSONSerialization.data(withJSONObject: input) else { return }
-        let script = "import json, base64\nsettings = json.loads(base64.b64decode('" + data.base64EncodedString() + "'))\n" + Self.resizeScript
+    private func performResize(name: String, config: String, app: DesktopAppKind, width: Int, height: Int) {
+        let key = Self.stateKey(name: name, app: app)
+        guard states[key]?.status == "ready" else { return }
+        var input = app.scriptSettings
+        input["width"] = width
+        input["height"] = height
+        guard let script = Self.wrapScript(Self.resizeScript, settings: input) else { return }
         DispatchQueue.global(qos: .utility).async {
             let proc = Process(), output = Pipe(), stdin = Pipe()
             proc.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
@@ -200,7 +305,7 @@ struct CodexDesktopState {
                    let decoded = try? JSONSerialization.jsonObject(with: raw) as? [String: Any],
                    let actual = decoded["resolution"] as? String {
                     DispatchQueue.main.async {
-                        self.states[name]?.resolution = actual
+                        self.states[key]?.resolution = actual
                         self.onChange?(self.states)
                     }
                 }
@@ -208,41 +313,48 @@ struct CodexDesktopState {
         }
     }
 
-    private func verifyAndOpen(name: String, port: Int, url: String, config: String, width: Int, height: Int, qualityMode: String, fallbackPrepare: Bool) {
+    private func verifyAndOpen(name: String, app: DesktopAppKind, port: Int, url: String, config: String, width: Int, height: Int, qualityMode: String, fallbackPrepare: Bool) {
         var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/vnc.html")!)
         request.timeoutInterval = 2
         request.cachePolicy = .reloadIgnoringLocalCacheData
         URLSession.shared.dataTask(with: request) { _, response, _ in
             DispatchQueue.main.async {
                 if (response as? HTTPURLResponse)?.statusCode == 200, let target = URL(string: url) {
-                    self.onOpen?(name, target)
-                    self.resize(name: name, config: config, width: width, height: height)
+                    self.onOpen?(name, app, target)
+                    self.resize(name: name, config: config, app: app, width: width, height: height)
                 } else if fallbackPrepare {
-                    self.start(name: name, config: config, width: width, height: height, qualityMode: qualityMode)
+                    self.start(name: name, config: config, app: app, width: width, height: height, qualityMode: qualityMode)
                 } else {
-                    self.failed(name, "官方 Codex 桌面端未响应，请重试。", missing: [])
+                    self.failed(name, app: app, "\(app.displayName)未响应，请重试。", missing: [])
                 }
             }
         }.resume()
     }
 
-    private func start(name: String, config: String, width: Int, height: Int, qualityMode: String, restartApp: Bool = false) {
+    private func start(name: String, config: String, app: DesktopAppKind, width: Int, height: Int, qualityMode: String, restartApp: Bool = false) {
+        let key = Self.stateKey(name: name, app: app)
         let generation = UUID()
-        generations[name] = generation
-        preparing.insert(name)
-        let (w, h) = Self.clampedSize(width, height)
-        var st = states[name] ?? CodexDesktopState()
+        generations[key] = generation
+        preparing.insert(key)
+        let scale = Self.displayScaleFactor()
+        let (w, h) = Self.clampedSize(width, height, scale: scale)
+        var st = states[key] ?? CodexDesktopState(app: app.rawValue)
+        st.app = app.rawValue
         st.status = "starting"
         st.stage = "checking"
-        st.stageMessage = "正在检查官方 Codex 桌面端与显示环境…"
+        st.stageMessage = "正在检查\(app.displayName)与显示环境…"
         st.error = ""
         st.qualityMode = qualityMode
-        states[name] = st
+        states[key] = st
         onChange?(states)
 
-        let input: [String: Any] = ["name": name, "width": w, "height": h, "restartApp": restartApp]
-        guard let data = try? JSONSerialization.data(withJSONObject: input) else { return }
-        let script = "import json, base64\nsettings = json.loads(base64.b64decode('" + data.base64EncodedString() + "'))\n" + Self.prepareScript
+        var input = app.scriptSettings
+        input["name"] = name
+        input["width"] = w
+        input["height"] = h
+        input["scale"] = scale
+        input["restartApp"] = restartApp
+        guard let script = Self.wrapScript(Self.prepareScript, settings: input) else { return }
 
         DispatchQueue.global(qos: .utility).async {
             let process = Process(), output = Pipe(), stdin = Pipe()
@@ -270,9 +382,9 @@ struct CodexDesktopState {
                         if let stage = obj["stage"] as? String {
                             let msg = obj["message"] as? String ?? ""
                             DispatchQueue.main.async {
-                                guard let self, self.generations[name] == generation else { return }
-                                self.states[name]?.stage = stage
-                                if !msg.isEmpty { self.states[name]?.stageMessage = msg }
+                                guard let self, self.generations[key] == generation else { return }
+                                self.states[key]?.stage = stage
+                                if !msg.isEmpty { self.states[key]?.stageMessage = msg }
                                 self.onChange?(self.states)
                             }
                         }
@@ -296,62 +408,65 @@ struct CodexDesktopState {
                 let version = finalDecoded?["version"] as? String ?? ""
                 let diskAvailMB = finalDecoded?["diskAvailMB"] as? Int ?? 0
                 let missing = finalDecoded?["missing"] as? [String] ?? []
-                let error = finalDecoded?["error"] as? String ?? "无法启动官方 Codex 桌面端，请检查虚拟机连接。"
+                let error = finalDecoded?["error"] as? String ?? "无法启动\(app.displayName)，请检查虚拟机连接。"
                 DispatchQueue.main.async {
-                    guard self.generations[name] == generation else { return }
+                    guard self.generations[key] == generation else { return }
                     if !missing.isEmpty {
-                        self.preparing.remove(name)
-                        var st = self.states[name] ?? CodexDesktopState()
+                        self.preparing.remove(key)
+                        var st = self.states[key] ?? CodexDesktopState(app: app.rawValue)
+                        st.app = app.rawValue
                         st.status = "missing"
                         st.stage = "checking"
                         st.checked = true
-                        st.installed = !missing.contains("chatgpt")
+                        st.installed = !missing.contains(app.packageId)
                         st.missingComponents = missing
                         st.diskAvailMB = diskAvailMB
                         st.error = ""
-                        self.states[name] = st
+                        self.states[key] = st
                         self.onChange?(self.states)
                         return
                     }
                     guard process.terminationStatus == 0, let port, (1024...65535).contains(port) else {
-                        self.failed(name, error, missing: missing)
+                        self.failed(name, app: app, error, missing: missing)
                         return
                     }
-                    self.states[name]?.installed = true
-                    if !version.isEmpty { self.states[name]?.appVersion = version }
-                    self.states[name]?.stage = "vnc"
-                    self.states[name]?.stageMessage = "正在建立 noVNC 画面连接…"
-                    self.states[name]?.resolution = resolution
+                    self.states[key]?.installed = true
+                    if !version.isEmpty { self.states[key]?.appVersion = version }
+                    self.states[key]?.stage = "vnc"
+                    self.states[key]?.stageMessage = "正在建立 noVNC 画面连接…"
+                    self.states[key]?.resolution = resolution
                     self.onChange?(self.states)
-                    self.check(name: name, port: port, qualityMode: qualityMode, generation: generation, attempts: 25)
+                    self.check(name: name, app: app, port: port, qualityMode: qualityMode, generation: generation, attempts: 25)
                 }
             } catch {
                 timeout.cancel()
                 output.fileHandleForReading.readabilityHandler = nil
                 if process.isRunning { process.terminate() }
                 DispatchQueue.main.async {
-                    if self.generations[name] == generation {
-                        self.failed(name, "无法连接官方 Codex 桌面端。", missing: [])
+                    if self.generations[key] == generation {
+                        self.failed(name, app: app, "无法连接\(app.displayName)。", missing: [])
                     }
                 }
             }
         }
     }
 
-    private func check(name: String, port: Int, qualityMode: String, generation: UUID, attempts: Int) {
+    private func check(name: String, app: DesktopAppKind, port: Int, qualityMode: String, generation: UUID, attempts: Int) {
+        let key = Self.stateKey(name: name, app: app)
         var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/vnc.html")!)
         request.timeoutInterval = 2
         request.cachePolicy = .reloadIgnoringLocalCacheData
         URLSession.shared.dataTask(with: request) { _, response, _ in
             DispatchQueue.main.async {
-                guard self.generations[name] == generation else { return }
+                guard self.generations[key] == generation else { return }
                 if (response as? HTTPURLResponse)?.statusCode == 200 {
-                    self.preparing.remove(name)
+                    self.preparing.remove(key)
                     let url = Self.buildNoVNCURL(port: port, qualityMode: qualityMode)
-                    var st = self.states[name] ?? CodexDesktopState()
+                    var st = self.states[key] ?? CodexDesktopState(app: app.rawValue)
+                    st.app = app.rawValue
                     st.status = "ready"
                     st.stage = "ready"
-                    st.stageMessage = "官方 Codex 桌面端已就绪"
+                    st.stageMessage = "\(app.displayName)已就绪"
                     st.url = url
                     st.port = port
                     st.qualityMode = qualityMode
@@ -360,53 +475,61 @@ struct CodexDesktopState {
                     st.appRunning = true
                     st.error = ""
                     st.missingComponents = []
-                    self.states[name] = st
+                    self.states[key] = st
                     self.onChange?(self.states)
-                    if let target = URL(string: url) { self.onOpen?(name, target) }
+                    if let target = URL(string: url) { self.onOpen?(name, app, target) }
                 } else if attempts > 1 {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                        self.check(name: name, port: port, qualityMode: qualityMode, generation: generation, attempts: attempts - 1)
+                        self.check(name: name, app: app, port: port, qualityMode: qualityMode, generation: generation, attempts: attempts - 1)
                     }
                 } else {
-                    self.failed(name, "官方 Codex 桌面端界面未能响应，请重试。", missing: [])
+                    self.failed(name, app: app, "\(app.displayName)界面未能响应，请重试。", missing: [])
                 }
             }
         }.resume()
     }
 
-    private func failed(_ name: String, _ error: String, missing: [String]) {
-        preparing.remove(name)
-        var st = states[name] ?? CodexDesktopState()
+    private func failed(_ name: String, app: DesktopAppKind, _ error: String, missing: [String]) {
+        let key = Self.stateKey(name: name, app: app)
+        preparing.remove(key)
+        var st = states[key] ?? CodexDesktopState(app: app.rawValue)
+        st.app = app.rawValue
         st.status = "error"
         st.stage = "error"
         st.error = error
         st.missingComponents = missing
-        states[name] = st
+        states[key] = st
         onChange?(states)
     }
 
-    func restartApp(name: String, config: String, width: Int, height: Int) {
-        guard !preparing.contains(name), states[name]?.installing != true else { return }
-        let qMode = states[name]?.qualityMode ?? "sharp"
-        start(name: name, config: config, width: width, height: height, qualityMode: qMode, restartApp: true)
+    func restartApp(name: String, config: String, app: DesktopAppKind = .codex, width: Int, height: Int) {
+        let key = Self.stateKey(name: name, app: app)
+        guard !preparing.contains(key), states[key]?.installing != true else { return }
+        let qMode = states[key]?.qualityMode ?? "sharp"
+        start(name: name, config: config, app: app, width: width, height: height, qualityMode: qMode, restartApp: true)
     }
 
-    func stopSession(name: String, config: String, completion: (() -> Void)? = nil) {
-        guard !preparing.contains(name), states[name]?.installing != true else { return }
-        generations[name] = UUID()
-        resizeWorkItems[name]?.cancel()
-        resizeWorkItems.removeValue(forKey: name)
-        var st = states[name] ?? CodexDesktopState()
+    func stopSession(name: String, config: String, app: DesktopAppKind = .codex, completion: (() -> Void)? = nil) {
+        let key = Self.stateKey(name: name, app: app)
+        guard !preparing.contains(key), states[key]?.installing != true else { return }
+        generations[key] = UUID()
+        resizeWorkItems[key]?.cancel()
+        resizeWorkItems.removeValue(forKey: key)
+        var st = states[key] ?? CodexDesktopState(app: app.rawValue)
+        st.app = app.rawValue
         st.status = "idle"
         st.stage = "idle"
         st.url = ""
         st.port = 0
         st.appRunning = false
         st.checked = true
-        states[name] = st
+        states[key] = st
         onChange?(states)
 
-        let script = Self.stopScript
+        guard let script = Self.wrapScript(Self.stopScript, settings: app.scriptSettings) else {
+            completion?()
+            return
+        }
         DispatchQueue.global(qos: .utility).async {
             let proc = Process(), stdin = Pipe()
             proc.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
@@ -426,11 +549,11 @@ struct CodexDesktopState {
         }
     }
 
-    func sendText(name: String, config: String, text: String) {
+    func sendText(name: String, config: String, app: DesktopAppKind = .codex, text: String) {
         guard !text.isEmpty else { return }
-        let input: [String: Any] = ["text": text]
-        guard let data = try? JSONSerialization.data(withJSONObject: input) else { return }
-        let script = "import json, base64\npayload = json.loads(base64.b64decode('" + data.base64EncodedString() + "'))\n" + Self.pasteTextScript
+        var input = app.scriptSettings
+        input["text"] = text
+        guard let script = Self.wrapScript(Self.pasteTextScript, settings: input) else { return }
         imeQueue.async {
             let proc = Process(), stdin = Pipe()
             proc.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
@@ -447,8 +570,9 @@ struct CodexDesktopState {
         }
     }
 
-    func fetchLogs(name: String, config: String) {
-        let script = Self.logsScript
+    func fetchLogs(name: String, config: String, app: DesktopAppKind = .codex) {
+        let key = Self.stateKey(name: name, app: app)
+        guard let script = Self.wrapScript(Self.logsScript, settings: app.scriptSettings) else { return }
         DispatchQueue.global(qos: .utility).async {
             let proc = Process(), out = Pipe(), stdin = Pipe()
             proc.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
@@ -468,7 +592,7 @@ struct CodexDesktopState {
                    let obj = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
                    let logs = obj["logs"] as? String {
                     DispatchQueue.main.async {
-                        self.states[name]?.logs = logs
+                        self.states[key]?.logs = logs
                         self.onChange?(self.states)
                     }
                 }
@@ -476,17 +600,19 @@ struct CodexDesktopState {
         }
     }
 
-    func install(name: String, config: String, width: Int, height: Int, completion: @escaping (Bool, String) -> Void) {
-        guard states[name]?.installing != true else { return }
-        var st = states[name] ?? CodexDesktopState()
+    func install(name: String, config: String, app: DesktopAppKind = .codex, width: Int, height: Int, completion: @escaping (Bool, String) -> Void) {
+        let key = Self.stateKey(name: name, app: app)
+        guard states[key]?.installing != true else { return }
+        var st = states[key] ?? CodexDesktopState(app: app.rawValue)
+        st.app = app.rawValue
         st.installing = true
         st.error = ""
-        st.stageMessage = "正在准备安装官方 Codex 桌面端与显示环境…"
+        st.stageMessage = "正在准备安装\(app.displayName)与显示环境…"
         st.installOutput = ""
-        states[name] = st
+        states[key] = st
         onChange?(states)
 
-        let script = Self.installScript
+        let script = Self.installScript(for: app)
         DispatchQueue.global(qos: .utility).async {
             let proc = Process(), out = Pipe(), stdin = Pipe()
             proc.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
@@ -510,7 +636,7 @@ struct CodexDesktopState {
                     let snapshot = acc
                     lock.unlock()
                     DispatchQueue.main.async {
-                        self?.states[name]?.installOutput = snapshot
+                        self?.states[key]?.installOutput = snapshot
                         self?.onChange?(self?.states ?? [:])
                     }
                 }
@@ -523,16 +649,16 @@ struct CodexDesktopState {
                 proc.waitUntilExit()
                 out.fileHandleForReading.readabilityHandler = nil
                 DispatchQueue.main.async {
-                    self.states[name]?.installing = false
+                    self.states[key]?.installing = false
                     if proc.terminationStatus == 0 {
-                        self.states[name]?.missingComponents = []
-                        self.states[name]?.installed = true
+                        self.states[key]?.missingComponents = []
+                        self.states[key]?.installed = true
                         self.onChange?(self.states)
-                        self.open(name: name, config: config, width: width, height: height)
-                        completion(true, "官方 Codex 桌面端安装完成")
+                        self.open(name: name, config: config, app: app, width: width, height: height)
+                        completion(true, "\(app.displayName)安装完成")
                     } else {
-                        self.states[name]?.status = "error"
-                        self.states[name]?.error = "安装未完成，请展开安装日志查看详情。"
+                        self.states[key]?.status = "error"
+                        self.states[key]?.error = "安装未完成，请展开安装日志查看详情。"
                         self.onChange?(self.states)
                         completion(false, "安装失败（退出码 \(proc.terminationStatus)）")
                     }
@@ -540,9 +666,9 @@ struct CodexDesktopState {
             } catch {
                 out.fileHandleForReading.readabilityHandler = nil
                 DispatchQueue.main.async {
-                    self.states[name]?.installing = false
-                    self.states[name]?.status = "error"
-                    self.states[name]?.error = error.localizedDescription
+                    self.states[key]?.installing = false
+                    self.states[key]?.status = "error"
+                    self.states[key]?.error = error.localizedDescription
                     self.onChange?(self.states)
                     completion(false, error.localizedDescription)
                 }
@@ -555,15 +681,22 @@ struct CodexDesktopState {
     static let statusScript = #"""
 import json, os, shutil, subprocess
 
-def find_chatgpt():
-    for c in ('chatgpt', '/opt/ChatGPT/chatgpt', '/usr/bin/chatgpt'):
+app_kind = settings.get('app', 'codex')
+pkg_id = settings.get('pkg', 'chatgpt')
+
+def find_app():
+    if app_kind == 'claude':
+        candidates = ('claude-desktop', '/usr/bin/claude-desktop', '/usr/lib/claude-desktop/claude-desktop', '/opt/Claude/claude-desktop')
+    else:
+        candidates = ('chatgpt', '/opt/ChatGPT/chatgpt', '/usr/bin/chatgpt')
+    for c in candidates:
         p = shutil.which(c) if '/' not in c else (c if os.path.isfile(c) else None)
         if p: return p
     return None
 
 def get_version():
     try:
-        r = subprocess.run(['dpkg-query', '-W', '-f=${Status}|${Version}', 'chatgpt'], capture_output=True, text=True)
+        r = subprocess.run(['dpkg-query', '-W', '-f=${Status}|${Version}', pkg_id], capture_output=True, text=True)
         if r.returncode == 0 and 'install ok installed' in r.stdout:
             return r.stdout.split('|', 1)[1].strip()
     except Exception:
@@ -577,9 +710,14 @@ def disk_avail_mb():
     except Exception:
         return 0
 
+def matches_app(args):
+    if app_kind == 'claude':
+        return any('claude-desktop' in os.path.basename(x).lower() or '/claude-desktop/' in x.lower() for x in args[:2])
+    return any('chatgpt' in os.path.basename(x).lower() for x in args[:2])
+
 missing = []
-app_bin = find_chatgpt()
-if not app_bin: missing.append('chatgpt')
+app_bin = find_app()
+if not app_bin: missing.append(pkg_id)
 if not shutil.which('Xtigervnc'):
     if not shutil.which('Xvfb'): missing.append('xvfb')
     if not shutil.which('x11vnc'): missing.append('x11vnc')
@@ -595,7 +733,7 @@ def is_app_running():
             if os.stat('/proc/' + d).st_uid != os.getuid(): continue
             raw = open(f'/proc/{d}/cmdline', 'rb').read().decode(errors='ignore')
             args = [x for x in raw.split('\0') if x]
-            if any('chatgpt' in os.path.basename(x).lower() for x in args[:2]):
+            if matches_app(args):
                 return True
         except Exception:
             pass
@@ -613,6 +751,15 @@ print(json.dumps({
     static let prepareScript = #"""
 import os, pathlib, socket, subprocess, time, json, shutil, hashlib, signal
 
+app_kind = settings.get('app', 'codex')
+display_num = settings.get('display', ':98')
+vnc_port = int(settings.get('vncPort', 5998))
+port_base = int(settings.get('portBase', 22000))
+config_dir = settings.get('configDir', 'agent-vm-codex-desktop')
+pkg_id = settings.get('pkg', 'chatgpt')
+log_file = settings.get('logFile', 'chatgpt.log')
+app_label = 'Claude Code 官方桌面' if app_kind == 'claude' else 'Codex 官方桌面'
+
 def emit(obj):
     print(json.dumps(obj), flush=True)
 
@@ -628,15 +775,24 @@ def proc_running(match):
             pass
     return pids
 
-def find_chatgpt():
-    for c in ('chatgpt', '/opt/ChatGPT/chatgpt', '/usr/bin/chatgpt'):
+def find_app():
+    if app_kind == 'claude':
+        candidates = ('claude-desktop', '/usr/bin/claude-desktop', '/usr/lib/claude-desktop/claude-desktop', '/opt/Claude/claude-desktop')
+    else:
+        candidates = ('chatgpt', '/opt/ChatGPT/chatgpt', '/usr/bin/chatgpt')
+    for c in candidates:
         p = shutil.which(c) if '/' not in c else (c if os.path.isfile(c) else None)
         if p: return p
     return None
 
+def matches_app(args):
+    if app_kind == 'claude':
+        return any('claude-desktop' in os.path.basename(x).lower() or '/claude-desktop/' in x.lower() for x in args[:2])
+    return any('chatgpt' in os.path.basename(x).lower() for x in args[:2])
+
 def get_version():
     try:
-        r = subprocess.run(['dpkg-query', '-W', '-f=${Status}|${Version}', 'chatgpt'], capture_output=True, text=True)
+        r = subprocess.run(['dpkg-query', '-W', '-f=${Status}|${Version}', pkg_id], capture_output=True, text=True)
         if r.returncode == 0 and 'install ok installed' in r.stdout:
             return r.stdout.split('|', 1)[1].strip()
     except Exception:
@@ -670,15 +826,15 @@ def ensure_cjk_fontconfig():
         pass
 
 try:
-    emit({'stage': 'checking', 'message': '正在检查官方 Codex 桌面端与显示组件…'})
-    app_bin = find_chatgpt()
+    emit({'stage': 'checking', 'message': f'正在检查{app_label}与显示组件…'})
+    app_bin = find_app()
     websockify = shutil.which('websockify')
     xtigervnc = shutil.which('Xtigervnc')
     xvfb = shutil.which('Xvfb')
     x11vnc = shutil.which('x11vnc')
     openbox = shutil.which('openbox')
     missing = []
-    if not app_bin: missing.append('chatgpt')
+    if not app_bin: missing.append(pkg_id)
     if not xtigervnc and (not xvfb or not x11vnc):
         if not xvfb: missing.append('xvfb')
         if not x11vnc: missing.append('x11vnc')
@@ -691,13 +847,22 @@ try:
         raise SystemExit(0)
 
     ensure_cjk_fontconfig()
-    w = max(800, min(2560, int(settings.get('width', 1280)) // 2 * 2))
-    h = max(500, min(1600, int(settings.get('height', 800)) // 2 * 2))
+    scale = max(1.0, min(2.0, float(settings.get('scale', 2.0))))
+    w = max(800, min(4096, int(settings.get('width', 2560)) // 2 * 2))
+    h = max(500, min(2560, int(settings.get('height', 1600)) // 2 * 2))
     restart_app = bool(settings.get('restartApp', False))
 
-    log_dir = pathlib.Path.home() / '.config/agent-vm-codex-desktop'
+    log_dir = pathlib.Path.home() / '.config' / config_dir
     log_dir.mkdir(parents=True, exist_ok=True)
-    env = dict(os.environ, DISPLAY=':98', LANG='en_US.UTF-8', LC_CTYPE='en_US.UTF-8')
+    scale_file = log_dir / 'display-scale'
+    scale_tag = f'{scale:.2f}'
+    prev_scale = scale_file.read_text(errors='ignore').strip() if scale_file.exists() else ''
+    scale_changed = prev_scale != scale_tag
+    if scale_changed:
+        restart_app = True
+        scale_file.write_text(scale_tag)
+    env = dict(os.environ, DISPLAY=display_num, LANG='en_US.UTF-8', LC_CTYPE='en_US.UTF-8')
+    vnc_port_str = str(vnc_port)
 
     def stop_procs(match, wait_sec=3.5):
         targets = proc_running(match)
@@ -716,33 +881,39 @@ try:
             except OSError: pass
         time.sleep(0.2)
 
+    if scale_changed:
+        stop_procs(matches_app)
+        stop_procs(lambda a: any('openbox' in x for x in a[:2]) and config_dir in ' '.join(a))
+        stop_procs(lambda a: any('x11vnc' in x for x in a[:2]) and vnc_port_str in a)
+        stop_procs(lambda a: any(('Xtigervnc' in x or 'Xvfb' in x) for x in a[:2]) and display_num in a)
+
     use_tiger = bool(xtigervnc)
     if use_tiger:
-        old_xvfb = proc_running(lambda a: any('Xvfb' in x for x in a[:2]) and ':98' in a)
+        old_xvfb = proc_running(lambda a: any('Xvfb' in x for x in a[:2]) and display_num in a)
         if old_xvfb:
-            stop_procs(lambda a: any('chatgpt' in x.lower() for x in a[:2]))
-            stop_procs(lambda a: any('x11vnc' in x for x in a[:2]) and '5998' in a)
-            stop_procs(lambda a: any('openbox' in x for x in a[:2]) and 'agent-vm-codex-desktop' in ' '.join(a))
-            stop_procs(lambda a: any('Xvfb' in x for x in a[:2]) and ':98' in a)
+            stop_procs(matches_app)
+            stop_procs(lambda a: any('x11vnc' in x for x in a[:2]) and vnc_port_str in a)
+            stop_procs(lambda a: any('openbox' in x for x in a[:2]) and config_dir in ' '.join(a))
+            stop_procs(lambda a: any('Xvfb' in x for x in a[:2]) and display_num in a)
 
-        emit({'stage': 'display', 'message': f'正在启动自适应虚拟显示 :98 ({w}×{h})…'})
-        if not proc_running(lambda a: any('Xtigervnc' in x for x in a[:2]) and ':98' in a):
+        emit({'stage': 'display', 'message': f'正在启动自适应虚拟显示 {display_num} ({w}×{h})…'})
+        if not proc_running(lambda a: any('Xtigervnc' in x for x in a[:2]) and display_num in a):
             with open(log_dir / 'xvfb.log', 'ab') as f:
                 subprocess.Popen([
-                    xtigervnc, ':98', '-localhost', '-rfbport', '5998',
+                    xtigervnc, display_num, '-localhost', '-rfbport', vnc_port_str,
                     '-SecurityTypes', 'None', '-geometry', f'{w}x{h}',
                     '-depth', '24', '-AcceptSetDesktopSize=1', '-AlwaysShared=1'
                 ], stdin=subprocess.DEVNULL, stdout=f, stderr=f, start_new_session=True)
             time.sleep(0.5)
     else:
-        emit({'stage': 'display', 'message': f'正在启动虚拟显示 :98 ({w}×{h})…'})
-        if not proc_running(lambda a: any('Xvfb' in x for x in a[:2]) and ':98' in a):
+        emit({'stage': 'display', 'message': f'正在启动虚拟显示 {display_num} ({w}×{h})…'})
+        if not proc_running(lambda a: any('Xvfb' in x for x in a[:2]) and display_num in a):
             with open(log_dir / 'xvfb.log', 'ab') as f:
-                subprocess.Popen(['Xvfb', ':98', '-screen', '0', f'{w}x{h}x24', '-nolisten', 'tcp', '+extension', 'RANDR'],
+                subprocess.Popen(['Xvfb', display_num, '-screen', '0', f'{w}x{h}x24', '-nolisten', 'tcp', '+extension', 'RANDR'],
                                  stdin=subprocess.DEVNULL, stdout=f, stderr=f, start_new_session=True)
             time.sleep(0.5)
 
-    if not proc_running(lambda a: any('openbox' in x for x in a[:2]) and 'agent-vm-codex-desktop' in ' '.join(a)):
+    if not proc_running(lambda a: any('openbox' in x for x in a[:2]) and config_dir in ' '.join(a)):
         ob_rc = log_dir / 'openbox-rc.xml'
         ob_rc.write_text('''<?xml version="1.0" encoding="UTF-8"?>
 <openbox_config xmlns="http://openbox.org/3.4/rc">
@@ -758,11 +929,15 @@ try:
             subprocess.Popen(['openbox', '--config-file', str(ob_rc)], env=env, stdin=subprocess.DEVNULL, stdout=f, stderr=f, start_new_session=True)
         time.sleep(0.3)
 
-    if restart_app:
-        stop_procs(lambda a: any('chatgpt' in x.lower() for x in a[:2]))
+    if shutil.which('xrdb'):
+        dpi_val = int(round(scale * 96))
+        subprocess.run(['xrdb', '-merge'], input=f'Xft.dpi: {dpi_val}\n', text=True, env=env, capture_output=True)
 
-    emit({'stage': 'app', 'message': '正在启动官方 Codex 桌面端…'})
-    running_app = proc_running(lambda a: any('chatgpt' in x.lower() for x in a[:2]) and '--type=' not in ' '.join(a))
+    if restart_app:
+        stop_procs(matches_app)
+
+    emit({'stage': 'app', 'message': f'正在启动{app_label}…'})
+    running_app = proc_running(lambda a: matches_app(a) and '--type=' not in ' '.join(a))
     if not running_app:
         cmd = [
             app_bin,
@@ -770,28 +945,30 @@ try:
             '--disable-gpu',
             '--disable-dev-shm-usage',
             '--password-store=basic',
-            '--ozone-platform=x11'
+            '--ozone-platform=x11',
+            f'--force-device-scale-factor={scale:g}'
         ]
         launch_cmd = ['dbus-run-session', '--'] + cmd if shutil.which('dbus-run-session') else cmd
-        with open(log_dir / 'chatgpt.log', 'ab') as f:
+        with open(log_dir / log_file, 'ab') as f:
             subprocess.Popen(launch_cmd, env=env, stdin=subprocess.DEVNULL, stdout=f, stderr=f, start_new_session=True)
         time.sleep(1.5)
 
     emit({'stage': 'vnc', 'message': '正在启动 noVNC 画面服务…'})
-    if not use_tiger and not proc_running(lambda a: any('x11vnc' in x for x in a[:2]) and '5998' in a):
+    if not use_tiger and not proc_running(lambda a: any('x11vnc' in x for x in a[:2]) and vnc_port_str in a):
         with open(log_dir / 'x11vnc.log', 'ab') as f:
             subprocess.Popen([
-                'x11vnc', '-display', ':98', '-localhost', '-rfbport', '5998',
+                'x11vnc', '-display', display_num, '-localhost', '-rfbport', vnc_port_str,
                 '-forever', '-shared', '-nopw', '-quiet',
                 '-xrandr', 'resize', '-noxdamage', '-wait', '10', '-defer', '10'
             ], env=env, stdin=subprocess.DEVNULL, stdout=f, stderr=f, start_new_session=True)
         time.sleep(0.3)
 
+    vnc_target = f'127.0.0.1:{vnc_port}'
     port = None
-    existing = proc_running(lambda a: any('websockify' in x for x in a[:3]) and '127.0.0.1:5998' in a)
+    existing = proc_running(lambda a: any('websockify' in x for x in a[:3]) and vnc_target in a)
     if existing:
         for arg in existing[0][1]:
-            if arg.startswith('127.0.0.1:') and arg != '127.0.0.1:5998':
+            if arg.startswith('127.0.0.1:') and arg != vnc_target:
                 try:
                     port = int(arg.split(':', 1)[1])
                     break
@@ -799,8 +976,8 @@ try:
                     pass
 
     if port is None:
-        number = int(hashlib.sha256(settings['name'].encode()).hexdigest()[:4], 16)
-        for candidate in range(22000 + number % 9991, 22010 + number % 9991):
+        number = int(hashlib.sha256(f"{settings['name']}:{app_kind}".encode()).hexdigest()[:4], 16)
+        for candidate in range(port_base + number % 991, port_base + 10 + number % 991):
             with socket.socket() as probe:
                 try: probe.bind(('127.0.0.1', candidate))
                 except OSError: continue
@@ -811,7 +988,7 @@ try:
         with open(log_dir / 'novnc.log', 'ab') as f:
             subprocess.Popen([
                 websockify, '--web=/usr/share/novnc',
-                '127.0.0.1:' + str(port), '127.0.0.1:5998'
+                '127.0.0.1:' + str(port), vnc_target
             ], stdin=subprocess.DEVNULL, stdout=f, stderr=f, start_new_session=True)
 
     for _ in range(40):
@@ -834,9 +1011,9 @@ except Exception as error:
     static let resizeScript = #"""
 import os, re, subprocess, json, shutil
 
-w = max(800, min(2560, int(settings.get('width', 1280)) // 2 * 2))
-h = max(500, min(1600, int(settings.get('height', 800)) // 2 * 2))
-env = dict(os.environ, DISPLAY=':98')
+w = max(800, min(4096, int(settings.get('width', 2560)) // 2 * 2))
+h = max(500, min(2560, int(settings.get('height', 1600)) // 2 * 2))
+env = dict(os.environ, DISPLAY=settings.get('display', ':98'))
 xrandr = shutil.which('xrandr')
 cvt = shutil.which('cvt')
 actual = f'{w}x{h}'
@@ -873,8 +1050,8 @@ print(json.dumps({'resolution': actual}))
     static let pasteTextScript = #"""
 import os, subprocess, time
 
-env = dict(os.environ, DISPLAY=':98')
-text = payload.get('text', '')
+env = dict(os.environ, DISPLAY=settings.get('display', ':98'))
+text = settings.get('text', '')
 if text:
     p = subprocess.Popen(
         ['xclip', '-selection', 'clipboard', '-in'],
@@ -892,6 +1069,11 @@ if text:
     static let stopScript = #"""
 import os, pathlib, signal, time
 
+app_kind = settings.get('app', 'codex')
+display_num = settings.get('display', ':98')
+vnc_port_str = str(settings.get('vncPort', 5998))
+config_dir = settings.get('configDir', 'agent-vm-codex-desktop')
+
 def proc_running(match):
     pids = []
     for proc in pathlib.Path('/proc').iterdir():
@@ -903,6 +1085,11 @@ def proc_running(match):
         except OSError:
             pass
     return pids
+
+def matches_app(args):
+    if app_kind == 'claude':
+        return any('claude-desktop' in os.path.basename(x).lower() or '/claude-desktop/' in x.lower() for x in args[:2])
+    return any('chatgpt' in os.path.basename(x).lower() for x in args[:2])
 
 def stop_procs(match, wait_sec=3.0):
     pids = proc_running(match)
@@ -918,19 +1105,21 @@ def stop_procs(match, wait_sec=3.0):
         try: os.kill(pid, signal.SIGKILL)
         except OSError: pass
 
-stop_procs(lambda a: any('chatgpt' in os.path.basename(x).lower() for x in a[:2]))
-stop_procs(lambda a: any('websockify' in x for x in a[:3]) and '127.0.0.1:5998' in a)
-stop_procs(lambda a: any('openbox' in x for x in a[:2]) and 'agent-vm-codex-desktop' in ' '.join(a))
-stop_procs(lambda a: any('x11vnc' in x for x in a[:2]) and '5998' in a)
-stop_procs(lambda a: any(('Xtigervnc' in x or 'Xvfb' in x) for x in a[:2]) and ':98' in a)
+stop_procs(matches_app)
+stop_procs(lambda a: any('websockify' in x for x in a[:3]) and f'127.0.0.1:{vnc_port_str}' in a)
+stop_procs(lambda a: any('openbox' in x for x in a[:2]) and config_dir in ' '.join(a))
+stop_procs(lambda a: any('x11vnc' in x for x in a[:2]) and vnc_port_str in a)
+stop_procs(lambda a: any(('Xtigervnc' in x or 'Xvfb' in x) for x in a[:2]) and display_num in a)
 """#
 
     static let logsScript = #"""
 import json, pathlib
 
-log_dir = pathlib.Path.home() / '.config/agent-vm-codex-desktop'
+config_dir = settings.get('configDir', 'agent-vm-codex-desktop')
+log_file = settings.get('logFile', 'chatgpt.log')
+log_dir = pathlib.Path.home() / '.config' / config_dir
 chunks = []
-for fname in ('install.log', 'xvfb.log', 'openbox.log', 'chatgpt.log', 'x11vnc.log', 'novnc.log'):
+for fname in ('install.log', 'xvfb.log', 'openbox.log', log_file, 'x11vnc.log', 'novnc.log'):
     p = log_dir / fname
     if p.exists():
         lines = p.read_text(errors='replace').splitlines()[-60:]
@@ -938,11 +1127,38 @@ for fname in ('install.log', 'xvfb.log', 'openbox.log', 'chatgpt.log', 'x11vnc.l
 print(json.dumps({'logs': '\n\n'.join(chunks) or '暂无日志。'}))
 """#
 
-    static let installScript = #"""
+    static func installScript(for app: DesktopAppKind) -> String {
+        switch app {
+        case .codex:
+            return #"""
 #!/bin/bash
 set -euo pipefail
 mkdir -p "$HOME/.config/agent-vm-codex-desktop"
 exec > >(tee "$HOME/.config/agent-vm-codex-desktop/install.log") 2>&1
+
+apt_busy() {
+  for p in apt-get apt dpkg; do
+    if pgrep -x "$p" >/dev/null 2>&1; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+wait_apt_lock() {
+  local waited=0
+  while apt_busy; do
+    if [ "$waited" -eq 0 ]; then
+      echo "检测到虚拟机内已有其他 apt/dpkg 任务正在运行，正在等待完成..."
+    fi
+    sleep 2
+    waited=$((waited + 2))
+    if [ "$waited" -ge 300 ]; then
+      echo "等待 apt 锁超时（300 秒），请稍后重试。"
+      exit 1
+    fi
+  done
+}
 
 NEED_APT=0
 for bin in Xtigervnc openbox websockify xclip xdotool dbus-run-session; do
@@ -960,16 +1176,19 @@ fi
 
 if [ "$NEED_APT" = "1" ]; then
   echo "[1/4] 更新软件源索引..."
-  sudo apt-get update
+  wait_apt_lock
+  sudo apt-get -o DPkg::Lock::Timeout=180 update
   echo "[2/4] 安装虚拟显示、中文字体与输入桥接组件 (TigerVNC / openbox / noVNC / fonts-noto-cjk / xclip / xdotool)..."
   PKGS="tigervnc-standalone-server xauth openbox novnc websockify x11-xserver-utils xclip xdotool dbus-x11 xdg-utils fonts-liberation fonts-dejavu-core fonts-noto-cjk"
   if ! command -v chromium >/dev/null 2>&1 && ! command -v chromium-browser >/dev/null 2>&1; then
     PKGS="$PKGS chromium"
   fi
-  sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $PKGS </dev/null
+  wait_apt_lock
+  sudo env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=180 install -y --no-install-recommends $PKGS </dev/null
 else
   echo "[1-2/4] 虚拟显示与输入桥接组件已就绪，跳过 apt 安装。"
-  sudo apt-get update
+  wait_apt_lock
+  sudo apt-get -o DPkg::Lock::Timeout=180 update
 fi
 
 if ! command -v chatgpt >/dev/null 2>&1 && [ ! -f /opt/ChatGPT/chatgpt ]; then
@@ -986,7 +1205,8 @@ if ! command -v chatgpt >/dev/null 2>&1 && [ ! -f /opt/ChatGPT/chatgpt ]; then
   curl -fL --retry 2 --connect-timeout 15 "$DEB_URL" -o /tmp/chatgpt-codex.deb 2>&1 | tr '\r' '\n' | awk 'NR==1 || NR%5==0 {print; fflush()}'
 
   echo "[4/4] 正在安装 chatgpt 桌面端 (.deb)..."
-  sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y /tmp/chatgpt-codex.deb </dev/null
+  wait_apt_lock
+  sudo env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=180 install -y /tmp/chatgpt-codex.deb </dev/null
   rm -f /tmp/chatgpt-codex.deb
 else
   echo "[3-4/4] 检测到官方 chatgpt 桌面端已安装，跳过下载。"
@@ -994,4 +1214,83 @@ fi
 
 echo "安装完成。"
 """#
+        case .claude:
+            return #"""
+#!/bin/bash
+set -euo pipefail
+mkdir -p "$HOME/.config/agent-vm-claude-desktop"
+exec > >(tee "$HOME/.config/agent-vm-claude-desktop/install.log") 2>&1
+
+apt_busy() {
+  for p in apt-get apt dpkg; do
+    if pgrep -x "$p" >/dev/null 2>&1; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+wait_apt_lock() {
+  local waited=0
+  while apt_busy; do
+    if [ "$waited" -eq 0 ]; then
+      echo "检测到虚拟机内已有其他 apt/dpkg 任务正在运行，正在等待完成..."
+    fi
+    sleep 2
+    waited=$((waited + 2))
+    if [ "$waited" -ge 300 ]; then
+      echo "等待 apt 锁超时（300 秒），请稍后重试。"
+      exit 1
+    fi
+  done
+}
+
+NEED_APT=0
+for bin in Xtigervnc openbox websockify xclip xdotool dbus-run-session curl; do
+  if ! command -v "$bin" >/dev/null 2>&1; then
+    NEED_APT=1
+    break
+  fi
+done
+if [ ! -f /usr/share/novnc/vnc.html ]; then
+  NEED_APT=1
+fi
+if [ "$(fc-list :lang=zh 2>/dev/null | wc -l)" = "0" ]; then
+  NEED_APT=1
+fi
+
+if [ "$NEED_APT" = "1" ]; then
+  echo "[1/4] 更新软件源索引..."
+  wait_apt_lock
+  sudo apt-get -o DPkg::Lock::Timeout=180 update
+  echo "[2/4] 安装虚拟显示、中文字体与输入桥接组件 (TigerVNC / openbox / noVNC / fonts-noto-cjk / xclip / xdotool)..."
+  PKGS="ca-certificates curl tigervnc-standalone-server xauth openbox novnc websockify x11-xserver-utils xclip xdotool dbus-x11 xdg-utils fonts-liberation fonts-dejavu-core fonts-noto-cjk"
+  if ! command -v chromium >/dev/null 2>&1 && ! command -v chromium-browser >/dev/null 2>&1; then
+    PKGS="$PKGS chromium"
+  fi
+  wait_apt_lock
+  sudo env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=180 install -y --no-install-recommends $PKGS </dev/null
+else
+  echo "[1-2/4] 虚拟显示与输入桥接组件已就绪，跳过 apt 安装。"
+fi
+
+if ! command -v claude-desktop >/dev/null 2>&1 && [ ! -f /usr/lib/claude-desktop/claude-desktop ] && [ ! -f /opt/Claude/claude-desktop ]; then
+  ARCH=$(dpkg --print-architecture)
+  echo "[3/4] 正在配置 Anthropic 官方 Claude Desktop ($ARCH) APT 软件源..."
+  sudo mkdir -p /usr/share/keyrings
+  sudo curl -fsSLo /usr/share/keyrings/claude-desktop-archive-keyring.asc https://downloads.claude.ai/claude-desktop/key.asc
+  echo "deb [signed-by=/usr/share/keyrings/claude-desktop-archive-keyring.asc] https://downloads.claude.ai/claude-desktop/apt/stable stable main" | sudo tee /etc/apt/sources.list.d/claude-desktop.list >/dev/null
+  wait_apt_lock
+  sudo apt-get -o DPkg::Lock::Timeout=180 update
+  echo "[4/4] 正在安装 Claude Code / Claude 官方桌面端 (claude-desktop)..."
+  wait_apt_lock
+  sudo env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=180 install -y claude-desktop </dev/null
+else
+  echo "[3-4/4] 检测到官方 claude-desktop 桌面端已安装，跳过下载。"
+fi
+
+echo "安装完成。"
+"""#
+        }
+    }
 }

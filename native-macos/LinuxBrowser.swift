@@ -526,16 +526,22 @@ struct LinuxBrowserWebView: NSViewRepresentable {
         case "sharp":
             q = 9; c = 1
         case "smooth":
-            q = 4; c = 5
+            q = 5; c = 4
         default:
-            q = 6; c = 2
+            q = 8; c = 2
         }
-        return "http://127.0.0.1:\(port)/vnc.html?autoconnect=1&resize=remote&quality=\(q)&compression=\(c)"
+        return "http://127.0.0.1:\(port)/vnc.html?autoconnect=1&resize=scale&quality=\(q)&compression=\(c)"
     }
 
-    private static func clampedSize(_ width: Int, _ height: Int) -> (Int, Int) {
-        let w = max(800, min(2560, (width / 2) * 2))
-        let h = max(500, min(1600, (height / 2) * 2))
+    private static func displayScaleFactor() -> Double {
+        let raw = NSScreen.main?.backingScaleFactor ?? 2.0
+        return min(2.0, max(1.0, Double(raw)))
+    }
+
+    private static func clampedSize(_ width: Int, _ height: Int, scale: Double? = nil) -> (Int, Int) {
+        let s = scale ?? displayScaleFactor()
+        let w = max(800, min(4096, (Int(round(Double(width) * s)) / 2) * 2))
+        let h = max(500, min(2560, (Int(round(Double(height) * s)) / 2) * 2))
         return (w, h)
     }
 
@@ -757,7 +763,8 @@ struct LinuxBrowserWebView: NSViewRepresentable {
         let generation = UUID()
         generations[name] = generation
         preparing.insert(name)
-        let (w, h) = Self.clampedSize(width, height)
+        let scale = Self.displayScaleFactor()
+        let (w, h) = Self.clampedSize(width, height, scale: scale)
         var st = states[name] ?? LinuxBrowserState()
         st.status = "starting"
         st.stage = "checking"
@@ -768,7 +775,7 @@ struct LinuxBrowserWebView: NSViewRepresentable {
         states[name] = st
         onChange?(states)
 
-        let input: [String: Any] = ["name": name, "width": w, "height": h, "restartApp": restartApp]
+        let input: [String: Any] = ["name": name, "width": w, "height": h, "scale": scale, "restartApp": restartApp]
         guard let data = try? JSONSerialization.data(withJSONObject: input) else { return }
         let script = "import json, base64\nsettings = json.loads(base64.b64decode('" + data.base64EncodedString() + "'))\n" + Self.prepareScript
 
@@ -1455,8 +1462,9 @@ try:
         emit({'error': msg, 'missing': missing})
         raise SystemExit(1)
 
-    w = max(800, min(2560, int(settings.get('width', 1280)) // 2 * 2))
-    h = max(500, min(1600, int(settings.get('height', 800)) // 2 * 2))
+    scale = max(1.0, min(2.0, float(settings.get('scale', 2.0))))
+    w = max(800, min(4096, int(settings.get('width', 2560)) // 2 * 2))
+    h = max(500, min(2560, int(settings.get('height', 1600)) // 2 * 2))
     restart_app = bool(settings.get('restartApp', False))
 
     log_dir = pathlib.Path.home() / '.config/agent-vm-browser'
@@ -1538,6 +1546,7 @@ try:
             browser_args = [
                 chromium, '--no-sandbox', '--test-type', '--disable-dev-shm-usage',
                 '--disable-gpu', '--ozone-platform=x11',
+                f'--force-device-scale-factor={scale:g}',
                 # Keep active agent pages alive, but allow Chromium to throttle idle tabs.
                 '--force-webrtc-ip-handling-policy=disable_non_proxied_udp',
                 '--no-first-run', '--no-default-browser-check',
@@ -1670,8 +1679,8 @@ stop_procs(lambda a: any(('Xtigervnc' in x or 'Xvfb' in x) for x in a[:2]) and '
     static let resizeScript = #"""
 import os, re, subprocess, json, shutil
 
-w = max(800, min(2560, int(settings.get('width', 1280)) // 2 * 2))
-h = max(500, min(1600, int(settings.get('height', 800)) // 2 * 2))
+w = max(800, min(4096, int(settings.get('width', 2560)) // 2 * 2))
+h = max(500, min(2560, int(settings.get('height', 1600)) // 2 * 2))
 env = dict(os.environ, DISPLAY=':99')
 xrandr = shutil.which('xrandr')
 cvt = shutil.which('cvt')
