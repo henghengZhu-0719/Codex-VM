@@ -164,7 +164,7 @@ function App() {
     if (isRemoteWeb) {
       if (!remoteToken) return;
       const pull = () =>
-        fetch('/api/state?token=' + encodeURIComponent(remoteToken))
+        fetch('/api/state', { headers: { Authorization: 'Bearer ' + remoteToken } })
           .then(r => {
             if (r.status === 401) {
               setRemoteAuthFailed(true);
@@ -406,7 +406,7 @@ function App() {
             e.preventDefault();
             const t = remoteTokenInput.trim();
             if (!t) return;
-            try { localStorage.setItem('agentvm.remoteToken', t); } catch {}
+            try { sessionStorage.setItem('agentvm.remoteToken', t); } catch {}
             setRemoteAuthFailed(false);
             setRemoteToken(t);
           }}
