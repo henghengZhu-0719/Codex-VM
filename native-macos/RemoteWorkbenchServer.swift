@@ -178,7 +178,7 @@ final class RemoteWorkbenchServer {
                 sendSimple(conn, status: "401 Unauthorized", body: "Unauthorized")
                 return
             }
-            let headers = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n"
+            let headers = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\nCache-Control: no-cache\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nConnection: keep-alive\r\n\r\n"
             let initialJson = String(data: lastPayload, encoding: .utf8) ?? "{}"
             let initial = Data((headers + "data: \(initialJson)\n\n").utf8)
             let id = ObjectIdentifier(conn)
@@ -283,7 +283,7 @@ final class RemoteWorkbenchServer {
     }
 
     private func sendData(_ conn: NWConnection, status: String, contentType: String, data: Data) {
-        let header = "HTTP/1.1 \(status)\r\nContent-Type: \(contentType)\r\nCache-Control: no-store\r\nContent-Length: \(data.count)\r\nConnection: close\r\n\r\n"
+        let header = "HTTP/1.1 \(status)\r\nContent-Type: \(contentType)\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nContent-Length: \(data.count)\r\nConnection: close\r\n\r\n"
         var packet = Data(header.utf8)
         packet.append(data)
         conn.send(content: packet, completion: .contentProcessed { _ in
