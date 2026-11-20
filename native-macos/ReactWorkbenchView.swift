@@ -782,6 +782,12 @@ struct ReactWorkbenchView: NSViewRepresentable {
                     username: payload["username"] as? String ?? "",
                     sshPort: (payload["sshPort"] as? NSNumber)?.intValue ?? 22,
                     workbenchPort: (payload["workbenchPort"] as? NSNumber)?.intValue ?? 18080)
+            case "remoteVMTerminal":
+                if let id = payload["id"] as? String,
+                   let vmName = payload["vmName"] as? String,
+                   let host = model.remoteHosts.first(where: { $0.id == id }) {
+                    model.remoteHostConnection.openVMTerminal(host, vmName: vmName)
+                }
             case "remoteHostConnect":
                 if let id = payload["id"] as? String,
                    let host = model.remoteHosts.first(where: { $0.id == id }) {
