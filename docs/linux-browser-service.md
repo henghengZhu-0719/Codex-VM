@@ -51,7 +51,7 @@ figures, not the total memory/CPU of all Chromium child processes. Use
 full process-tree accounting before making scheduling decisions.
 
 The browser workbench can refresh its current session state without restarting
-Chromium. A disconnected viewer is not evidence that an agent is idle.
+Chromium. Status-check script errors are surfaced instead of silently retaining stale data. A disconnected viewer is not evidence that an agent is idle.
 
 ## Operational notes
 
@@ -91,21 +91,6 @@ The adapter is not yet automatically installed into every VM. Installing it
 must not bypass guest network isolation, and access should be limited to
 trusted local agent processes.
 
-## One-click MCP installation
-
-The browser workbench now includes **安装 MCP**. It copies the bundled adapter
-over the existing authenticated guest SSH connection into:
-
-`~/.config/agent-vm-browser/agent_vm_browser_mcp.py`
-
-The guest directory and script are private to its user. Register the server
-with the agent's MCP configuration using that path and `python3` as the
-command. This installation does not modify arbitrary agent configuration files
-or grant new privileges. Registration remains a separate user-controlled step.
-
-Do not run the adapter outside the guest: its loopback CDP address resolves
-relative to the process running the adapter.
-
 ## Product direction (personal browser, not agent automation)
 
 The primary purpose of the browser is a persistent, user-controlled Linux
@@ -118,3 +103,15 @@ started by the application. CDP remains guest-loopback only and may be used
 internally for tab/session management. Future development prioritizes
 persistent profiles, safe disconnect/reconnect, resource monitoring and
 authenticated private remote viewing without weakening Fail-Closed egress.
+
+## Current safeguards and limits
+
+- The guest browser status script imports all required standard-library modules.
+- The remote workbench rejects requests above its configured request/body limits.
+- Remote workbench access uses a bearer token; use a trusted private network and
+  do not expose plain HTTP or tokenized URLs on the public Internet.
+- Chromium currently uses `--no-sandbox` for compatibility. This is not a
+  security guarantee; moving to a supported non-root sandbox must be validated
+  against the guest image before removing the flag.
+- Full browser-process RSS is observational and may double-count shared pages.
+  No unattended suspension of active sessions is performed.
