@@ -214,7 +214,7 @@ final class RemoteWorkbenchServer {
                 "codexRun", "codexStop", "codexClear",
                 "codexSelectSession", "codexNewSession", "codexDeleteSession",
                 "codexRenameSession", "codexSetSessionConfig", "codexEditResend", "codexGitDiff",
-                "refresh"
+                "refresh", "remoteVMStart", "remoteVMStop"
             ]
             guard allowed.contains(action) else {
                 sendSimple(conn, status: "403 Forbidden", body: "Action not permitted")
