@@ -62,6 +62,9 @@ const blank = {
   agents: {},
   vmProxyRoutes: {},
   remoteWorkbench: { enabled: false, port: 18080, token: '', urls: [], error: '' },
+  remoteHosts: [],
+  remoteHostStatus: '未连接',
+  activeRemoteHostID: '',
   cliMonitor: {
     autoUpdate: true,
     checking: false,
@@ -110,6 +113,9 @@ function App() {
   const [remoteTokenInput, setRemoteTokenInput] = useState('');
   const [remoteAuthFailed, setRemoteAuthFailed] = useState(false);
   const [remotePortInput, setRemotePortInput] = useState('18080');
+  const [remoteHostForm, setRemoteHostForm] = useState({
+    name: 'Mac Pro', hostname: '', username: '', sshPort: '22', workbenchPort: '18080',
+  });
   const [modal, setModal] = useState(null);
   const [filter, setFilter] = useState('');
   const [vmScope, setVmScope] = useState('all');
@@ -1230,7 +1236,46 @@ function App() {
                 </div>
               </section>
               <section className="panel">
-                <h2>手机远程工作台</h2>
+                <h2>远程主机 · SSH</h2>
+                <p className="muted">通过 EasyTier 内网 IP 连接另一台 Mac 的 Agent-VM 工作台。首次连接前请在远端开启 SSH（远程登录）和下方的远程工作台，并配置 SSH 密钥及 known_hosts。</p>
+                <div className="form-grid">
+                  {[
+                    ['name', '主机名称', 'Mac Pro'],
+                    ['hostname', 'EasyTier IP / 主机名', '10.126.126.2'],
+                    ['username', 'SSH 用户名', 'macuser'],
+                    ['sshPort', 'SSH 端口', '22'],
+                    ['workbenchPort', '工作台端口', '18080'],
+                  ].map(([key, label, placeholder]) => (
+                    <label key={key}>{label}
+                      <input value={remoteHostForm[key]} placeholder={placeholder}
+                        onChange={e => setRemoteHostForm(f => ({ ...f, [key]: e.target.value }))} />
+                    </label>
+                  ))}
+                </div>
+                <div className="inline-actions">
+                  <button className="secondary" onClick={() => bridge('remoteHostAdd', {
+                    ...remoteHostForm,
+                    sshPort: Number(remoteHostForm.sshPort),
+                    workbenchPort: Number(remoteHostForm.workbenchPort),
+                  })}>添加远程主机</button>
+                </div>
+                <div className="muted" style={{ margin: '10px 0' }}>{state.remoteHostStatus || '未连接'}</div>
+                {(state.remoteHosts || []).map(h => (
+                  <div className="web-code-row" key={h.id} style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+                    <span style={{ flex: 1, minWidth: 160 }}>{h.name} · {h.username}@{h.hostname}:{h.sshPort}</span>
+                    <button className="secondary" onClick={() => bridge('remoteHostConnect', { id: h.id })}>
+                      {state.activeRemoteHostID === h.id ? '重新连接' : '连接'}
+                    </button>
+                    <button className="secondary" onClick={() => bridge('remoteHostRemove', { id: h.id })}>移除</button>
+                  </div>
+                ))}
+                {!!state.activeRemoteHostID && <div className="inline-actions">
+                  <button className="secondary" onClick={() => bridge('remoteHostDisconnect')}>断开连接</button>
+                </div>}
+                <p className="muted">连接后在系统浏览器打开 127.0.0.1 的 SSH 加密转发入口，输入远端生成的访问口令。当前先支持远程 Agent 工作台；完整的远程 VM/浏览器管理仍需后续扩展。</p>
+              </section>
+              <section className="panel">
+                <h2>本机远程工作台（提供给其他设备连接）</h2>
                 <div className="form-grid">
                   <label className="checkbox">
                     <span>启用远程访问</span>
