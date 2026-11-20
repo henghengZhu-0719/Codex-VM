@@ -59,6 +59,52 @@ final class RemoteHostConnection {
         updateState("disconnected", "未连接")
     }
 
+
+    // Enter a VM on the remote Mac using nested SSH. No HTTP server is needed.
+    // VM names and SSH endpoints are validated before appearing in shell commands.
+    func openVMTerminal(_ host: RemoteHostProfile, vmName: String) {
+        let safe = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
+        guard RemoteHostProfile.isValid(host), !vmName.isEmpty, vmName.count <= 80,
+              !vmName.hasPrefix("-"), vmName != ".", vmName != "..",
+              vmName.unicodeScalars.allSatisfy({ safe.contains($0) }) else {
+            updateState("error", "远程主机或 VM 名称无效")
+            return
+        }
+        // Remote SSH starts in the account home; cd explicitly to avoid
+        // relying on an interactive login shell's working directory.
+        let remoteCommand = "cd && exec /usr/bin/ssh -F .agent-vm/lima/" + vmName +
+            "/ssh.config -o ForwardAgent=no -o ForwardX11=no -tt lima-" + vmName
+        let endpoint = host.username + "@" + host.hostname
+        let command = "exec /usr/bin/ssh -tt -o BatchMode=yes -o StrictHostKeyChecking=yes " +
+            "-o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 " +
+            "-o ForwardAgent=no -o ForwardX11=no -p \(host.sshPort) -- " +
+            endpoint + " " + remoteCommand
+        do {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+                "agent-vm-remote-terminal-" + UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,
+                                                    attributes: [.posixPermissions: 0o700])
+            let script = directory.appendingPathComponent("Connect.command")
+            let contents = "#!/bin/sh\nrm -f -- \"$0\"\nrmdir -- \"$(dirname -- \"$0\")\" 2>/dev/null || true\n" +
+                command + "\n"
+            try contents.write(to: script, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: script.path)
+            NSWorkspace.shared.open([script],
+                withApplicationAt: URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app"),
+                configuration: NSWorkspace.OpenConfiguration()) { [weak self] _, error in
+                    if let error {
+                        try? FileManager.default.removeItem(at: directory)
+                        Task { @MainActor [weak self] in
+                            self?.updateState("error", "无法打开终端：\(error.localizedDescription)")
+                        }
+                    }
+                }
+            updateState("disconnected", "已打开 \(host.name) / \(vmName) 的终端，连接结果请查看 Terminal")
+        } catch {
+            updateState("error", "无法准备远程终端：\(error.localizedDescription)")
+        }
+    }
+
     func openWorkbench() {
         guard state == "connected", let localURL else { return }
         NSWorkspace.shared.open(localURL)
