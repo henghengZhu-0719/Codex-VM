@@ -316,6 +316,12 @@ struct ReactWorkbenchView: NSViewRepresentable {
                         "vms": cliVMs
                     ] as [String: Any]
                 }(),
+                "remoteHosts":model.remoteHosts.map { h in
+                    ["id":h.id, "name":h.name, "hostname":h.hostname,
+                     "username":h.username, "sshPort":h.sshPort, "workbenchPort":h.workbenchPort] as [String: Any]
+                },
+                "remoteHostStatus":model.remoteHostStatus,
+                "activeRemoteHostID":model.remoteHostConnection.activeHostID ?? "",
                 "remoteWorkbench":[
                     "enabled":model.remoteWorkbenchEnabled,
                     "port":model.remoteWorkbenchPort,
@@ -760,6 +766,22 @@ struct ReactWorkbenchView: NSViewRepresentable {
             case "openShared":
                 let path = NSHomeDirectory() + "/AgentVM-Shared"
                 if model.prepareSharedFolder() { NSWorkspace.shared.open(URL(fileURLWithPath:path)) }
+            case "remoteHostAdd":
+                model.saveRemoteHost(
+                    name: payload["name"] as? String ?? "",
+                    hostname: payload["hostname"] as? String ?? "",
+                    username: payload["username"] as? String ?? "",
+                    sshPort: (payload["sshPort"] as? NSNumber)?.intValue ?? 22,
+                    workbenchPort: (payload["workbenchPort"] as? NSNumber)?.intValue ?? 18080)
+            case "remoteHostConnect":
+                if let id = payload["id"] as? String,
+                   let host = model.remoteHosts.first(where: { $0.id == id }) {
+                    model.remoteHostConnection.connect(host)
+                }
+            case "remoteHostDisconnect":
+                model.remoteHostConnection.disconnect()
+            case "remoteHostRemove":
+                if let id = payload["id"] as? String { model.removeRemoteHost(id) }
             case "remoteWorkbenchToggle":
                 let enabled = payload["enabled"] as? Bool ?? false
                 model.toggleRemoteWorkbench(enabled)
