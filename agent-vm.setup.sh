@@ -170,6 +170,63 @@ SAVEHIST=10000
 setopt INC_APPEND_HISTORY HIST_IGNORE_DUPS HIST_IGNORE_SPACE
 ZSHRC
 echo 'export PATH=$HOME/.local/bin:$PATH' >> ~/.zshenv
+# Keep package manager caches on disk instead of /tmp (which Debian 13 mounts as RAM tmpfs).
+cat >> ~/.zshenv <<'CACHE_ENV'
+export UV_CACHE_DIR="${UV_CACHE_DIR:-$HOME/.cache/uv}"
+export PIP_CACHE_DIR="${PIP_CACHE_DIR:-$HOME/.cache/pip}"
+CACHE_ENV
+cat >> ~/.bashrc <<'CACHE_ENV'
+export UV_CACHE_DIR="${UV_CACHE_DIR:-$HOME/.cache/uv}"
+export PIP_CACHE_DIR="${PIP_CACHE_DIR:-$HOME/.cache/pip}"
+CACHE_ENV
+
+# Enable compressed zram swap (50% of RAM, up to 2 GiB) to prevent OOM kills under GUI workloads.
+sudo tee /usr/local/sbin/agent-vm-zram.sh >/dev/null <<'ZRAM_SCRIPT'
+#!/bin/sh
+set -eu
+PATH=/usr/sbin:/sbin:/usr/bin:/bin
+if swapon --show | grep -q zram; then
+  exit 0
+fi
+modprobe zram || exit 0
+mem_kb=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
+size_mb=$((mem_kb / 2048))
+[ "$size_mb" -gt 2048 ] && size_mb=2048
+[ "$size_mb" -lt 512 ] && size_mb=512
+dev=$(zramctl --find --algorithm zstd --size "${size_mb}M" 2>/dev/null || zramctl --find --size "${size_mb}M")
+if [ -n "$dev" ]; then
+  mkswap "$dev" >/dev/null
+  swapon -p 100 "$dev"
+  sysctl -w vm.swappiness=80 >/dev/null 2>&1 || true
+fi
+ZRAM_SCRIPT
+sudo chmod 0755 /usr/local/sbin/agent-vm-zram.sh
+sudo tee /etc/systemd/system/agent-vm-zram.service >/dev/null <<'ZRAM_UNIT'
+[Unit]
+Description=Configure compressed zram swap for Agent VM
+After=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/agent-vm-zram.sh
+
+[Install]
+WantedBy=multi-user.target
+ZRAM_UNIT
+sudo systemctl daemon-reload 2>/dev/null || true
+sudo systemctl enable --now agent-vm-zram.service 2>/dev/null || true
+
+# Tune Linux VM memory parameters so page/dentry caches stay lean and reclaimable
+# by host virtio-balloon, and zram swap operates with minimal read-ahead overhead.
+sudo tee /etc/sysctl.d/99-agent-vm-memory.conf >/dev/null <<'MEM_SYSCTL'
+vm.vfs_cache_pressure=200
+vm.dirty_background_ratio=5
+vm.dirty_ratio=15
+vm.swappiness=80
+vm.page-cluster=0
+MEM_SYSCTL
+sudo sysctl -p /etc/sysctl.d/99-agent-vm-memory.conf >/dev/null 2>&1 || true
 
 # Auto-source ~/.agent-vm.env if present. The host pushes ~/.agent-vm/env into
 # this path on every `agent-vm` invocation (see _agent_vm_ensure_running), so

@@ -98,7 +98,58 @@ func (b *Backend) GetScreenshot(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(data)
 }
 
+// HandleMemoryBalloon is the handler for GET/POST /v1/memory/balloon.
+func (b *Backend) HandleMemoryBalloon(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+
+	switch r.Method {
+	case http.MethodGet:
+		info, err := b.Agent.GetMemoryBalloon(ctx)
+		if err != nil {
+			ec := http.StatusInternalServerError
+			if errors.Is(err, driver.ErrDriverNotMemoryBallooner) {
+				ec = http.StatusNotImplemented
+			}
+			b.onError(w, err, ec)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(info)
+	case http.MethodPost:
+		var req struct {
+			TargetBytes uint64 `json:"targetBytes"`
+			TargetMB    uint64 `json:"targetMB"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req); err != nil {
+			b.onError(w, fmt.Errorf("invalid JSON body: %w", err), http.StatusBadRequest)
+			return
+		}
+		target := req.TargetBytes
+		if target == 0 && req.TargetMB > 0 {
+			target = req.TargetMB * 1024 * 1024
+		}
+		info, err := b.Agent.SetMemoryBalloon(ctx, target)
+		if err != nil {
+			ec := http.StatusInternalServerError
+			if errors.Is(err, driver.ErrDriverNotMemoryBallooner) {
+				ec = http.StatusNotImplemented
+			}
+			b.onError(w, err, ec)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(info)
+	default:
+		w.Header().Set("Allow", "GET, POST")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
 func AddRoutes(r *http.ServeMux, b *Backend) {
 	r.Handle("/v1/info", http.HandlerFunc(b.GetInfo))
 	r.Handle("/v1/screenshot", http.HandlerFunc(b.GetScreenshot))
+	r.Handle("/v1/memory/balloon", http.HandlerFunc(b.HandleMemoryBalloon))
 }

@@ -42,6 +42,17 @@ const blank = {
   quotas: {},
   agentQuotas: {},
   usage: {},
+  memoryReclaiming: [],
+  smartMemory: {
+    balloonEnabled: true,
+    autoSleepMinutes: 30,
+    guiIdleMinutes: 10,
+    pinnedVMs: [],
+    pressure: 'normal',
+    pressureLabel: '正常',
+    idleSeconds: {},
+    totalHostFootprintMB: 0,
+  },
   editors: {},
   browsers: {},
   codexDesktops: {},
@@ -412,7 +423,12 @@ function App() {
     <div className={'layout' + (isRemoteWeb ? ' remote-web' : '')}>
       {!isRemoteWeb && (
         <aside className={'sidebar' + (sidebarCollapsed ? ' collapsed' : '')}>
-          <div className="brand">
+          <div
+            className="brand"
+            onClick={toggleSidebar}
+            title={sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'}
+            style={{ cursor: 'pointer' }}
+          >
             <div className="brand-icon"><Monitor size={18} /></div>
             <div className="brand-text">
               <strong>Agent VM</strong>
@@ -453,38 +469,6 @@ function App() {
       )}
 
       <main className="main">
-        {!isRemoteWeb && (
-          <div className="topbar">
-            <div className="top-left">
-              <IconButton title={sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'} onClick={toggleSidebar}>
-                <PanelLeft size={16} />
-              </IconButton>
-              <div className="breadcrumbs">
-                {tabs.find(x => x.id === page)?.label}
-              </div>
-            </div>
-            <div className="top-right">
-              <span className="live-marker" title="本地运行">
-                <span className="status-dot active" /> 本地
-              </span>
-              <IconButton
-                title="刷新"
-                disabled={state.busy || state.proxyBusy || (page === 'versions' && (state.cliMonitor?.checking || state.cliMonitor?.updating))}
-                onClick={() => bridge(refreshAction)}
-              >
-                <RefreshCw
-                  size={15}
-                  className={
-                    state.busy || state.proxyBusy || (page === 'versions' && (state.cliMonitor?.checking || state.cliMonitor?.updating))
-                      ? 'spin'
-                      : ''
-                  }
-                />
-              </IconButton>
-            </div>
-          </div>
-        )}
-
         <div className={'content' + (isRemoteWeb ? ' codex-content' : page === 'codexDesktop' ? ' codex-desktop-content' : page === 'browser' ? ' browser-content' : '')}>
           {!isRemoteWeb && page === 'vms' && (
             <>
@@ -529,7 +513,7 @@ function App() {
                       key={v.name}
                       vm={v}
                       state={state}
-                      select={({ type, vm }) => {
+                      select={({ type, vm, app }) => {
                         if (type === 'rename') {
                           setRenameText(vm.displayName === vm.name ? '' : vm.displayName);
                           setModal({ type, vm });
@@ -543,8 +527,12 @@ function App() {
                         } else if (type === 'codexDesktopOpen') {
                           setDesktopVM(vm.name);
                           setDesktopPicked(true);
+                          setDesktopApp(app || '');
                           setSidebarCollapsed(true);
                           setPage('codexDesktop');
+                          if (app) {
+                            bridge('codexDesktopOpen', { name: vm.name, app });
+                          }
                         } else if (type === 'browserOpen') {
                           setBrowserVM(vm.name);
                           setBrowserPicked(true);
@@ -1183,6 +1171,64 @@ function App() {
           {!isRemoteWeb && page === 'settings' && (
             <>
               <SectionTitle title="设置" />
+              <section className="panel">
+                <h2>智能内存管理</h2>
+                <KV
+                  name="宿主机内存压力"
+                  value={state.smartMemory?.pressureLabel || '正常'}
+                />
+                <KV
+                  name="运行中 VM 宿主机总占用"
+                  value={
+                    state.smartMemory?.totalHostFootprintMB > 0
+                      ? `${(state.smartMemory.totalHostFootprintMB / 1024).toFixed(2)} GB`
+                      : '0.00 GB'
+                  }
+                />
+                <div className="form-grid" style={{ marginTop: 10 }}>
+                  <label className="checkbox">
+                    <span>启用 VZ 动态内存气球回收（自动将空闲缓存归还 macOS）</span>
+                    <input
+                      type="checkbox"
+                      checked={state.smartMemory?.balloonEnabled !== false}
+                      onChange={e => bridge('smartMemoryConfig', { balloonEnabled: e.target.checked })}
+                    />
+                  </label>
+                  <label>
+                    闲置虚拟机自动休眠
+                    <select
+                      value={state.smartMemory?.autoSleepMinutes ?? 30}
+                      onChange={e => bridge('smartMemoryConfig', { autoSleepMinutes: Number(e.target.value) })}
+                    >
+                      <option value={0}>关闭</option>
+                      <option value={15}>15 分钟无活动</option>
+                      <option value={30}>30 分钟无活动（推荐）</option>
+                      <option value={60}>60 分钟无活动</option>
+                    </select>
+                  </label>
+                  <label>
+                    闲置桌面自动休眠（Codex / Claude 桌面端）
+                    <select
+                      value={state.smartMemory?.guiIdleMinutes ?? 10}
+                      onChange={e => bridge('smartMemoryConfig', { guiIdleMinutes: Number(e.target.value) })}
+                    >
+                      <option value={0}>关闭</option>
+                      <option value={5}>5 分钟</option>
+                      <option value={10}>10 分钟（推荐）</option>
+                      <option value={20}>20 分钟</option>
+                    </select>
+                  </label>
+                </div>
+                <div className="inline-actions">
+                  <button
+                    className="secondary"
+                    disabled={(state.memoryReclaiming || []).length > 0}
+                    onClick={() => bridge('reclaimAllMemory')}
+                  >
+                    {(state.memoryReclaiming || []).length > 0 ? '正在回收…' : '一键优化所有运行中 VM 内存'}
+                  </button>
+                </div>
+              </section>
               <section className="panel">
                 <h2>手机远程工作台</h2>
                 <div className="form-grid">

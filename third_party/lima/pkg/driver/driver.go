@@ -18,6 +18,22 @@ var ErrDriverNotScreenshotter = errors.New("driver does not support screenshots"
 // ErrNoDisplay is returned when the VM has no display configured.
 var ErrNoDisplay = errors.New("no display configured")
 
+// ErrDriverNotMemoryBallooner is returned when the active driver does not support memory ballooning.
+var ErrDriverNotMemoryBallooner = errors.New("driver does not support memory ballooning")
+
+// MemoryBalloonInfo describes the current memory balloon target and bounds in bytes.
+type MemoryBalloonInfo struct {
+	TargetBytes uint64 `json:"targetBytes"`
+	MaxBytes    uint64 `json:"maxBytes"`
+	MinBytes    uint64 `json:"minBytes"`
+}
+
+// MemoryBallooner is an optional interface for drivers that support dynamic memory ballooning.
+type MemoryBallooner interface {
+	GetMemoryBalloon() (*MemoryBalloonInfo, error)
+	SetMemoryBalloon(targetBytes uint64) (*MemoryBalloonInfo, error)
+}
+
 // VsockEventEmitter is an optional interface for drivers to emit vsock events.
 type VsockEventEmitter interface {
 	SetVsockEventCallback(callback func(*events.VsockEvent))

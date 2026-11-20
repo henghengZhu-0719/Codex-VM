@@ -167,9 +167,22 @@ struct ReactWorkbenchView: NSViewRepresentable {
                 model.remoteWorkbenchServer.broadcastState(remoteState)
             }
             guard ready, let web else { return }
-            var usage: [String:[String:Double]] = [:]
+            var usage: [String:[String:Any]] = [:]
             for (name,u) in model.vmUsage {
-                usage[name] = ["cpu":u.cpuPercent,"used":u.usedMemoryMB,"total":u.totalMemoryMB]
+                usage[name] = [
+                    "cpu": u.cpuPercent,
+                    "used": u.usedMemoryMB,
+                    "total": u.totalMemoryMB,
+                    "cache": u.cacheMemoryMB,
+                    "hostFootprint": u.hostFootprintMB,
+                    "balloonTarget": u.balloonTargetMB,
+                    "balloonMax": u.balloonMaxMB,
+                    "activeSessions": u.activeSessions,
+                    "tmpfs": u.tmpfsUsedMB,
+                    "swapUsed": u.swapUsedMB,
+                    "swapTotal": u.swapTotalMB,
+                    "topProcs": u.topProcs
+                ]
             }
             var quota: [String:[String:Any]] = [:]
             for (name,q) in model.vmQuotas { quota[name] = quotaData(q) }
@@ -243,7 +256,17 @@ struct ReactWorkbenchView: NSViewRepresentable {
                 "browserShortcut":model.browserShortcutSignal,
                 "requestedPage":model.requestedPage,
                 "toasts":model.toasts,
-                "vms":vms, "usage":usage, "quotas":quota, "agentQuotas":agentQuotas, "mounts":mounts, "agents":model.vmAgents,
+                "vms":vms, "usage":usage, "memoryReclaiming":Array(model.memoryReclaiming), "quotas":quota, "agentQuotas":agentQuotas, "mounts":mounts, "agents":model.vmAgents,
+                "smartMemory": [
+                    "balloonEnabled": model.smartBalloonEnabled,
+                    "autoSleepMinutes": model.autoSleepVMMinutes,
+                    "guiIdleMinutes": model.guiIdleMinutes,
+                    "pinnedVMs": Array(model.pinnedVMs),
+                    "pressure": model.hostMemoryPressure.rawValue,
+                    "pressureLabel": model.hostMemoryPressure.label,
+                    "idleSeconds": model.vmIdleSeconds,
+                    "totalHostFootprintMB": model.vmUsage.values.reduce(0.0) { $0 + $1.hostFootprintMB }
+                ] as [String: Any],
                 "vmProxyRoutes":model.vmProxyRoutes,
                 "busy":model.busy, "proxyBusy":model.proxyBusy,
                 "hostDiskAvailGB":model.hostDiskAvailGB(),
@@ -531,6 +554,26 @@ struct ReactWorkbenchView: NSViewRepresentable {
             case "resizeDisk":
                 if let vm = existingVM(payload), let disk = payload["disk"] as? Int, !model.busy {
                     model.resizeDisk(vm, diskGiB: disk)
+                }
+            case "reclaimMemory":
+                if let vm = existingVM(payload) {
+                    model.reclaimVMMemory(vm)
+                }
+            case "reclaimAllMemory":
+                model.reclaimAllVMMemory()
+            case "togglePinVM":
+                if let vm = existingVM(payload) {
+                    model.togglePinVM(vm.name)
+                }
+            case "smartMemoryConfig":
+                if let enabled = payload["balloonEnabled"] as? Bool {
+                    model.setSmartBalloonEnabled(enabled)
+                }
+                if let mins = payload["autoSleepMinutes"] as? Int {
+                    model.setAutoSleepVMMinutes(mins)
+                }
+                if let guiMins = payload["guiIdleMinutes"] as? Int {
+                    model.setGUIIdleMinutes(guiMins)
                 }
             case "stop":
                 if let vm = existingVM(payload), vm.status == "Running", !model.busy { model.stop(vm) }

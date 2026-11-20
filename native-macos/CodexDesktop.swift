@@ -112,7 +112,22 @@ struct CodexDesktopState {
     private var checking: Set<String> = []
     private var generations: [String: UUID] = [:]
     private var resizeWorkItems: [String: DispatchWorkItem] = [:]
+    private final class IMEChannel {
+        let process: Process
+        let stdin: FileHandle
+        init(process: Process, stdin: FileHandle) {
+            self.process = process
+            self.stdin = stdin
+        }
+        var isAlive: Bool { process.isRunning }
+        func close() {
+            try? stdin.close()
+            if process.isRunning { process.terminate() }
+        }
+    }
+
     private let imeQueue = DispatchQueue(label: "org.agentvm.codex-desktop.ime")
+    nonisolated(unsafe) private var imeChannels: [String: IMEChannel] = [:]
 
     static func stateKey(name: String, app: DesktopAppKind) -> String {
         "\(name)::\(app.rawValue)"
@@ -136,7 +151,7 @@ struct CodexDesktopState {
         let c: Int
         switch qualityMode {
         case "sharp":
-            q = 9; c = 1
+            q = 9; c = 0
         case "smooth":
             q = 5; c = 4
         default:
@@ -172,6 +187,7 @@ struct CodexDesktopState {
                 resizeWorkItems[key]?.cancel()
                 resizeWorkItems.removeValue(forKey: key)
                 states.removeValue(forKey: key)
+                closeIME(vmName: vmName)
             }
         }
         onChange?(states)
@@ -237,6 +253,7 @@ struct CodexDesktopState {
             return
         }
         guard !preparing.contains(key) else { return }
+        warmIME(name: name, config: config)
         start(name: name, config: config, app: app, width: width, height: height, qualityMode: qMode)
     }
 
@@ -320,6 +337,7 @@ struct CodexDesktopState {
         URLSession.shared.dataTask(with: request) { _, response, _ in
             DispatchQueue.main.async {
                 if (response as? HTTPURLResponse)?.statusCode == 200, let target = URL(string: url) {
+                    self.warmIME(name: name, config: config)
                     self.onOpen?(name, app, target)
                     self.resize(name: name, config: config, app: app, width: width, height: height)
                 } else if fallbackPrepare {
@@ -549,24 +567,62 @@ struct CodexDesktopState {
         }
     }
 
+    nonisolated private func ensureIMEChannel(name: String, config: String) -> IMEChannel? {
+        if let existing = imeChannels[name], existing.isAlive {
+            return existing
+        }
+        imeChannels[name]?.close()
+        imeChannels.removeValue(forKey: name)
+
+        let b64 = Data(Self.imeDaemonScript.utf8).base64EncodedString()
+        let remoteCmd = "python3 -u -c \"import base64;exec(base64.b64decode('\(b64)'))\""
+        let proc = Process()
+        let stdinPipe = Pipe()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+        proc.arguments = Self.sshControlArgs(config: config, timeout: 6) + ["lima-" + name, remoteCmd]
+        proc.standardInput = stdinPipe
+        proc.standardOutput = FileHandle.nullDevice
+        proc.standardError = FileHandle.nullDevice
+        do {
+            try proc.run()
+            let ch = IMEChannel(process: proc, stdin: stdinPipe.fileHandleForWriting)
+            imeChannels[name] = ch
+            return ch
+        } catch {
+            return nil
+        }
+    }
+
+    private func warmIME(name: String, config: String) {
+        imeQueue.async { [weak self] in
+            _ = self?.ensureIMEChannel(name: name, config: config)
+        }
+    }
+
+    private func closeIME(vmName: String) {
+        imeQueue.async { [weak self] in
+            self?.imeChannels[vmName]?.close()
+            self?.imeChannels.removeValue(forKey: vmName)
+        }
+    }
+
     func sendText(name: String, config: String, app: DesktopAppKind = .codex, text: String) {
         guard !text.isEmpty else { return }
-        var input = app.scriptSettings
-        input["text"] = text
-        guard let script = Self.wrapScript(Self.pasteTextScript, settings: input) else { return }
-        imeQueue.async {
-            let proc = Process(), stdin = Pipe()
-            proc.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
-            proc.arguments = Self.sshControlArgs(config: config) + ["lima-" + name, "python3 -"]
-            proc.standardInput = stdin
-            proc.standardOutput = FileHandle.nullDevice
-            proc.standardError = FileHandle.nullDevice
-            do {
-                try proc.run()
-                try stdin.fileHandleForWriting.write(contentsOf: Data(script.utf8))
-                try stdin.fileHandleForWriting.close()
-                proc.waitUntilExit()
-            } catch {}
+        let payload: [String: Any] = ["display": app.displayNumber, "text": text]
+        guard var lineData = try? JSONSerialization.data(withJSONObject: payload) else { return }
+        lineData.append(0x0a)
+        imeQueue.async { [weak self] in
+            guard let self else { return }
+            for _ in 0..<2 {
+                guard let ch = self.ensureIMEChannel(name: name, config: config) else { return }
+                do {
+                    try ch.stdin.write(contentsOf: lineData)
+                    return
+                } catch {
+                    ch.close()
+                    self.imeChannels.removeValue(forKey: name)
+                }
+            }
         }
     }
 
@@ -806,15 +862,45 @@ def disk_avail_mb():
     except Exception:
         return 0
 
+def cleanup_stale_chromium_shm():
+    try:
+        in_use = set()
+        for p in pathlib.Path('/proc').iterdir():
+            if not p.name.isdigit(): continue
+            try:
+                for fd in (p / 'fd').iterdir():
+                    try:
+                        t = os.readlink(fd)
+                        if t.startswith('/tmp/.org.chromium.Chromium.'):
+                            in_use.add(t)
+                    except OSError:
+                        pass
+            except OSError:
+                pass
+        for item in pathlib.Path('/tmp').glob('.org.chromium.Chromium.*'):
+            if str(item) not in in_use:
+                try: item.unlink()
+                except OSError: pass
+    except Exception:
+        pass
+
 def ensure_cjk_fontconfig():
     try:
         fc_dir = pathlib.Path.home() / '.config/fontconfig'
         fc_file = fc_dir / 'fonts.conf'
-        if not fc_file.exists() or 'Noto Sans CJK SC' not in fc_file.read_text(errors='ignore'):
+        existing = fc_file.read_text(errors='ignore') if fc_file.exists() else ''
+        if 'Noto Sans CJK SC' not in existing or 'hintslight' not in existing or 'rgba' not in existing:
             fc_dir.mkdir(parents=True, exist_ok=True)
             fc_file.write_text('''<?xml version="1.0"?>
 <!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
 <fontconfig>
+  <match target="font">
+    <edit name="antialias" mode="assign"><bool>true</bool></edit>
+    <edit name="hinting" mode="assign"><bool>true</bool></edit>
+    <edit name="hintstyle" mode="assign"><const>hintslight</const></edit>
+    <edit name="rgba" mode="assign"><const>none</const></edit>
+    <edit name="lcdfilter" mode="assign"><const>lcdnone</const></edit>
+  </match>
   <alias><family>sans-serif</family><prefer><family>Noto Sans CJK SC</family><family>DejaVu Sans</family></prefer></alias>
   <alias><family>system-ui</family><prefer><family>Noto Sans CJK SC</family><family>DejaVu Sans</family></prefer></alias>
   <alias><family>serif</family><prefer><family>Noto Serif CJK SC</family><family>DejaVu Serif</family></prefer></alias>
@@ -847,6 +933,32 @@ try:
         raise SystemExit(0)
 
     ensure_cjk_fontconfig()
+    cleanup_stale_chromium_shm()
+    shared_cwd = None
+    try:
+        shared_dir = pathlib.Path('/mnt/agent-vm-shared')
+        if shared_dir.is_dir():
+            shared_cwd = str(shared_dir)
+            for link_name in ('共享文件夹', 'Shared'):
+                link = pathlib.Path.home() / link_name
+                if not link.exists() and not link.is_symlink():
+                    link.symlink_to(shared_dir)
+            bm_entries = [f'file://{shared_dir} 共享文件夹']
+            mnt_root = pathlib.Path('/mnt')
+            if mnt_root.is_dir():
+                for child in sorted(mnt_root.iterdir()):
+                    if child.name in ('agent-vm-shared', 'lima-cidata') or not child.is_dir():
+                        continue
+                    bm_entries.append(f'file://{child} {child.name}')
+            for gtk_ver in ('gtk-3.0', 'gtk-4.0'):
+                bm_dir = pathlib.Path.home() / '.config' / gtk_ver
+                bm_dir.mkdir(parents=True, exist_ok=True)
+                bm_file = bm_dir / 'bookmarks'
+                existing_bm = bm_file.read_text(errors='ignore').splitlines() if bm_file.exists() else []
+                existing_bm = [line for line in existing_bm if line.strip() and not line.startswith('file:///mnt/')]
+                bm_file.write_text('\n'.join(bm_entries + existing_bm) + '\n')
+    except Exception:
+        pass
     scale = max(1.0, min(2.0, float(settings.get('scale', 2.0))))
     w = max(800, min(4096, int(settings.get('width', 2560)) // 2 * 2))
     h = max(500, min(2560, int(settings.get('height', 1600)) // 2 * 2))
@@ -855,7 +967,8 @@ try:
     log_dir = pathlib.Path.home() / '.config' / config_dir
     log_dir.mkdir(parents=True, exist_ok=True)
     scale_file = log_dir / 'display-scale'
-    scale_tag = f'{scale:.2f}'
+    dpi_val = int(round(scale * 96))
+    scale_tag = f'{scale:.2f}-dpi{dpi_val}-v2'
     prev_scale = scale_file.read_text(errors='ignore').strip() if scale_file.exists() else ''
     scale_changed = prev_scale != scale_tag
     if scale_changed:
@@ -881,17 +994,38 @@ try:
             except OSError: pass
         time.sleep(0.2)
 
+    def stop_electron_app():
+        # Terminate main browser process(es) first so Electron shuts down its own
+        # zygote/GPU children cleanly instead of triggering a GPU respawn loop.
+        main_match = lambda a: matches_app(a) and '--type=' not in ' '.join(a)
+        mains = proc_running(main_match)
+        if mains:
+            for pid, _ in mains:
+                try: os.kill(pid, signal.SIGTERM)
+                except OSError: pass
+            deadline = time.time() + 2.5
+            while time.time() < deadline:
+                if not proc_running(matches_app):
+                    return
+                time.sleep(0.15)
+            for pid, _ in proc_running(main_match):
+                try: os.kill(pid, signal.SIGKILL)
+                except OSError: pass
+            time.sleep(0.15)
+        stop_procs(matches_app, wait_sec=1.0)
+
     if scale_changed:
-        stop_procs(matches_app)
+        stop_electron_app()
         stop_procs(lambda a: any('openbox' in x for x in a[:2]) and config_dir in ' '.join(a))
         stop_procs(lambda a: any('x11vnc' in x for x in a[:2]) and vnc_port_str in a)
         stop_procs(lambda a: any(('Xtigervnc' in x or 'Xvfb' in x) for x in a[:2]) and display_num in a)
+        cleanup_stale_chromium_shm()
 
     use_tiger = bool(xtigervnc)
     if use_tiger:
         old_xvfb = proc_running(lambda a: any('Xvfb' in x for x in a[:2]) and display_num in a)
         if old_xvfb:
-            stop_procs(matches_app)
+            stop_electron_app()
             stop_procs(lambda a: any('x11vnc' in x for x in a[:2]) and vnc_port_str in a)
             stop_procs(lambda a: any('openbox' in x for x in a[:2]) and config_dir in ' '.join(a))
             stop_procs(lambda a: any('Xvfb' in x for x in a[:2]) and display_num in a)
@@ -902,7 +1036,8 @@ try:
                 subprocess.Popen([
                     xtigervnc, display_num, '-localhost', '-rfbport', vnc_port_str,
                     '-SecurityTypes', 'None', '-geometry', f'{w}x{h}',
-                    '-depth', '24', '-AcceptSetDesktopSize=1', '-AlwaysShared=1'
+                    '-depth', '24', '-dpi', str(dpi_val), '-FrameRate=60', '-CompareFB=1',
+                    '-AcceptSetDesktopSize=1', '-AlwaysShared=1'
                 ], stdin=subprocess.DEVNULL, stdout=f, stderr=f, start_new_session=True)
             time.sleep(0.5)
     else:
@@ -934,7 +1069,7 @@ try:
         subprocess.run(['xrdb', '-merge'], input=f'Xft.dpi: {dpi_val}\n', text=True, env=env, capture_output=True)
 
     if restart_app:
-        stop_procs(matches_app)
+        stop_electron_app()
 
     emit({'stage': 'app', 'message': f'正在启动{app_label}…'})
     running_app = proc_running(lambda a: matches_app(a) and '--type=' not in ' '.join(a))
@@ -949,8 +1084,8 @@ try:
             f'--force-device-scale-factor={scale:g}'
         ]
         launch_cmd = ['dbus-run-session', '--'] + cmd if shutil.which('dbus-run-session') else cmd
-        with open(log_dir / log_file, 'ab') as f:
-            subprocess.Popen(launch_cmd, env=env, stdin=subprocess.DEVNULL, stdout=f, stderr=f, start_new_session=True)
+        with open(log_dir / log_file, 'wb') as f:
+            subprocess.Popen(launch_cmd, env=env, cwd=shared_cwd, stdin=subprocess.DEVNULL, stdout=f, stderr=f, start_new_session=True)
         time.sleep(1.5)
 
     emit({'stage': 'vnc', 'message': '正在启动 noVNC 画面服务…'})
@@ -1047,12 +1182,22 @@ if xrandr:
 print(json.dumps({'resolution': actual}))
 """#
 
-    static let pasteTextScript = #"""
-import os, subprocess, time
+    nonisolated static let imeDaemonScript = #"""
+import json, os, subprocess, sys, time
 
-env = dict(os.environ, DISPLAY=settings.get('display', ':98'))
-text = settings.get('text', '')
-if text:
+for raw in sys.stdin:
+    raw = raw.strip()
+    if not raw:
+        continue
+    try:
+        item = json.loads(raw)
+        text = item.get('text', '')
+        disp = item.get('display', ':98')
+    except Exception:
+        continue
+    if not text:
+        continue
+    env = dict(os.environ, DISPLAY=disp)
     p = subprocess.Popen(
         ['xclip', '-selection', 'clipboard', '-in'],
         env=env,
@@ -1062,8 +1207,13 @@ if text:
         start_new_session=True,
     )
     p.communicate(text.encode('utf-8'))
-    time.sleep(0.08)
-    subprocess.run(['xdotool', 'key', '--clearmodifiers', 'ctrl+v'], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(0.015)
+    subprocess.run(
+        ['xdotool', 'key', '--clearmodifiers', '--delay', '0', 'ctrl+v'],
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
 """#
 
     static let stopScript = #"""
@@ -1105,11 +1255,49 @@ def stop_procs(match, wait_sec=3.0):
         try: os.kill(pid, signal.SIGKILL)
         except OSError: pass
 
-stop_procs(matches_app)
+def stop_electron_app():
+    main_match = lambda a: matches_app(a) and '--type=' not in ' '.join(a)
+    mains = proc_running(main_match)
+    if mains:
+        for pid in mains:
+            try: os.kill(pid, signal.SIGTERM)
+            except OSError: pass
+        deadline = time.time() + 2.5
+        while time.time() < deadline:
+            if not proc_running(matches_app):
+                return
+            time.sleep(0.15)
+        for pid in proc_running(main_match):
+            try: os.kill(pid, signal.SIGKILL)
+            except OSError: pass
+        time.sleep(0.15)
+    stop_procs(matches_app, wait_sec=1.0)
+
+stop_electron_app()
 stop_procs(lambda a: any('websockify' in x for x in a[:3]) and f'127.0.0.1:{vnc_port_str}' in a)
 stop_procs(lambda a: any('openbox' in x for x in a[:2]) and config_dir in ' '.join(a))
 stop_procs(lambda a: any('x11vnc' in x for x in a[:2]) and vnc_port_str in a)
 stop_procs(lambda a: any(('Xtigervnc' in x or 'Xvfb' in x) for x in a[:2]) and display_num in a)
+try:
+    in_use = set()
+    for p in pathlib.Path('/proc').iterdir():
+        if not p.name.isdigit(): continue
+        try:
+            for fd in (p / 'fd').iterdir():
+                try:
+                    t = os.readlink(fd)
+                    if t.startswith('/tmp/.org.chromium.Chromium.'):
+                        in_use.add(t)
+                except OSError:
+                    pass
+        except OSError:
+            pass
+    for item in pathlib.Path('/tmp').glob('.org.chromium.Chromium.*'):
+        if str(item) not in in_use:
+            try: item.unlink()
+            except OSError: pass
+except Exception:
+    pass
 """#
 
     static let logsScript = #"""

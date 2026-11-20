@@ -25,6 +25,15 @@ struct VMUsage {
     let cpuPercent: Double
     let usedMemoryMB: Double
     let totalMemoryMB: Double
+    var cacheMemoryMB: Double = 0
+    var hostFootprintMB: Double = 0
+    var balloonTargetMB: Double = 0
+    var balloonMaxMB: Double = 0
+    var activeSessions: Int = 0
+    var tmpfsUsedMB: Double = 0
+    var swapUsedMB: Double = 0
+    var swapTotalMB: Double = 0
+    var topProcs: [String] = []
     var memoryPercent: Double {
         guard totalMemoryMB > 0 else { return 0 }
         return min(100, max(0, usedMemoryMB / totalMemoryMB * 100))
@@ -178,6 +187,22 @@ struct CodexQuotaStatus: Decodable {
     @Published var vmQuotas: [String: CodexQuotaStatus] = [:]
     @Published var vmAgentQuotas: [String: [String: AgentQuotaResult]] = [:]
     @Published var vmUsage: [String: VMUsage] = [:]
+    @Published var memoryReclaiming: Set<String> = []
+    @Published var smartBalloonEnabled: Bool = {
+        if UserDefaults.standard.object(forKey: "smartBalloonEnabled") == nil { return true }
+        return UserDefaults.standard.bool(forKey: "smartBalloonEnabled")
+    }()
+    @Published var autoSleepVMMinutes: Int = {
+        if UserDefaults.standard.object(forKey: "autoSleepVMMinutes") == nil { return 30 }
+        return max(0, UserDefaults.standard.integer(forKey: "autoSleepVMMinutes"))
+    }()
+    @Published var guiIdleMinutes: Int = {
+        if UserDefaults.standard.object(forKey: "guiIdleMinutes") == nil { return 10 }
+        return max(0, UserDefaults.standard.integer(forKey: "guiIdleMinutes"))
+    }()
+    @Published var pinnedVMs: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "pinnedVMs") ?? [])
+    @Published var hostMemoryPressure: HostMemoryPressureLevel = .normal
+    @Published var vmIdleSeconds: [String: Int] = [:]
     @Published var vmAgents: [String: [String]] = [:]
     @Published var usageErrors: Set<String> = []
     @Published var quotaPolling: Set<String> = []
@@ -230,7 +255,11 @@ struct CodexQuotaStatus: Decodable {
     private var usagePolling: Set<String> = []
     private var codexDesktopLastActiveAt: [String: Date] = [:]
     private var browserLastActiveAt: [String: Date] = [:]
-    private let guiIdleLimitSeconds: TimeInterval = 600
+    private var vmLastActiveAt: [String: Date] = [:]
+    private var balloonLastAdjustAt: [String: Date] = [:]
+    private var autoSleepingVMs: Set<String> = []
+    private let pressureMonitor = HostMemoryPressureMonitor()
+    private var guiIdleLimitSeconds: TimeInterval { TimeInterval(max(0, guiIdleMinutes) * 60) }
     let executable: String
 
     init() {
@@ -269,6 +298,7 @@ struct CodexQuotaStatus: Decodable {
         }
         terminationObserver = NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated {
+                self?.pressureMonitor.stop()
                 self?.codeEditorManager.stopAll()
                 self?.stopAllVMMihomo()
                 self?.stopAllAgents()
@@ -276,6 +306,12 @@ struct CodexQuotaStatus: Decodable {
                 self?.remoteWorkbenchServer.stop()
             }
         }
+        pressureMonitor.onChange = { [weak self] level in
+            Task { @MainActor in
+                self?.handleHostMemoryPressure(level)
+            }
+        }
+        pressureMonitor.start()
         refresh()
         refreshProxyStatus()
         quotaTimer = Timer.scheduledTimer(withTimeInterval: 20 * 60, repeats: true) { [weak self] _ in
@@ -293,6 +329,7 @@ struct CodexQuotaStatus: Decodable {
                 self?.pollRunningUsage()
                 self?.refreshCodeEditors()
                 self?.reclaimIdleGUIs()
+                self?.reclaimIdleVMs()
             }
         }
     }
@@ -995,6 +1032,142 @@ cat /var/lib/agent-vm-region/status
             }
         }
     }
+    func setSmartBalloonEnabled(_ enabled: Bool) {
+        smartBalloonEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "smartBalloonEnabled")
+        if !enabled {
+            // Restore all running VMs to full configured memory quota when disabled.
+            let lima = limaHomePath()
+            let running = machines.filter { $0.status == "Running" && $0.name != "base" && $0.name != "base-building" }.map(\.name)
+            DispatchQueue.global(qos: .utility).async {
+                for name in running {
+                    _ = HostAgentBalloonClient.set(vmName: name, limaDir: lima, targetMB: 0)
+                }
+            }
+        } else {
+            pollRunningUsage()
+        }
+    }
+    func setAutoSleepVMMinutes(_ minutes: Int) {
+        let clamped = max(0, min(240, minutes))
+        autoSleepVMMinutes = clamped
+        UserDefaults.standard.set(clamped, forKey: "autoSleepVMMinutes")
+    }
+    func setGUIIdleMinutes(_ minutes: Int) {
+        let clamped = max(0, min(120, minutes))
+        guiIdleMinutes = clamped
+        UserDefaults.standard.set(clamped, forKey: "guiIdleMinutes")
+    }
+    func togglePinVM(_ vmName: String) {
+        if pinnedVMs.contains(vmName) {
+            pinnedVMs.remove(vmName)
+        } else {
+            pinnedVMs.insert(vmName)
+            vmLastActiveAt[vmName] = Date()
+            vmIdleSeconds[vmName] = 0
+        }
+        UserDefaults.standard.set(Array(pinnedVMs).sorted(), forKey: "pinnedVMs")
+    }
+    func limaHomePath() -> String {
+        let state = ProcessInfo.processInfo.environment["AGENT_VM_STATE_DIR"] ?? NSHomeDirectory() + "/.agent-vm"
+        return ProcessInfo.processInfo.environment["AGENT_VM_LIMA_HOME"] ?? state + "/lima"
+    }
+    func isVMBurstActive(_ vmName: String) -> Bool {
+        if runningSessionVMs.values.contains(vmName) { return true }
+        if codexDesktopSlotVisible && activeCodexDesktopVM == vmName { return true }
+        if browserSlotVisible && activeBrowserVM == vmName { return true }
+        return false
+    }
+    func isVMActive(_ vm: VM) -> Bool {
+        if isVMBurstActive(vm.name) { return true }
+        if let ed = codeEditors[vm.name], ed.status == "running" { return true }
+        if let br = linuxBrowsers[vm.name], (br.status == "ready" || br.appRunning) { return true }
+        if let usage = vmUsage[vm.name] {
+            if usage.cpuPercent >= 3.0 { return true }
+            if usage.activeSessions > 0 { return true }
+        }
+        return false
+    }
+    func handleHostMemoryPressure(_ level: HostMemoryPressureLevel) {
+        hostMemoryPressure = level
+        guard level == .warning || level == .critical else { return }
+        let label = level.label
+        var reclaimedGUIs = 0
+        for vm in machines where vm.status == "Running" && vm.name != "base" && vm.name != "base-building" {
+            for app in DesktopAppKind.allCases {
+                let key = CodexDesktopManager.stateKey(name: vm.name, app: app)
+                let desktopActive = codexDesktopSlotVisible && activeCodexDesktopVM == vm.name && activeCodexDesktopApp == app
+                if !desktopActive, let st = codexDesktops[key], (st.status == "ready" || st.appRunning), !st.installing {
+                    stopCodexDesktop(vm, app: app, reasonToast: "宿主机内存\(label)，已休眠后台桌面")
+                    reclaimedGUIs += 1
+                }
+            }
+        }
+        if level == .critical && !busy {
+            let now = Date()
+            for vm in machines where vm.status == "Running" && vm.name != "base" && vm.name != "base-building" {
+                guard !pinnedVMs.contains(vm.name), !isVMActive(vm), !autoSleepingVMs.contains(vm.name) else { continue }
+                if let last = vmLastActiveAt[vm.name], now.timeIntervalSince(last) >= 300 {
+                    autoSleepVM(vm, reason: "宿主机内存紧张，已自动休眠闲置虚拟机")
+                }
+            }
+        }
+        if reclaimedGUIs == 0 {
+            pushToast(title: "宿主机内存\(label)", message: "已触发动态内存回收", level: "info")
+        }
+        pollRunningUsage()
+    }
+    private func autoSleepVM(_ vm: VM, reason: String) {
+        guard !autoSleepingVMs.contains(vm.name) else { return }
+        autoSleepingVMs.insert(vm.name)
+        let vmName = vm.name
+        let label = displayName(for: vm)
+        run(["stop", vmName]) { [weak self] code, _ in
+            guard let self else { return }
+            self.autoSleepingVMs.remove(vmName)
+            self.stopVMMihomo(vmName)
+            if code == 0 {
+                self.vmLastActiveAt.removeValue(forKey: vmName)
+                self.vmIdleSeconds.removeValue(forKey: vmName)
+                self.pushToast(title: reason, message: label, level: "info", vmName: vmName)
+            }
+            self.refresh()
+        }
+    }
+    func reclaimIdleVMs() {
+        let now = Date()
+        let runningNames = Set(machines.filter { $0.status == "Running" && $0.name != "base" && $0.name != "base-building" }.map(\.name))
+        vmLastActiveAt = vmLastActiveAt.filter { runningNames.contains($0.key) }
+        vmIdleSeconds = vmIdleSeconds.filter { runningNames.contains($0.key) }
+
+        let limitSeconds = TimeInterval(autoSleepVMMinutes * 60)
+        for vm in machines where runningNames.contains(vm.name) {
+            if isVMActive(vm) {
+                vmLastActiveAt[vm.name] = now
+                vmIdleSeconds[vm.name] = 0
+                continue
+            }
+            let last = vmLastActiveAt[vm.name] ?? now
+            if vmLastActiveAt[vm.name] == nil {
+                vmLastActiveAt[vm.name] = now
+            }
+            let idle = max(0, Int(now.timeIntervalSince(last)))
+            vmIdleSeconds[vm.name] = idle
+
+            if autoSleepVMMinutes > 0,
+               !pinnedVMs.contains(vm.name),
+               !busy,
+               !autoSleepingVMs.contains(vm.name),
+               TimeInterval(idle) >= limitSeconds {
+                autoSleepVM(vm, reason: "已自动休眠闲置虚拟机释放内存")
+            }
+        }
+    }
+    func reclaimAllVMMemory() {
+        for vm in machines where vm.status == "Running" && vm.name != "base" && vm.name != "base-building" {
+            reclaimVMMemory(vm)
+        }
+    }
     func reclaimIdleGUIs() {
         let now = Date()
         for vm in machines where vm.status == "Running" && vm.name != "base" && vm.name != "base-building" {
@@ -1003,7 +1176,7 @@ cat /var/lib/agent-vm-region/status
                 let desktopActive = codexDesktopSlotVisible && activeCodexDesktopVM == vm.name && activeCodexDesktopApp == app
                 if desktopActive {
                     codexDesktopLastActiveAt[key] = now
-                } else if let st = codexDesktops[key], (st.status == "ready" || st.appRunning), !st.installing {
+                } else if guiIdleMinutes > 0, let st = codexDesktops[key], (st.status == "ready" || st.appRunning), !st.installing {
                     if let last = codexDesktopLastActiveAt[key] {
                         if now.timeIntervalSince(last) >= guiIdleLimitSeconds {
                             stopCodexDesktop(vm, app: app, reasonToast: "已休眠闲置桌面以释放内存")
@@ -1060,6 +1233,200 @@ cat /var/lib/agent-vm-region/status
             pollUsage(for: vm)
         }
     }
+    func reclaimVMMemory(_ vm: VM) {
+        guard vm.status == "Running", !memoryReclaiming.contains(vm.name) else { return }
+        let config = sshConfigPath(for: vm.name)
+        guard FileManager.default.fileExists(atPath: config) else { return }
+        memoryReclaiming.insert(vm.name)
+        let name = vm.name
+        let script = #"""
+import json, os, pathlib, subprocess
+
+def mem_avail_mb():
+    for line in open('/proc/meminfo'):
+        if line.startswith('MemAvailable:'):
+            return int(line.split()[1]) // 1024
+    return 0
+
+def swap_total_mb():
+    for line in open('/proc/meminfo'):
+        if line.startswith('SwapTotal:'):
+            return int(line.split()[1]) // 1024
+    return 0
+
+before_mb = mem_avail_mb()
+
+# 1. Remove unreferenced Chromium/Electron shm files left in /tmp tmpfs
+in_use = set()
+for p in pathlib.Path('/proc').iterdir():
+    if not p.name.isdigit(): continue
+    try:
+        for fd in (p / 'fd').iterdir():
+            try:
+                t = os.readlink(fd)
+                if t.startswith('/tmp/.org.chromium.Chromium.'):
+                    in_use.add(t)
+            except OSError:
+                pass
+    except OSError:
+        pass
+
+removed_files = 0
+removed_bytes = 0
+for item in pathlib.Path('/tmp').glob('.org.chromium.Chromium.*'):
+    if str(item) not in in_use:
+        try:
+            removed_bytes += item.stat().st_size
+            item.unlink()
+            removed_files += 1
+        except OSError:
+            pass
+
+# 2. Run systemd-tmpfiles --clean if available
+subprocess.run(['sudo', 'systemd-tmpfiles', '--clean'], capture_output=True)
+
+# 3. Ensure uv/pip caches point to disk instead of /tmp RAM tmpfs
+for rc_name in ('.zshenv', '.bashrc'):
+    rc = pathlib.Path.home() / rc_name
+    text = rc.read_text(errors='ignore') if rc.exists() else ''
+    add = []
+    if 'UV_CACHE_DIR' not in text:
+        add.append('export UV_CACHE_DIR="${UV_CACHE_DIR:-$HOME/.cache/uv}"')
+    if 'PIP_CACHE_DIR' not in text:
+        add.append('export PIP_CACHE_DIR="${PIP_CACHE_DIR:-$HOME/.cache/pip}"')
+    if add:
+        with open(rc, 'a') as f:
+            f.write('\n' + '\n'.join(add) + '\n')
+
+# 4. Enable compressed zram swap (50% RAM, up to 2 GiB) if not yet active
+zram_enabled = False
+if swap_total_mb() == 0:
+    zram_script = '''#!/bin/sh
+set -eu
+PATH=/usr/sbin:/sbin:/usr/bin:/bin
+if swapon --show | grep -q zram; then
+  exit 0
+fi
+modprobe zram || exit 0
+mem_kb=$(awk "/^MemTotal:/ {print \\$2}" /proc/meminfo)
+size_mb=$((mem_kb / 2048))
+[ "$size_mb" -gt 2048 ] && size_mb=2048
+[ "$size_mb" -lt 512 ] && size_mb=512
+dev=$(zramctl --find --algorithm zstd --size "${size_mb}M" 2>/dev/null || zramctl --find --size "${size_mb}M")
+if [ -n "$dev" ]; then
+  mkswap "$dev" >/dev/null
+  swapon -p 100 "$dev"
+  sysctl -w vm.swappiness=80 >/dev/null 2>&1 || true
+fi
+'''
+    unit = '''[Unit]
+Description=Configure compressed zram swap for Agent VM
+After=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/agent-vm-zram.sh
+
+[Install]
+WantedBy=multi-user.target
+'''
+    p1 = subprocess.run(['sudo', 'tee', '/usr/local/sbin/agent-vm-zram.sh'], input=zram_script, text=True, capture_output=True)
+    p2 = subprocess.run(['sudo', 'chmod', '0755', '/usr/local/sbin/agent-vm-zram.sh'], capture_output=True)
+    p3 = subprocess.run(['sudo', 'tee', '/etc/systemd/system/agent-vm-zram.service'], input=unit, text=True, capture_output=True)
+    if p1.returncode == 0 and p2.returncode == 0 and p3.returncode == 0:
+        subprocess.run(['sudo', 'systemctl', 'daemon-reload'], capture_output=True)
+        subprocess.run(['sudo', 'systemctl', 'enable', 'agent-vm-zram.service'], capture_output=True)
+        subprocess.run(['sudo', 'systemctl', 'restart', 'agent-vm-zram.service'], capture_output=True)
+        zram_enabled = swap_total_mb() > 0
+
+# 5. Apply persistent VM memory sysctl tuning (lean caches, zram-friendly)
+sysctl_path = pathlib.Path('/etc/sysctl.d/99-agent-vm-memory.conf')
+if not sysctl_path.exists():
+    sysctl_conf = 'vm.vfs_cache_pressure=200\nvm.dirty_background_ratio=5\nvm.dirty_ratio=15\nvm.swappiness=80\nvm.page-cluster=0\n'
+    p_sys = subprocess.run(['sudo', 'tee', str(sysctl_path)], input=sysctl_conf, text=True, capture_output=True)
+    if p_sys.returncode == 0:
+        subprocess.run(['sudo', 'sysctl', '-p', str(sysctl_path)], capture_output=True)
+
+# 6. Flush dirty buffers and drop clean page/dentry/inode caches so host balloon can reclaim them
+subprocess.run(['sync'], capture_output=True)
+subprocess.run(['sudo', 'sh', '-c', 'echo 3 > /proc/sys/vm/drop_caches'], capture_output=True)
+
+def mem_total_mb():
+    for line in open('/proc/meminfo'):
+        if line.startswith('MemTotal:'):
+            return int(line.split()[1]) // 1024
+    return 0
+
+after_mb = mem_avail_mb()
+total_mb = mem_total_mb()
+print(json.dumps({
+    'removedFiles': removed_files,
+    'removedMB': removed_bytes // (1024 * 1024),
+    'freedMB': max(0, after_mb - before_mb),
+    'availMB': after_mb,
+    'usedMB': max(0, total_mb - after_mb),
+    'swapTotalMB': swap_total_mb(),
+    'zramEnabled': zram_enabled
+}))
+"""#
+        let limaDir = limaHomePath()
+        DispatchQueue.global(qos: .utility).async {
+            let hostBeforeMB = HostMemoryFootprint.measureMB(vmName: name, limaDir: limaDir)
+            let proc = Process(), out = Pipe(), stdin = Pipe()
+            proc.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+            proc.arguments = ["-F", config, "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "lima-" + name, "python3 -"]
+            proc.standardOutput = out
+            proc.standardError = out
+            proc.standardInput = stdin
+            var obj: [String: Any]?
+            do {
+                try proc.run()
+                try stdin.fileHandleForWriting.write(contentsOf: Data(script.utf8))
+                try stdin.fileHandleForWriting.close()
+                let data = out.fileHandleForReading.readDataToEndOfFile()
+                proc.waitUntilExit()
+                let text = String(data: data, encoding: .utf8) ?? ""
+                if let line = text.components(separatedBy: .newlines).last(where: { $0.trimmingCharacters(in: .whitespaces).hasPrefix("{") }),
+                   let lineData = line.data(using: .utf8) {
+                    obj = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any]
+                }
+            } catch {}
+
+            var balloonAfter: BalloonStatus?
+            if let obj, let usedMB = obj["usedMB"] as? Int,
+               let cur = HostAgentBalloonClient.get(vmName: name, limaDir: limaDir) {
+                let desired = max(Int(cur.minMB), min(Int(cur.maxMB), usedMB + 384))
+                balloonAfter = HostAgentBalloonClient.set(vmName: name, limaDir: limaDir, targetMB: desired)
+            }
+            let hostAfterMB = HostMemoryFootprint.measureMB(vmName: name, limaDir: limaDir)
+            DispatchQueue.main.async {
+                self.memoryReclaiming.remove(name)
+                if balloonAfter != nil {
+                    self.balloonLastAdjustAt[name] = Date()
+                }
+                self.pollUsage(for: vm)
+                if let obj {
+                    let removedMB = obj["removedMB"] as? Int ?? 0
+                    let availMB = obj["availMB"] as? Int ?? 0
+                    let swapMB = obj["swapTotalMB"] as? Int ?? 0
+                    let zramNew = obj["zramEnabled"] as? Bool ?? false
+                    var msg = "可用内存 \(availMB) MB"
+                    if removedMB > 0 { msg = "清理残留 \(removedMB) MB · " + msg }
+                    if let b = balloonAfter {
+                        msg += " · 气球目标 \(Int(b.targetMB)) MB"
+                    }
+                    if hostBeforeMB > 0 && hostAfterMB > 0 {
+                        msg += String(format: " · 宿主机 %.1f GB", hostAfterMB / 1024.0)
+                    }
+                    if zramNew { msg += " · 已开启 \(swapMB) MB zram" }
+                    self.pushToast(title: "\(self.displayName(for: vm)) 内存已优化", message: msg, level: "ok", vmName: name)
+                } else {
+                    self.pushToast(title: "内存优化失败", message: "无法连接 \(self.displayName(for: vm))", level: "error", vmName: name)
+                }
+            }
+        }
+    }
     func pollUsage(for vm: VM) {
         guard vm.status == "Running", !usagePolling.contains(vm.name) else { return }
         let state = ProcessInfo.processInfo.environment["AGENT_VM_STATE_DIR"] ?? NSHomeDirectory() + "/.agent-vm"
@@ -1072,6 +1439,10 @@ cat /var/lib/agent-vm-region/status
         }
         usagePolling.insert(vm.name)
         let name = vm.name
+        let balloonEnabled = smartBalloonEnabled
+        let burstActive = isVMBurstActive(name)
+        let pressure = hostMemoryPressure
+        let lastAdjust = balloonLastAdjustAt[name]
         // Read two Linux /proc/stat snapshots to calculate a short-window guest CPU percentage.
         // MemAvailable excludes reclaimable cache from used memory.
         let script = #"""
@@ -1082,6 +1453,14 @@ cat /var/lib/agent-vm-region/status
         idle2=$1; total2=$2
         cpu=$(awk -v i1="$idle1" -v t1="$total1" -v i2="$idle2" -v t2="$total2" 'BEGIN { dt=t2-t1; di=i2-i1; if(dt<=0) print "0"; else printf "%.1f", 100*(dt-di)/dt }')
         mem=$(awk '/^MemTotal:/ { total=$2 } /^MemAvailable:/ { available=$2 } END { if(total>0 && available>=0) printf "%.0f|%.0f", (total-available)/1024, total/1024 }' /proc/meminfo)
+        cache_mb=$(awk '/^Buffers:/ { b=$2 } /^Cached:/ { c=$2 } /^SReclaimable:/ { s=$2 } END { printf "%.0f", (b+c+s)/1024 }' /proc/meminfo)
+        [ -z "$cache_mb" ] && cache_mb=0
+        tmpfs=$(df -BM /tmp 2>/dev/null | awk 'NR==2 { gsub(/M/,"",$3); print ($3+0) }')
+        [ -z "$tmpfs" ] && tmpfs=0
+        swap=$(awk '/^SwapTotal:/ { st=$2 } /^SwapFree:/ { sf=$2 } END { printf "%.0f|%.0f", (st>sf?(st-sf):0)/1024, st/1024 }' /proc/meminfo)
+        top_procs=$(ps -eo comm,rss --no-headers 2>/dev/null | awk '{m[$1]+=$2} END {for (k in m) printf "%.0f %s\n", m[k]/1024, k}' | sort -nr | head -n 3 | awk '{printf "%s%s %sM", (NR>1?",":""), $2, $1}')
+        active_sessions=$(ps -eo tty,comm --no-headers 2>/dev/null | awk '($1 ~ /^pts\//) || ($2 ~ /^(codex|claude|agy|opencode|vibe|pi|ChatGPT|chromium|chrome)$/) { c++ } END { print c+0 }')
+        [ -z "$active_sessions" ] && active_sessions=0
         agents=""
         PATH="$HOME/.local/bin:$HOME/.claude/local/bin:$PATH"
         for a in codex claude agy; do
@@ -1095,7 +1474,7 @@ cat /var/lib/agent-vm-region/status
         [ -f "$HOME/.codex/auth.json" ] && auths="${auths:+$auths,}codex"
         [ -f "$HOME/.gemini/antigravity-cli/antigravity-oauth-token" ] && auths="${auths:+$auths,}agy"
         [ -f "$HOME/.claude/.credentials.json" ] && auths="${auths:+$auths,}claude"
-        printf '%s|%s|%s|%s|%s\n' "$cpu" "$mem" "$agents" "$selected" "$auths"
+        printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$cpu" "$mem" "$agents" "$selected" "$auths" "$tmpfs" "$swap" "$top_procs" "$cache_mb" "$active_sessions"
         """#
         DispatchQueue.global(qos: .utility).async {
             let process = Process()
@@ -1111,6 +1490,7 @@ cat /var/lib/agent-vm-region/status
             var detectedAgents: [String]?
             var guestSelected: [String]?
             var authFlags: Set<String> = []
+            var balloonAdjusted = false
             do {
                 try process.run()
                 let data = output.fileHandleForReading.readDataToEndOfFile()
@@ -1123,8 +1503,44 @@ cat /var/lib/agent-vm-region/status
                        let cpu = Double(parts[0]), let used = Double(parts[1]),
                        let total = Double(parts[2]), total > 0,
                        cpu.isFinite, used.isFinite, total.isFinite {
+                        let tmpfsMB = parts.count >= 7 ? (Double(parts[6]) ?? 0) : 0
+                        let swapUsed = parts.count >= 8 ? (Double(parts[7]) ?? 0) : 0
+                        let swapTotal = parts.count >= 9 ? (Double(parts[8]) ?? 0) : 0
+                        let topProcs = parts.count >= 10
+                            ? parts[9].split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+                            : []
+                        let cacheMB = parts.count >= 11 ? (Double(parts[10]) ?? 0) : 0
+                        let activeSessions = parts.count >= 12 ? (Int(parts[11]) ?? 0) : 0
+
+                        var balloon = HostAgentBalloonClient.get(vmName: name, limaDir: lima)
+                        if balloonEnabled, let cur = balloon {
+                            let decision = SmartMemoryPolicy.decideBalloonTarget(
+                                usedMB: used,
+                                totalMB: total,
+                                current: cur,
+                                isBurstActive: burstActive || cpu >= 15.0,
+                                pressure: pressure,
+                                lastAdjustAt: lastAdjust
+                            )
+                            if decision.shouldAdjust,
+                               let updated = HostAgentBalloonClient.set(vmName: name, limaDir: lima, targetMB: decision.targetMB) {
+                                balloon = updated
+                                balloonAdjusted = true
+                            }
+                        }
+                        let hostFootprintMB = HostMemoryFootprint.measureMB(vmName: name, limaDir: lima)
+
                         result = VMUsage(cpuPercent: min(100, max(0, cpu)),
-                                         usedMemoryMB: max(0, used), totalMemoryMB: total)
+                                         usedMemoryMB: max(0, used), totalMemoryMB: total,
+                                         cacheMemoryMB: max(0, cacheMB),
+                                         hostFootprintMB: max(0, hostFootprintMB),
+                                         balloonTargetMB: balloon?.targetMB ?? 0,
+                                         balloonMaxMB: balloon?.maxMB ?? 0,
+                                         activeSessions: max(0, activeSessions),
+                                         tmpfsUsedMB: max(0, tmpfsMB),
+                                         swapUsedMB: max(0, swapUsed),
+                                         swapTotalMB: max(0, swapTotal),
+                                         topProcs: topProcs)
                     }
                     if parts.count >= 4 {
                         detectedAgents = parts[3].split(separator: ",").map(String.init).filter { !$0.isEmpty }
@@ -1142,6 +1558,9 @@ cat /var/lib/agent-vm-region/status
             }
             DispatchQueue.main.async {
                 self.usagePolling.remove(name)
+                if balloonAdjusted {
+                    self.balloonLastAdjustAt[name] = Date()
+                }
                 guard self.machines.contains(where: { $0.name == name && $0.status == "Running" }) else {
                     self.vmUsage.removeValue(forKey: name)
                     self.vmAgents.removeValue(forKey: name)

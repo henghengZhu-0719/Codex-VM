@@ -122,7 +122,7 @@ export default function CodexDesktopPage({
         autoResize &&
         w >= 400 &&
         h >= 300 &&
-        (Math.abs(w - lastResizeRef.current.w) > 20 || Math.abs(h - lastResizeRef.current.h) > 20)
+        (w !== lastResizeRef.current.w || h !== lastResizeRef.current.h)
       ) {
         lastResizeRef.current = { w, h };
         bridge('codexDesktopResize', { name: desktopVM, app: appMeta.id, width: w, height: h });

@@ -524,7 +524,7 @@ struct LinuxBrowserWebView: NSViewRepresentable {
         let c: Int
         switch qualityMode {
         case "sharp":
-            q = 9; c = 1
+            q = 9; c = 0
         case "smooth":
             q = 5; c = 4
         default:
@@ -1478,11 +1478,19 @@ try:
     try:
         fc_dir = pathlib.Path.home() / '.config/fontconfig'
         fc_file = fc_dir / 'fonts.conf'
-        if not fc_file.exists() or 'Noto Sans CJK SC' not in fc_file.read_text(errors='ignore'):
+        existing_fc = fc_file.read_text(errors='ignore') if fc_file.exists() else ''
+        if 'Noto Sans CJK SC' not in existing_fc or 'hintslight' not in existing_fc or 'rgba' not in existing_fc:
             fc_dir.mkdir(parents=True, exist_ok=True)
             fc_file.write_text('''<?xml version="1.0"?>
 <!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
 <fontconfig>
+  <match target="font">
+    <edit name="antialias" mode="assign"><bool>true</bool></edit>
+    <edit name="hinting" mode="assign"><bool>true</bool></edit>
+    <edit name="hintstyle" mode="assign"><const>hintslight</const></edit>
+    <edit name="rgba" mode="assign"><const>none</const></edit>
+    <edit name="lcdfilter" mode="assign"><const>lcdnone</const></edit>
+  </match>
   <alias><family>sans-serif</family><prefer><family>Noto Sans CJK SC</family><family>DejaVu Sans</family></prefer></alias>
   <alias><family>system-ui</family><prefer><family>Noto Sans CJK SC</family><family>DejaVu Sans</family></prefer></alias>
   <alias><family>serif</family><prefer><family>Noto Serif CJK SC</family><family>DejaVu Serif</family></prefer></alias>
@@ -1493,6 +1501,51 @@ try:
     except Exception:
         pass
     env = dict(os.environ, DISPLAY=':99', LANG='en_US.UTF-8', LC_CTYPE='en_US.UTF-8')
+    try:
+        in_use_shm = set()
+        for p in pathlib.Path('/proc').iterdir():
+            if not p.name.isdigit(): continue
+            try:
+                for fd in (p / 'fd').iterdir():
+                    try:
+                        t = os.readlink(fd)
+                        if t.startswith('/tmp/.org.chromium.Chromium.'):
+                            in_use_shm.add(t)
+                    except OSError:
+                        pass
+            except OSError:
+                pass
+        for item in pathlib.Path('/tmp').glob('.org.chromium.Chromium.*'):
+            if str(item) not in in_use_shm:
+                try: item.unlink()
+                except OSError: pass
+    except Exception:
+        pass
+    shared_cwd = None
+    try:
+        shared_dir = pathlib.Path('/mnt/agent-vm-shared')
+        if shared_dir.is_dir():
+            shared_cwd = str(shared_dir)
+            for link_name in ('共享文件夹', 'Shared'):
+                link = pathlib.Path.home() / link_name
+                if not link.exists() and not link.is_symlink():
+                    link.symlink_to(shared_dir)
+            bm_entries = [f'file://{shared_dir} 共享文件夹']
+            mnt_root = pathlib.Path('/mnt')
+            if mnt_root.is_dir():
+                for child in sorted(mnt_root.iterdir()):
+                    if child.name in ('agent-vm-shared', 'lima-cidata') or not child.is_dir():
+                        continue
+                    bm_entries.append(f'file://{child} {child.name}')
+            for gtk_ver in ('gtk-3.0', 'gtk-4.0'):
+                bm_dir = pathlib.Path.home() / '.config' / gtk_ver
+                bm_dir.mkdir(parents=True, exist_ok=True)
+                bm_file = bm_dir / 'bookmarks'
+                existing_bm = bm_file.read_text(errors='ignore').splitlines() if bm_file.exists() else []
+                existing_bm = [line for line in existing_bm if line.strip() and not line.startswith('file:///mnt/')]
+                bm_file.write_text('\n'.join(bm_entries + existing_bm) + '\n')
+    except Exception:
+        pass
 
     use_tiger = bool(xtigervnc)
     if use_tiger and proc_running(lambda a: any('Xvfb' in x for x in a[:2]) and ':99' in a):
@@ -1514,7 +1567,7 @@ try:
                 subprocess.Popen([
                     xtigervnc, ':99', '-localhost', '-rfbport', '5999',
                     '-SecurityTypes', 'None', '-geometry', f'{w}x{h}', '-depth', '24',
-                    '-dpi', '96', '-FrameRate=60', '-CompareFB=1',
+                    '-dpi', str(int(round(scale * 96))), '-FrameRate=60', '-CompareFB=1',
                     '-AcceptSetDesktopSize=1', '-AlwaysShared=1'
                 ], stdin=subprocess.DEVNULL, stdout=f, stderr=f, start_new_session=True)
             time.sleep(0.45)
@@ -1570,6 +1623,7 @@ try:
                     '--property=TimeoutStopSec=8s',
                     '--setenv=DISPLAY=:99',
                     '--setenv=LANG=en_US.UTF-8',
+                ] + ([f'--working-directory={shared_cwd}'] if shared_cwd else []) + [
                     '--'
                 ] + browser_args
                 attempt = subprocess.run(service_cmd, env=env, capture_output=True, text=True, timeout=8)
@@ -1577,7 +1631,7 @@ try:
                 if not managed:
                     f.write(('systemd-run fallback: ' + attempt.stderr + '\\n').encode())
             if not managed:
-                subprocess.Popen(browser_args, env=env, stdin=subprocess.DEVNULL,
+                subprocess.Popen(browser_args, env=env, cwd=shared_cwd, stdin=subprocess.DEVNULL,
                                  stdout=f, stderr=f, start_new_session=True)
         time.sleep(0.8)
 
@@ -1674,6 +1728,26 @@ stop_procs(lambda a: any('websockify' in x for x in a[:3]) and '127.0.0.1:5999' 
 stop_procs(lambda a: any('openbox' in x for x in a[:2]) and 'agent-vm-browser' in ' '.join(a))
 stop_procs(lambda a: any('x11vnc' in x for x in a[:2]) and '5999' in a)
 stop_procs(lambda a: any(('Xtigervnc' in x or 'Xvfb' in x) for x in a[:2]) and ':99' in a)
+try:
+    in_use_shm = set()
+    for p in pathlib.Path('/proc').iterdir():
+        if not p.name.isdigit(): continue
+        try:
+            for fd in (p / 'fd').iterdir():
+                try:
+                    t = os.readlink(fd)
+                    if t.startswith('/tmp/.org.chromium.Chromium.'):
+                        in_use_shm.add(t)
+                except OSError:
+                    pass
+        except OSError:
+            pass
+    for item in pathlib.Path('/tmp').glob('.org.chromium.Chromium.*'):
+        if str(item) not in in_use_shm:
+            try: item.unlink()
+            except OSError: pass
+except Exception:
+    pass
 """#
 
     static let resizeScript = #"""
