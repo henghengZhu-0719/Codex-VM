@@ -14,12 +14,14 @@ import {
   Network,
   Package,
   PanelLeft,
+  Play,
   Plus,
   RefreshCw,
   Search,
   Settings2,
   ShieldAlert,
   ShieldCheck,
+  Square,
 } from 'lucide-react';
 import './style.css';
 import {
