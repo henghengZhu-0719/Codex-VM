@@ -571,6 +571,53 @@ function App() {
           )}
 
           {isRemoteWeb && (
+            <section className="panel" aria-label="远程虚拟机管理" style={{ marginBottom: 16 }}>
+              <div className="flex-between" style={{ gap: 12, flexWrap: 'wrap' }}>
+                <div>
+                  <h2>远程虚拟机</h2>
+                  <p className="muted">在 Mac Pro 上运行。远程模式目前只支持查看、启动和停止，不开放删除或任意命令。</p>
+                </div>
+                <button className="secondary" disabled={!!state.busy} onClick={() => bridge('refresh')}>
+                  <RefreshCw size={15} /> 刷新
+                </button>
+              </div>
+              {vms.length === 0 ? (
+                <div className="muted">远程主机暂无可管理的虚拟机。</div>
+              ) : (
+                <div className="vm-grid">
+                  {vms.map(vm => {
+                    const runningVM = vm.status === 'Running';
+                    const stoppedVM = vm.status === 'Stopped';
+                    return (
+                      <div className="panel" key={vm.name} style={{ padding: 14, minWidth: 0 }}>
+                        <div className="flex-between" style={{ gap: 8 }}>
+                          <strong style={{ overflowWrap: 'anywhere' }}>{vm.displayName || vm.name}</strong>
+                          <span className="muted">{runningVM ? '运行中' : stoppedVM ? '已停止' : vm.status}</span>
+                        </div>
+                        <p className="muted">{vm.cpus} vCPU · {vm.memory} 内存 · {vm.disk} 磁盘</p>
+                        <div className="inline-actions">
+                          {stoppedVM && <button className="secondary" disabled={!!state.busy}
+                            onClick={() => bridge('remoteVMStart', { name: vm.name })}>
+                            <Play size={14} /> 启动
+                          </button>}
+                          {runningVM && <button className="secondary" disabled={!!state.busy}
+                            onClick={() => {
+                              if (window.confirm(`确定停止远程虚拟机「${vm.displayName || vm.name}」？正在运行的任务可能中断。`)) {
+                                bridge('remoteVMStop', { name: vm.name });
+                              }
+                            }}>
+                            <Square size={14} /> 停止
+                          </button>}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </section>
+          )}
+
+          {isRemoteWeb && (
             <ChatPage
               state={state}
               running={running}
