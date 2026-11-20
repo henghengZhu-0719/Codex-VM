@@ -7,10 +7,14 @@ export const getRemoteToken = () => {
   try {
     const q = new URLSearchParams(window.location.search).get('token');
     if (q) {
-      localStorage.setItem('agentvm.remoteToken', q);
+      sessionStorage.setItem('agentvm.remoteToken', q);
+      // Remove legacy token links from address bar and browser history.
+      const clean = new URL(window.location.href);
+      clean.searchParams.delete('token');
+      window.history.replaceState(null, '', clean.pathname + clean.search + clean.hash);
       return q;
     }
-    return localStorage.getItem('agentvm.remoteToken') || '';
+    return sessionStorage.getItem('agentvm.remoteToken') || '';
   } catch {
     return '';
   }
@@ -25,7 +29,7 @@ export const bridge = (action, payload = {}) => {
   if (isRemoteWeb) {
     const token = getRemoteToken();
     if (!token) return;
-    fetch('/api/action?token=' + encodeURIComponent(token), {
+    fetch('/api/action', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
       body: JSON.stringify({ action, payload }),
@@ -33,7 +37,7 @@ export const bridge = (action, payload = {}) => {
       .then(r => {
         if (r.status === 401) {
           try {
-            localStorage.removeItem('agentvm.remoteToken');
+            sessionStorage.removeItem('agentvm.remoteToken');
           } catch {}
           window.__agentVMRemoteAuthFail?.();
           return;
