@@ -1883,8 +1883,8 @@ print(json.dumps({
     }
     func remoteWorkbenchURLs() -> [String] {
         let ips = RemoteWorkbenchServer.localIPv4Addresses()
-        let q = remoteWorkbenchToken.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? remoteWorkbenchToken
-        return ips.map { "http://\($0):\(remoteWorkbenchPort)/?token=\(q)" }
+        // Never embed authentication tokens in URLs shown in the UI, history or logs.
+        return ips.map { "http://\($0):\(remoteWorkbenchPort)/" }
     }
     func runCodex(vm: VM, sessionId: String? = nil, workdir: String, prompt: String, mode: String, agent: String = "codex", resume: Bool, truncateFromMsgId: String? = nil) {
         let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
