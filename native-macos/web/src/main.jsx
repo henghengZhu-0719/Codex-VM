@@ -116,6 +116,7 @@ function App() {
   const [remoteTokenInput, setRemoteTokenInput] = useState('');
   const [remoteAuthFailed, setRemoteAuthFailed] = useState(false);
   const [remotePortInput, setRemotePortInput] = useState('18080');
+  const [remoteVMNames, setRemoteVMNames] = useState({});
   const [remoteHostForm, setRemoteHostForm] = useState({
     name: 'Mac Pro', hostname: '', username: '', sshPort: '22', workbenchPort: '18080',
   });
@@ -1286,8 +1287,8 @@ function App() {
                 </div>
               </section>
               <section className="panel">
-                <h2>远程主机 · SSH</h2>
-                <p className="muted">通过 EasyTier 内网 IP 连接另一台 Mac 的 Agent-VM 工作台。首次连接前请在远端开启 SSH（远程登录）和下方的远程工作台，并配置 SSH 密钥及 known_hosts。</p>
+                <h2>远程 VM · SSH 终端</h2>
+                <p className="muted">通过 EasyTier 连接 Mac Pro，然后直接进入指定 Linux 虚拟机使用 Claude Code / Codex CLI。无需启动远程网页工作台。请先配置 SSH 密钥和 known_hosts，远端虚拟机必须已运行。</p>
                 <div className="form-grid">
                   {[
                     ['name', '主机名称', 'Mac Pro'],
@@ -1315,9 +1316,21 @@ function App() {
                 {(state.remoteHosts || []).map(h => (
                   <div className="web-code-row" key={h.id} style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
                     <span style={{ flex: 1, minWidth: 160 }}>{h.name} · {h.username}@{h.hostname}:{h.sshPort}</span>
+                    <input
+                      aria-label={`目标虚拟机名称 - ${h.name}`}
+                      placeholder="VM 名称"
+                      style={{ width: 155 }}
+                      value={remoteVMNames[h.id] || ''}
+                      onChange={e => setRemoteVMNames(x => ({ ...x, [h.id]: e.target.value }))}
+                    />
+                    <button className="primary"
+                      disabled={!/^[a-zA-Z0-9._-]{1,80}$/.test(remoteVMNames[h.id] || '')}
+                      onClick={() => bridge('remoteVMTerminal', { id: h.id, vmName: remoteVMNames[h.id] })}>
+                      <Terminal size={14} /> 连接 VM
+                    </button>
                     <button className="secondary" disabled={state.remoteHostConnectionState === 'connecting'}
                       onClick={() => bridge('remoteHostConnect', { id: h.id })}>
-                      {state.activeRemoteHostID === h.id ? (state.remoteHostConnectionState === 'connecting' ? '正在连接…' : '重新连接') : '连接'}
+                      {state.activeRemoteHostID === h.id ? (state.remoteHostConnectionState === 'connecting' ? '正在连接网页…' : '网页重连') : '网页模式'}
                     </button>
                     {state.activeRemoteHostID === h.id && state.remoteHostConnectionState === 'connected' && (
                       <button className="secondary" onClick={() => bridge('remoteHostOpen')}>打开工作台</button>
@@ -1330,7 +1343,7 @@ function App() {
                 {!!state.activeRemoteHostID && <div className="inline-actions">
                   <button className="secondary" onClick={() => bridge('remoteHostDisconnect')}>断开连接</button>
                 </div>}
-                <p className="muted">连接后在系统浏览器打开 127.0.0.1 的 SSH 加密转发入口，输入远端生成的访问口令。当前先支持远程 Agent 工作台；完整的远程 VM/浏览器管理仍需后续扩展。</p>
+                <p className="muted">输入 Mac Pro 上的虚拟机名称，点击「连接 VM」即可在 Terminal 中打开虚拟机 Shell。网页模式是旧功能，可选；连接 VM 不依赖网页模式。</p>
               </section>
               <section className="panel">
                 <h2>本机远程工作台（提供给其他设备连接）</h2>
