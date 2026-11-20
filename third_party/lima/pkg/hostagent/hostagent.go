@@ -561,30 +561,6 @@ func (a *HostAgent) Screenshot(ctx context.Context, format string) ([]byte, erro
 	return s.CaptureScreenshot(format)
 }
 
-func (a *HostAgent) GetMemoryBalloon(ctx context.Context) (*driver.MemoryBalloonInfo, error) {
-	inner := a.driver
-	if cd, ok := a.driver.(*driver.ConfiguredDriver); ok {
-		inner = cd.Driver
-	}
-	b, ok := inner.(driver.MemoryBallooner)
-	if !ok {
-		return nil, fmt.Errorf("driver %q: %w", a.driver.Info(ctx).Name, driver.ErrDriverNotMemoryBallooner)
-	}
-	return b.GetMemoryBalloon()
-}
-
-func (a *HostAgent) SetMemoryBalloon(ctx context.Context, targetBytes uint64) (*driver.MemoryBalloonInfo, error) {
-	inner := a.driver
-	if cd, ok := a.driver.(*driver.ConfiguredDriver); ok {
-		inner = cd.Driver
-	}
-	b, ok := inner.(driver.MemoryBallooner)
-	if !ok {
-		return nil, fmt.Errorf("driver %q: %w", a.driver.Info(ctx).Name, driver.ErrDriverNotMemoryBallooner)
-	}
-	return b.SetMemoryBalloon(targetBytes)
-}
-
 func (a *HostAgent) Info(_ context.Context) (*hostagentapi.Info, error) {
 	info := &hostagentapi.Info{
 		AutoStartedIdentifier: autostart.AutoStartedIdentifier(),
