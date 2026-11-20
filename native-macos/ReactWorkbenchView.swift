@@ -364,6 +364,14 @@ struct ReactWorkbenchView: NSViewRepresentable {
             case "refresh":
                 model.refresh()
                 model.refreshProxyStatus()
+            case "remoteVMStart":
+                if let vm = existingVM(payload), vm.status == "Stopped", !model.busy {
+                    model.start(vm)
+                }
+            case "remoteVMStop":
+                if let vm = existingVM(payload), vm.status == "Running", !model.busy {
+                    model.stop(vm)
+                }
             case "refreshQuotas":
                 model.pollAllRunningQuotas()
             case "quota":
