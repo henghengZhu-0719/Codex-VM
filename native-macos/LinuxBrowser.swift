@@ -573,7 +573,13 @@ struct LinuxBrowserWebView: NSViewRepresentable {
                 let obj = line.flatMap { $0.data(using: .utf8) }.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
                 DispatchQueue.main.async {
                     self.checking.remove(name)
-                    guard let obj else { return }
+                    guard let obj else {
+                        var st = self.states[name] ?? LinuxBrowserState()
+                        st.error = "浏览器状态检查失败：请检查虚拟机 SSH 连接和脚本执行结果。"
+                        self.states[name] = st
+                        self.onChange?(self.states)
+                        return
+                    }
                     var st = self.states[name] ?? LinuxBrowserState()
                     let installed = obj["installed"] as? Bool ?? false
                     let appRunning = obj["appRunning"] as? Bool ?? false
@@ -1287,7 +1293,7 @@ if __name__ == "__main__":
     // MARK: - Guest Python Scripts
 
     static let statusScript = #"""
-import json, os, shutil, socket
+import json, os, shutil, socket, pathlib
 
 chromium = shutil.which('chromium') or shutil.which('chromium-browser') or shutil.which('google-chrome')
 websockify = shutil.which('websockify')
