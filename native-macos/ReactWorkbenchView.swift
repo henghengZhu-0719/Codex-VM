@@ -321,6 +321,7 @@ struct ReactWorkbenchView: NSViewRepresentable {
                      "username":h.username, "sshPort":h.sshPort, "workbenchPort":h.workbenchPort] as [String: Any]
                 },
                 "remoteHostStatus":model.remoteHostStatus,
+                "remoteHostConnectionState":model.remoteHostConnectionState,
                 "activeRemoteHostID":model.remoteHostConnection.activeHostID ?? "",
                 "remoteWorkbench":[
                     "enabled":model.remoteWorkbenchEnabled,
@@ -778,6 +779,8 @@ struct ReactWorkbenchView: NSViewRepresentable {
                    let host = model.remoteHosts.first(where: { $0.id == id }) {
                     model.remoteHostConnection.connect(host)
                 }
+            case "remoteHostOpen":
+                model.remoteHostConnection.openWorkbench()
             case "remoteHostDisconnect":
                 model.remoteHostConnection.disconnect()
             case "remoteHostRemove":
