@@ -236,7 +236,7 @@ struct CodexQuotaStatus: Decodable {
     }()
     @Published var remoteWorkbenchToken: String = {
         let t = UserDefaults.standard.string(forKey: "remoteWorkbenchToken") ?? ""
-        return t.isEmpty ? "Zhuyq020110" : t
+        return t == "Zhuyq020110" ? "" : t
     }()
     @Published var remoteWorkbenchError: String = ""
     let remoteWorkbenchServer = RemoteWorkbenchServer()
@@ -1807,7 +1807,7 @@ print(json.dumps({
         UserDefaults.standard.set(enabled, forKey: "remoteWorkbenchEnabled")
         if enabled {
             if remoteWorkbenchToken.isEmpty {
-                remoteWorkbenchToken = "Zhuyq020110"
+                remoteWorkbenchToken = Self.generateToken()
                 UserDefaults.standard.set(remoteWorkbenchToken, forKey: "remoteWorkbenchToken")
             }
             remoteWorkbenchServer.start(port: UInt16(remoteWorkbenchPort), token: remoteWorkbenchToken)
