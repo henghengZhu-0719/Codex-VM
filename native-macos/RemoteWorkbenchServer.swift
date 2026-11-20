@@ -94,6 +94,11 @@ final class RemoteWorkbenchServer {
                 if error != nil { conn.cancel(); return }
                 var acc = buffer
                 if let data { acc.append(data) }
+                // Cap the entire request, not just headers: reject oversized POST bodies.
+                if acc.count > 262144 {
+                    self.sendSimple(conn, status: "413 Payload Too Large", body: "Request too large")
+                    return
+                }
                 if let range = acc.range(of: Data("\r\n\r\n".utf8)) {
                     let headerData = acc.subdata(in: 0..<range.lowerBound)
                     let rest = acc.subdata(in: range.upperBound..<acc.count)
@@ -103,6 +108,10 @@ final class RemoteWorkbenchServer {
                     }
                     let lines = headerText.components(separatedBy: "\r\n")
                     let contentLength = self.parseContentLength(lines)
+                    guard contentLength <= 65536 else {
+                        self.sendSimple(conn, status: "413 Payload Too Large", body: "Request body too large")
+                        return
+                    }
                     if rest.count < contentLength && !isComplete {
                         self.receiveRequest(conn, buffer: acc)
                         return
@@ -232,7 +241,7 @@ final class RemoteWorkbenchServer {
         }
         let rel = path == "/" ? "index.html" : String(path.drop(while: { $0 == "/" }))
         let candidate = webRoot.appendingPathComponent(rel).standardizedFileURL
-        guard candidate.path.hasPrefix(webRoot.path),
+        guard candidate.path.hasPrefix(webRoot.path + "/"),
               FileManager.default.fileExists(atPath: candidate.path),
               var data = try? Data(contentsOf: candidate) else {
             let fallback = webRoot.appendingPathComponent("index.html")
