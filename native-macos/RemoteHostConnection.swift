@@ -88,7 +88,6 @@ final class RemoteHostConnection {
             "-o", "ConnectTimeout=8",
             "-o", "ServerAliveInterval=15",
             "-o", "ServerAliveCountMax=3",
-            "-o", "ClearAllForwardings=yes",
             "-p", String(host.sshPort),
             "-L", "127.0.0.1:\(port):127.0.0.1:\(host.workbenchPort)",
             "--", "\(host.username)@\(host.hostname)"
