@@ -321,6 +321,10 @@ struct ReactWorkbenchView: NSViewRepresentable {
                      "username":h.username, "sshPort":h.sshPort, "workbenchPort":h.workbenchPort] as [String: Any]
                 },
                 "remoteHostStatus":model.remoteHostStatus,
+                "remoteVMLists":model.remoteVMLists.mapValues { list in
+                    ["loading":list.loading, "error":list.error,
+                     "vms":list.vms.map { ["name":$0.name, "displayName":$0.displayName] }] as [String: Any]
+                },
                 "remoteHostConnectionState":model.remoteHostConnectionState,
                 "activeRemoteHostID":model.remoteHostConnection.activeHostID ?? "",
                 "remoteWorkbench":[
@@ -785,8 +789,14 @@ struct ReactWorkbenchView: NSViewRepresentable {
             case "remoteVMTerminal":
                 if let id = payload["id"] as? String,
                    let vmName = payload["vmName"] as? String,
+                   model.remoteVMLists[id]?.vms.contains(where: { $0.name == vmName }) == true,
                    let host = model.remoteHosts.first(where: { $0.id == id }) {
                     model.remoteHostConnection.openVMTerminal(host, vmName: vmName)
+                }
+            case "remoteVMList":
+                let id = payload["id"] as? String
+                for host in model.remoteHosts where id == nil || host.id == id {
+                    model.refreshRemoteVMs(host)
                 }
             case "remoteHostConnect":
                 if let id = payload["id"] as? String,

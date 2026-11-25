@@ -247,6 +247,7 @@ struct CodexQuotaStatus: Decodable {
     }()
     @Published var remoteHostStatus = "未连接"
     @Published var remoteHostConnectionState = "disconnected"
+    @Published private(set) var remoteVMLists: [String: RemoteVMList] = [:]
     let remoteHostConnection = RemoteHostConnection()
     let chatStore = AgentChatStore()
     private var codexProcesses: [String: Process] = [:]
@@ -1831,10 +1832,25 @@ print(json.dumps({
         remoteHosts.append(profile)
         remoteHostStatus = "已添加远程主机：\(title)"
         persistRemoteHosts()
+        refreshRemoteVMs(profile)
     }
+
+    func refreshRemoteVMs(_ host: RemoteHostProfile) {
+        guard remoteVMLists[host.id]?.loading != true else { return }
+        remoteVMLists[host.id] = RemoteVMList(loading: true, vms: remoteVMLists[host.id]?.vms ?? [])
+        Task { [weak self] in
+            let result = await Task.detached(priority: .utility) {
+                RemoteHostConnection.listVMs(host)
+            }.value
+            guard let self, self.remoteHosts.contains(where: { $0.id == host.id }) else { return }
+            self.remoteVMLists[host.id] = result
+        }
+    }
+
     func removeRemoteHost(_ id: String) {
         if remoteHostConnection.activeHostID == id { remoteHostConnection.disconnect() }
         remoteHosts.removeAll { $0.id == id }
+        remoteVMLists.removeValue(forKey: id)
         persistRemoteHosts()
     }
     func persistRemoteHosts() {

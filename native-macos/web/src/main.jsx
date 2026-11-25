@@ -22,6 +22,7 @@ import {
   ShieldAlert,
   ShieldCheck,
   Square,
+  Terminal,
 } from 'lucide-react';
 import './style.css';
 import {
@@ -65,6 +66,7 @@ const blank = {
   vmProxyRoutes: {},
   remoteWorkbench: { enabled: false, port: 18080, token: '', urls: [], error: '' },
   remoteHosts: [],
+  remoteVMLists: {},
   remoteHostStatus: '未连接',
   remoteHostConnectionState: 'disconnected',
   activeRemoteHostID: '',
@@ -116,7 +118,7 @@ function App() {
   const [remoteTokenInput, setRemoteTokenInput] = useState('');
   const [remoteAuthFailed, setRemoteAuthFailed] = useState(false);
   const [remotePortInput, setRemotePortInput] = useState('18080');
-  const [remoteVMNames, setRemoteVMNames] = useState({});
+  const [selectedRemoteVMs, setSelectedRemoteVMs] = useState({});
   const [remoteHostForm, setRemoteHostForm] = useState({
     name: 'Mac Pro', hostname: '', username: '', sshPort: '22', workbenchPort: '18080',
   });
@@ -214,6 +216,10 @@ function App() {
   useEffect(() => {
     if (state.remoteWorkbench?.port) setRemotePortInput(String(state.remoteWorkbench.port));
   }, [state.remoteWorkbench?.port]);
+
+  useEffect(() => {
+    if (!isRemoteWeb && page === 'settings') bridge('remoteVMList');
+  }, [page]);
 
   useEffect(() => {
     if (state.proxy && !proxyDirty) {
@@ -1288,7 +1294,6 @@ function App() {
               </section>
               <section className="panel">
                 <h2>远程 VM · SSH 终端</h2>
-                <p className="muted">通过 EasyTier 连接 Mac Pro，然后直接进入指定 Linux 虚拟机使用 Claude Code / Codex CLI。无需启动远程网页工作台。请先配置 SSH 密钥和 known_hosts，远端虚拟机必须已运行。</p>
                 <div className="form-grid">
                   {[
                     ['name', '主机名称', 'Mac Pro'],
@@ -1313,37 +1318,66 @@ function App() {
                 <div className={state.remoteHostConnectionState === 'error' ? 'notice error' : 'muted'} style={{ margin: '10px 0' }} role="status">
                   {state.remoteHostStatus || '未连接'}
                 </div>
-                {(state.remoteHosts || []).map(h => (
-                  <div className="web-code-row" key={h.id} style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
-                    <span style={{ flex: 1, minWidth: 160 }}>{h.name} · {h.username}@{h.hostname}:{h.sshPort}</span>
-                    <input
-                      aria-label={`目标虚拟机名称 - ${h.name}`}
-                      placeholder="VM 名称"
-                      style={{ width: 155 }}
-                      value={remoteVMNames[h.id] || ''}
-                      onChange={e => setRemoteVMNames(x => ({ ...x, [h.id]: e.target.value }))}
-                    />
-                    <button className="primary"
-                      disabled={!/^[a-zA-Z0-9._-]{1,80}$/.test(remoteVMNames[h.id] || '')}
-                      onClick={() => bridge('remoteVMTerminal', { id: h.id, vmName: remoteVMNames[h.id] })}>
-                      <Terminal size={14} /> 连接 VM
-                    </button>
-                    <button className="secondary" disabled={state.remoteHostConnectionState === 'connecting'}
-                      onClick={() => bridge('remoteHostConnect', { id: h.id })}>
-                      {state.activeRemoteHostID === h.id ? (state.remoteHostConnectionState === 'connecting' ? '正在连接网页…' : '网页重连') : '网页模式'}
-                    </button>
-                    {state.activeRemoteHostID === h.id && state.remoteHostConnectionState === 'connected' && (
-                      <button className="secondary" onClick={() => bridge('remoteHostOpen')}>打开工作台</button>
-                    )}
-                    <button className="secondary" onClick={() => {
-                      if (window.confirm(`确定移除远程主机「${h.name}」？`)) bridge('remoteHostRemove', { id: h.id });
-                    }}>移除</button>
-                  </div>
-                ))}
+                {(state.remoteHosts || []).map(h => {
+                  const list = state.remoteVMLists?.[h.id];
+                  const vms = list?.vms || [];
+                  const selected = vms.find(vm => vm.name === selectedRemoteVMs[h.id]);
+                  const placeholder = !list || list.loading ? '加载中…' : list.error ? '加载失败' : vms.length ? '选择 VM' : '暂无运行中的 VM';
+                  return (
+                    <div className="remote-host" key={h.id}>
+                      <div className="remote-host-heading">
+                        <strong>{h.name}</strong>
+                        <span className="muted">{h.username}@{h.hostname}:{h.sshPort}</span>
+                      </div>
+                      <div className="remote-host-actions">
+                        <select
+                          aria-label={`虚拟机 · ${h.name}`}
+                          value={selected?.name || ''}
+                          disabled={list?.loading || vms.length === 0}
+                          onChange={e => setSelectedRemoteVMs({ ...selectedRemoteVMs, [h.id]: e.target.value })}
+                        >
+                          <option value="" disabled>{placeholder}</option>
+                          {vms.map(vm => (
+                            <option key={vm.name} value={vm.name}>
+                              {vms.some(other => other.name !== vm.name && other.displayName === vm.displayName)
+                                ? `${vm.displayName} · ${vm.name}`
+                                : vm.displayName}
+                            </option>
+                          ))}
+                        </select>
+                        <IconButton title={`刷新虚拟机 · ${h.name}`} disabled={list?.loading}
+                          onClick={() => bridge('remoteVMList', { id: h.id })}>
+                          <RefreshCw size={14} />
+                        </IconButton>
+                        <button className="primary" disabled={!selected || list?.loading}
+                          onClick={() => bridge('remoteVMTerminal', { id: h.id, vmName: selected.name })}>
+                          <Terminal size={14} /> 连接 VM
+                        </button>
+                        <button className="secondary" disabled={state.remoteHostConnectionState === 'connecting'}
+                          onClick={() => bridge('remoteHostConnect', { id: h.id })}>
+                          {state.activeRemoteHostID === h.id ? (state.remoteHostConnectionState === 'connecting' ? '正在连接网页…' : '网页重连') : '网页模式'}
+                        </button>
+                        {state.activeRemoteHostID === h.id && state.remoteHostConnectionState === 'connected' && (
+                          <button className="secondary" onClick={() => bridge('remoteHostOpen')}>打开工作台</button>
+                        )}
+                        <button className="secondary" onClick={() => {
+                          if (window.confirm(`确定移除远程主机「${h.name}」？`)) {
+                            bridge('remoteHostRemove', { id: h.id });
+                            setSelectedRemoteVMs(old => {
+                              const next = { ...old };
+                              delete next[h.id];
+                              return next;
+                            });
+                          }
+                        }}>移除</button>
+                      </div>
+                      {list?.error && <div className="notice error" role="status">{list.error}</div>}
+                    </div>
+                  );
+                })}
                 {!!state.activeRemoteHostID && <div className="inline-actions">
                   <button className="secondary" onClick={() => bridge('remoteHostDisconnect')}>断开连接</button>
                 </div>}
-                <p className="muted">输入 Mac Pro 上的虚拟机名称，点击「连接 VM」即可在 Terminal 中打开虚拟机 Shell。网页模式是旧功能，可选；连接 VM 不依赖网页模式。</p>
               </section>
               <section className="panel">
                 <h2>本机远程工作台（提供给其他设备连接）</h2>

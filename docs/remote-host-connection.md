@@ -4,11 +4,11 @@
 
 本模式不需要网页工作台、远程浏览器或 VPS 运行虚拟机。1C1G VPS 只需承担 EasyTier 网络服务。
 
-1. Mac Pro 保持开机，先启动 Agent-VM 虚拟机，使用 `agent-vm list` 获取准确 VM 名称。
+1. Mac Pro 保持开机，先启动要连接的 Agent-VM 虚拟机。
 2. 两台 Mac 加入相同 EasyTier 网络；Mac Pro 在「系统设置 → 通用 → 共享」启用远程登录。
 3. Air 配置公钥 SSH 认证，并首次通过 `ssh USER@EASYTIER_IP` 手工验证主机指纹和 known_hosts。
 4. Air 打开 Agent-VM → 设置 →「远程 VM · SSH 终端」，添加 Mac Pro 的 EasyTier IP 和 SSH 用户；工作台端口与 CLI 模式无关。
-5. 输入 VM 名称，点击「连接 VM」。系统 Terminal 会通过 SSH 连接 Mac Pro，再借助 Mac Pro 上的 Lima ssh.config 进入 Linux VM。
+5. 在主机下选择一台运行中的 VM，点击「连接 VM」。列表显示远端应用里的别名，连接时使用 Lima 名称。系统 Terminal 会通过 SSH 连接 Mac Pro，再使用 Lima 的 ssh.config 进入 Linux VM。
 6. 在 Linux Shell 内直接使用 `claude`、`codex`、`opencode` 等已安装的 CLI。
 
 连接路径：Air Terminal → EasyTier SSH → Mac Pro SSH → Lima VM SSH → Linux CLI。

@@ -3,7 +3,7 @@ import AppKit
 import Darwin
 
 // SSH forwarding only: the remote host owns its VMs, sessions, browser and files.
-struct RemoteHostProfile: Codable, Identifiable {
+struct RemoteHostProfile: Codable, Identifiable, Sendable {
     var id: String
     var name: String
     var hostname: String
@@ -30,6 +30,17 @@ struct RemoteHostProfile: Codable, Identifiable {
         let chars = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-")
         return s.unicodeScalars.allSatisfy { chars.contains($0) }
     }
+}
+
+struct RemoteVMOption: Sendable {
+    let name: String
+    let displayName: String
+}
+
+struct RemoteVMList: Sendable {
+    var loading = false
+    var vms: [RemoteVMOption] = []
+    var error = ""
 }
 
 @MainActor
@@ -60,13 +71,96 @@ final class RemoteHostConnection {
     }
 
 
-    // Enter a VM on the remote Mac using nested SSH. No HTTP server is needed.
-    // VM names and SSH endpoints are validated before appearing in shell commands.
-    func openVMTerminal(_ host: RemoteHostProfile, vmName: String) {
+    nonisolated private static func isValidVMName(_ name: String) -> Bool {
         let safe = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
-        guard RemoteHostProfile.isValid(host), !vmName.isEmpty, vmName.count <= 80,
-              !vmName.hasPrefix("-"), vmName != ".", vmName != "..",
-              vmName.unicodeScalars.allSatisfy({ safe.contains($0) }) else {
+        return !name.isEmpty && name.count <= 80 && !name.hasPrefix("-") && name != "." && name != ".."
+            && name.unicodeScalars.allSatisfy { safe.contains($0) }
+    }
+
+    nonisolated static func listVMs(_ host: RemoteHostProfile) -> RemoteVMList {
+        guard RemoteHostProfile.isValid(host) else {
+            return RemoteVMList(error: "远程主机信息无效")
+        }
+        let process = Process()
+        let output = Pipe()
+        let quotedScript = vmListCommand.replacingOccurrences(of: "'", with: "'\\''")
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+        process.arguments = ["-T"] + sshOptions(host) + ["/bin/sh -c '\(quotedScript)'"]
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = output
+        process.standardError = output
+        do {
+            try process.run()
+        } catch {
+            return RemoteVMList(error: "无法启动 SSH（\(error.localizedDescription)）")
+        }
+
+        let timeout = DispatchWorkItem {
+            if process.isRunning { process.terminate() }
+        }
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 20, execute: timeout)
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        timeout.cancel()
+        let lines = String(decoding: data, as: UTF8.self).split(whereSeparator: \.isNewline)
+        guard process.terminationReason == .exit else {
+            return RemoteVMList(error: "读取远程 VM 超时")
+        }
+        guard process.terminationStatus == 0, lines.contains("agent-vm-list-end") else {
+            let detail = lines.last.map { String($0.prefix(240)) } ?? "SSH 退出码 \(process.terminationStatus)"
+            return RemoteVMList(error: "无法加载远程 VM（\(detail)）")
+        }
+
+        let aliasPrefix = "agent-vm-aliases "
+        let namePrefix = "agent-vm-name "
+        let aliasData = lines.first { $0.hasPrefix(aliasPrefix) }.map { Data($0.dropFirst(aliasPrefix.count).utf8) }
+        let aliases = aliasData.flatMap { try? JSONDecoder().decode([String: String].self, from: $0) } ?? [:]
+        let options: [RemoteVMOption] = lines.compactMap { line in
+            guard line.hasPrefix(namePrefix) else { return nil }
+            let name = String(line.dropFirst(namePrefix.count))
+            guard isValidVMName(name) else { return nil }
+            let alias = aliases[name]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return RemoteVMOption(name: name, displayName: alias.isEmpty ? name : alias)
+        }
+        return RemoteVMList(vms: options.sorted { lhs, rhs in
+            let order = lhs.displayName.localizedStandardCompare(rhs.displayName)
+            return order == .orderedSame ? lhs.name < rhs.name : order == .orderedAscending
+        })
+    }
+
+    nonisolated private static let vmListCommand = #"""
+        cli='/Applications/Agent VM.app/Contents/MacOS/agent-vm'
+        if [ ! -x "$cli" ]; then
+            cli="$HOME/.local/bin/agent-vm"
+        fi
+        if [ ! -x "$cli" ]; then
+            cli=$(command -v agent-vm) || { printf '%s\n' '远端找不到 agent-vm' >&2; exit 1; }
+        fi
+        vms=$("$cli" list) || exit $?
+        aliases=$(/usr/bin/defaults export org.agentvm.desktop - 2>/dev/null |
+            /usr/bin/plutil -extract vmAliases json -o - - 2>/dev/null) || aliases='{}'
+        printf 'agent-vm-aliases %s\n' "$aliases"
+        printf '%s\n' "$vms" | /usr/bin/awk '
+            {
+                offset = ($1 == ">")
+                name = $(1 + offset)
+                if ($(2 + offset) == "Running" && name != "base" && name != "base-building")
+                    print "agent-vm-name " name
+            }
+        ' || exit $?
+        printf '%s\n' 'agent-vm-list-end'
+        """#
+
+    nonisolated private static func sshOptions(_ host: RemoteHostProfile) -> [String] {
+        ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=10",
+         "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3",
+         "-o", "ForwardAgent=no", "-o", "ForwardX11=no",
+         "-p", String(host.sshPort), "--", "\(host.username)@\(host.hostname)"]
+    }
+
+    // Enter a VM on the remote Mac using nested SSH.
+    func openVMTerminal(_ host: RemoteHostProfile, vmName: String) {
+        guard RemoteHostProfile.isValid(host), Self.isValidVMName(vmName) else {
             updateState("error", "远程主机或 VM 名称无效")
             return
         }
@@ -74,11 +168,7 @@ final class RemoteHostConnection {
         // relying on an interactive login shell's working directory.
         let remoteCommand = "cd && exec /usr/bin/ssh -F .agent-vm/lima/" + vmName +
             "/ssh.config -o ForwardAgent=no -o ForwardX11=no -tt lima-" + vmName
-        let endpoint = host.username + "@" + host.hostname
-        let command = "exec /usr/bin/ssh -tt -o BatchMode=yes -o StrictHostKeyChecking=yes " +
-            "-o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 " +
-            "-o ForwardAgent=no -o ForwardX11=no -p \(host.sshPort) -- " +
-            endpoint + " " + remoteCommand
+        let command = (["exec", "/usr/bin/ssh", "-tt"] + Self.sshOptions(host) + [remoteCommand]).joined(separator: " ")
         do {
             let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
                 "agent-vm-remote-terminal-" + UUID().uuidString, isDirectory: true)
