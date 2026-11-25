@@ -168,7 +168,7 @@ final class RemoteHostConnection {
         // relying on an interactive login shell's working directory.
         let remoteCommand = "cd && exec /usr/bin/ssh -F .agent-vm/lima/" + vmName +
             "/ssh.config -o ForwardAgent=no -o ForwardX11=no -tt lima-" + vmName
-        let command = (["exec", "/usr/bin/ssh", "-tt"] + Self.sshOptions(host) + [remoteCommand]).joined(separator: " ")
+        let command = (["exec", "/usr/bin/ssh", "-tt"] + Self.sshOptions(host) + ["'\(remoteCommand)'"]).joined(separator: " ")
         do {
             let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
                 "agent-vm-remote-terminal-" + UUID().uuidString, isDirectory: true)
