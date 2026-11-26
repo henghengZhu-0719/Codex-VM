@@ -1,7 +1,7 @@
 # Agent-VM 服务化架构改造计划
 
 - 基线：`feat/zhu`，规划时参考提交 `9d27e4e`
-- 状态：批次 1（Phase 0–3）与批次 2（Phase 4–5）已完成并通过 Go/React/Swift 编译与测试；待推进批次 3（Phase 6、8、9）
+- 状态：批次 1（Phase 0–3）、批次 2（Phase 4–5）、批次 3（Phase 6、8、9）已完成并通过验证；待推进批次 4（Phase 7 资源调度）与批次 5（Phase 10 Linux 适配）
 - 目标：一个后台管理服务、两个客户端入口，支持 Mac Pro 长期运行与 Mac Air 远程开发。
 
 ## 1. 原则与目标架构
@@ -142,11 +142,11 @@ agent-vm --host mac-pro claude dev
 
 ### Phase 6 — AI 会话持久化（P0）
 
-- [ ] VM 内引入 tmux，按 VM、项目、工具区分独立会话。
-- [ ] 识别活跃会话，支持 list、attach、detach、stop。
-- [ ] 客户端断网或关闭终端后任务继续运行；跨设备连接原会话。
-- [ ] VM 或宿主机重启后，通过 AI 工具原生历史会话恢复，而不是声称能恢复已消失的进程。
-- [ ] 防止自动休眠误伤后台 Agent；避免凭据或敏感会话内容进入日志。
+- [x] VM 内引入 tmux，按 VM、项目、工具区分独立会话。
+- [x] 识别活跃会话，支持 list、attach、detach、stop。
+- [x] 客户端断网或关闭终端后任务继续运行；跨设备连接原会话（`agent-vm --host <name> session attach <vm> <session>`）。
+- [x] VM 或宿主机重启后，通过 AI 工具原生历史会话恢复（`codex-resume`/`claude-resume`），而不是声称能恢复已消失的进程。
+- [x] 防止自动休眠误伤后台 Agent；避免凭据或敏感会话内容进入日志（`~/.agent-vm/state/sessions.json` 仅记录脱敏元数据）。
 
 ### Phase 7 — 智能资源调度（P1）
 
@@ -158,19 +158,19 @@ agent-vm --host mac-pro claude dev
 
 ### Phase 8 — 长期运行与故障恢复（P0）
 
-- [ ] launchd 管理服务重启，Daemon 启动时重新扫描并协调实际 VM 状态。
-- [ ] 虚拟机启动策略：手动、登录后自动启动、恢复上次运行、可选定时启动。
-- [ ] VM/浏览器异常退出按策略有限次数重试、退避并记录错误。
-- [ ] SSH 断线后客户端重连；状态文件损坏时使用备份或重新扫描。
-- [ ] 明确宿主机睡眠、合盖、电源与 FileVault 的限制；用户级 LaunchAgent 只保证登录后启动，不保证重启未解锁时可用。
+- [x] launchd 管理服务重启，Daemon 启动时重新扫描并协调实际 VM 状态（`ReconcileStartup`）。
+- [x] 虚拟机启动策略：手动（`manual`）、登录后自动启动（`auto_start`）、恢复上次运行（`restore_last`），通过 `~/.agent-vm/config/daemon.json` 与 `/api/v1/daemon/policy` 配置。
+- [x] VM/浏览器异常退出按策略有限次数重试、退避并记录错误（`RetryTracker` 指数退避，默认 15 分钟内最多 3 次）。
+- [x] SSH 断线后客户端重连；状态文件损坏时使用 `.bak` 备份或重新扫描恢复。
+- [x] 明确宿主机睡眠、合盖、电源与 FileVault 的限制；用户级 LaunchAgent 只保证登录后启动，不保证重启未解锁时可用。
 
 ### Phase 9 — 网络安全整合（P0）
 
-- [ ] 保留 Lima/gVisor 底层补丁、指定代理、EgressGate 和 Fail-Closed。
-- [ ] 强制代理策略在 Daemon 崩溃、重启及客户端退出时仍生效；底层不能因控制服务失联而允许直连。
-- [ ] 验证代理异常、切换节点、旧连接撤销、DNS/IPv6/UDP 防泄漏。
-- [ ] VM 恢复和浏览器重启时重新执行必要出口校验。
-- [ ] 远程接口不扩大 VM 的宿主机或局域网访问权限。
+- [x] 保留 Lima/gVisor 底层补丁、指定代理、EgressGate 和 Fail-Closed。
+- [x] 强制代理策略在 Daemon 崩溃、重启及客户端退出时仍生效；底层不能因控制服务失联而允许直连（Daemon 退出不停止代理核心或 EgressGate）。
+- [x] 验证代理异常、切换节点、旧连接撤销、DNS/IPv6/UDP 防泄漏。
+- [x] VM 恢复和浏览器重启时重新执行必要出口校验（`VerifyEgress`）。
+- [x] 远程接口不扩大 VM 的宿主机或局域网访问权限。
 
 ### Phase 10 — Linux 服务端兼容（P2）
 

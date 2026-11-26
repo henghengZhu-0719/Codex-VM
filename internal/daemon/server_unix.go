@@ -36,10 +36,10 @@ var namePattern=regexp.MustCompile("^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$")
 func SocketPath(state string) string { return filepath.Join(state,"run","agent-vm.sock") }
 
 func Handler(inventory Inventory) http.Handler {
- return handler(inventory,nil,nil)
+	return handler(inventory, nil, nil, "")
 }
 
-func handler(inventory Inventory, tasks *TaskManager, shutdown <-chan struct{}) http.Handler {
+func handler(inventory Inventory, tasks *TaskManager, shutdown <-chan struct{}, stateDir string) http.Handler {
 	mux := http.NewServeMux()
 	fail := func(w http.ResponseWriter, err error) {
 		status := http.StatusServiceUnavailable
@@ -95,6 +95,7 @@ func handler(inventory Inventory, tasks *TaskManager, shutdown <-chan struct{}) 
 		registerTaskRoutes(mux, inventory, tasks, shutdown)
 	}
 	registerHostRoutes(mux, inventory)
+	registerPolicyRoutes(mux, stateDir)
 	registerManagerRoutes(mux, inventory, tasks)
 	registerBrowserRoutes(mux, inventory, tasks)
 	registerResourceRoutes(mux, inventory)
@@ -150,27 +151,22 @@ func Serve(ctx context.Context,state string, inventory Inventory) error {
  pollDone:=make(chan struct{})
  go func(){defer close(pollDone);pollQuotas(streamCtx,inventory,tasks)}()
  defer func(){stopStreams();<-pollDone}()
- srv:=&http.Server{Handler:handler(inventory,tasks,streamCtx.Done()),ReadHeaderTimeout:5*time.Second,ReadTimeout:10*time.Second,WriteTimeout:30*time.Second,IdleTimeout:30*time.Second,MaxHeaderBytes:16<<10}
- stopped:=make(chan struct{})
- shutdownDone:=make(chan struct{})
- go func(){defer close(shutdownDone);select{case <-ctx.Done():
-  shutdown,cancel:=context.WithTimeout(context.Background(),10*time.Second)
-  defer cancel()
-  if srv.Shutdown(shutdown)!=nil{_ = srv.Close()}
- case <-stopped:}}()
-	reconcileCtx, cancelReconcile := context.WithTimeout(streamCtx, 10*time.Second)
-	if vms, rerr := inventory.List(reconcileCtx); rerr != nil {
-		slog.Warn("initial VM reconciliation failed", "error", rerr)
-	} else {
-		running := 0
-		for _, v := range vms {
-			if v.Status == "Running" {
-				running++
+	srv := &http.Server{Handler: handler(inventory, tasks, streamCtx.Done(), state), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16 << 10}
+	stopped := make(chan struct{})
+	shutdownDone := make(chan struct{})
+	go func() {
+		defer close(shutdownDone)
+		select {
+		case <-ctx.Done():
+			shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if srv.Shutdown(shutdown) != nil {
+				_ = srv.Close()
 			}
+		case <-stopped:
 		}
-		slog.Info("initial VM reconciliation complete", "total_vms", len(vms), "running_vms", running)
-	}
-	cancelReconcile()
+	}()
+	ReconcileStartup(streamCtx, state, inventory, tasks)
 	slog.Info("agent-vm daemon listening")
  err=srv.Serve(listener)
  stopStreams()

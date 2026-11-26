@@ -257,7 +257,7 @@ func TestSecurityHeadersAndUnifiedErrorFormat(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer tm.Close(context.Background())
-	h := handler(fb, tm, nil)
+	h := handler(fb, tm, nil, "")
 
 	// Reject Origin header (no browser CORS).
 	rec := doReq(h, http.MethodGet, "/health", nil, map[string]string{"Origin": "https://evil.example"})
@@ -315,7 +315,7 @@ func TestTaskIdempotencyAndCancellation(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer tm.Close(context.Background())
-	h := handler(fb, tm, nil)
+	h := handler(fb, tm, nil, "")
 
 	// Submit with Idempotency-Key.
 	r1 := doReq(h, http.MethodPost, "/api/v1/vms/dev-1234/start", nil, map[string]string{"Idempotency-Key": "req-001"})
@@ -444,7 +444,7 @@ func TestAllManagerAndHostEndpoints(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer tm.Close(context.Background())
-	h := handler(fb, tm, nil)
+	h := handler(fb, tm, nil, "")
 
 	// Hosts CRUD.
 	rAddHost := doReq(h, http.MethodPost, "/api/v1/hosts", remote.Host{Name: "mac-pro", Address: "10.0.0.2", User: "dev", Port: 22}, nil)
@@ -499,7 +499,7 @@ func TestSSEEventStream(t *testing.T) {
 	}
 	defer tm.Close(context.Background())
 	shutdown := make(chan struct{})
-	h := handler(fb, tm, shutdown)
+	h := handler(fb, tm, shutdown, "")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

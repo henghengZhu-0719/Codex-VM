@@ -14,6 +14,7 @@ import (
 
 	"github.com/sylvinus/agent-vm/internal/daemon"
 	"github.com/sylvinus/agent-vm/internal/remote"
+	guestsess "github.com/sylvinus/agent-vm/internal/session"
 	"github.com/sylvinus/agent-vm/internal/state"
 )
 
@@ -227,6 +228,9 @@ func remoteHostCommand(hostName string, args []string, streams IO) int {
 
 	cmd, rest := args[0], args[1:]
 	switch cmd {
+	case "session":
+		return remoteSessionCommand(h, rest, streams)
+
 	case "shell", "sh", "codex", "claude", "opencode", "vibe", "pi":
 		if len(rest) < 1 {
 			return usage()
@@ -345,6 +349,96 @@ func remoteHostCommand(hostName string, args []string, streams IO) int {
 	default:
 		return usage()
 	}
+}
+
+func remoteSessionCommand(h remote.Host, args []string, streams IO) int {
+	usage := func() int {
+		fmt.Fprintln(streams.Stderr, "Usage: agent-vm --host NAME session <list VM | tools VM | install-tmux VM | create VM SESSION [agent] | attach VM SESSION | stop VM SESSION --confirm>")
+		return exitUsage
+	}
+	if len(args) < 2 || !remote.ValidVMName(args[1]) {
+		return usage()
+	}
+	sub, vmName := args[0], args[1]
+	if sub == "attach" {
+		if len(args) != 3 || !guestsess.ValidName(args[2]) {
+			return usage()
+		}
+		ctx, cancel := endedBySignal(context.Background())
+		defer cancel()
+		code, err := remote.AttachVMSession(ctx, h, vmName, args[2], streams.Stdin, streams.Stdout, streams.Stderr)
+		if err != nil {
+			fmt.Fprintf(streams.Stderr, "Error: %v\n", err)
+			return code
+		}
+		return code
+	}
+	c := remoteDaemonClient(h)
+	defer c.Close()
+	basePath := "/api/v1/vms/" + vmName + "/sessions"
+	var result any
+	var err error
+	switch sub {
+	case "list":
+		if len(args) != 2 {
+			return usage()
+		}
+		err = c.Get(context.Background(), basePath, &result)
+	case "tools":
+		if len(args) != 2 {
+			return usage()
+		}
+		err = c.Get(context.Background(), basePath+"/tools", &result)
+	case "install-tmux":
+		if len(args) != 2 {
+			return usage()
+		}
+		var task daemon.Task
+		if err = c.SubmitEmpty(context.Background(), basePath+"/install-tmux", &task); err != nil {
+			fmt.Fprintf(streams.Stderr, "Error: %v\n", err)
+			return 1
+		}
+		return waitOrPrintRemoteTask(c, task, false, streams)
+	case "create":
+		if len(args) < 3 || len(args) > 4 || !guestsess.ValidName(args[2]) {
+			return usage()
+		}
+		agent := "shell"
+		if len(args) == 4 {
+			agent = args[3]
+		}
+		if !guestsess.ValidAgent(agent) {
+			return usage()
+		}
+		var task daemon.Task
+		if err = c.SubmitManager(context.Background(), basePath+"/create", daemon.SessionRequest{Name: args[2], Agent: agent}, &task); err != nil {
+			fmt.Fprintf(streams.Stderr, "Error: %v\n", err)
+			return 1
+		}
+		return waitOrPrintRemoteTask(c, task, false, streams)
+	case "stop":
+		if len(args) != 4 || args[3] != "--confirm" || !guestsess.ValidName(args[2]) {
+			return usage()
+		}
+		var task daemon.Task
+		if err = c.SubmitManager(context.Background(), basePath+"/stop", daemon.SessionRequest{Name: args[2]}, &task); err != nil {
+			fmt.Fprintf(streams.Stderr, "Error: %v\n", err)
+			return 1
+		}
+		return waitOrPrintRemoteTask(c, task, false, streams)
+	default:
+		return usage()
+	}
+	if err != nil {
+		fmt.Fprintf(streams.Stderr, "Error: %v\n", err)
+		return 1
+	}
+	enc := json.NewEncoder(streams.Stdout)
+	enc.SetIndent("", "  ")
+	if err = enc.Encode(result); err != nil {
+		return 1
+	}
+	return 0
 }
 
 func waitOrPrintRemoteTask(c *daemon.Client, task daemon.Task, async bool, streams IO) int {

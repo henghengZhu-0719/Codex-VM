@@ -3,8 +3,10 @@ package session
 import (
 	"context"
 	"io"
+	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sylvinus/agent-vm/internal/vm"
 )
@@ -57,5 +59,28 @@ func TestListAndInspectTools(t *testing.T) {
 	}
 	if err := Create(context.Background(), &stubBackend{}, "vm-1", "/work", "bad name!", "codex"); err == nil || !strings.Contains(err.Error(), "invalid") {
 		t.Fatalf("Create should reject bad name, got %v", err)
+	}
+}
+
+func TestSessionSnapshotPersistence(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now().UTC().Truncate(time.Second)
+	if err := SaveVMSessions(dir, "vm-1", []Session{{Name: "work", Agent: "codex", Attached: 0, CreatedAt: now, LastActivity: now}}); err != nil {
+		t.Fatalf("SaveVMSessions failed: %v", err)
+	}
+	info, err := os.Stat(SnapshotPath(dir))
+	if err != nil || info.Mode().Perm() != 0600 {
+		t.Fatalf("sessions.json perm = %v, want 0600", info.Mode().Perm())
+	}
+	snap, err := LoadSnapshot(dir)
+	if err != nil || len(snap.VMs["vm-1"]) != 1 || snap.VMs["vm-1"][0].Name != "work" {
+		t.Fatalf("LoadSnapshot = %+v, err=%v", snap, err)
+	}
+	if err := SaveVMSessions(dir, "vm-1", nil); err != nil {
+		t.Fatalf("clear VM sessions failed: %v", err)
+	}
+	snap2, err := LoadSnapshot(dir)
+	if err != nil || len(snap2.VMs) != 0 {
+		t.Fatalf("expected empty VMs after clear, got %+v", snap2)
 	}
 }

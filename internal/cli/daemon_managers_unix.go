@@ -75,7 +75,24 @@ func (d *daemonInventory) NetworkQuery(ctx context.Context,kind,node string)(any
  return nil,errors.New("unsupported network query")
 }
 
-func (d *daemonInventory) ChangeProxy(ctx context.Context,in daemon.ProxyRequest)error{
+func (d *daemonInventory) VerifyEgress(ctx context.Context) error {
+	s, err := managedproxy.Load(string(d.app.state))
+	if err != nil {
+		// No managed proxy config exists yet; default host network isolation applies.
+		return nil
+	}
+	if !s.ManagedEnabled {
+		return nil
+	}
+	checkCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	if !managedproxy.Running(checkCtx, string(d.app.state), s) {
+		return errors.New("managed proxy is enabled but core is not running; fail-closed egress check failed")
+	}
+	return nil
+}
+
+func (d *daemonInventory) ChangeProxy(ctx context.Context, in daemon.ProxyRequest) error {
  d.mu.Lock();defer d.mu.Unlock()
  if !daemon.ValidateProxyRequest(in){return errors.New("unsupported proxy action")}
  if err:=ctx.Err();err!=nil{return err}

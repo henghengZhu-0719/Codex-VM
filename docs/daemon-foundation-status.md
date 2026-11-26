@@ -133,3 +133,12 @@ The inventory API is read-only; explicit lifecycle requests can change VM state.
 - Added native Swift Unix-socket `DaemonClient` and auto-reconnecting `DaemonEventStream` (`native-macos/DaemonClient.swift`) wired into `AgentVMApp.swift` and `ReactWorkbenchView.swift`; VM start/stop routes through the background Daemon when connected, and closing Desktop only closes the SSE socket without stopping the Daemon or active tasks.
 - Upgraded `RemoteHostConnection.swift` and React UI (`native-macos/web/src/main.jsx`) to display all remote VM states (including Stopped), support remote start/stop via SSH daemon commands, and display live Daemon SSE status and cancellable task queue.
 - Verified Go (`-race`), React (`vite build`), and macOS SwiftUI build (`native-macos/build.sh`).
+
+
+## Batch 3 completion and verification (Phase 6, 8, 9)
+
+- Added cross-device remote tmux session attach (`remote.AttachVMSession`) and `agent-vm --host NAME session <list|tools|install-tmux|create|attach|stop>` routing in `internal/cli/host_unix.go`.
+- Added sanitized session metadata snapshot store (`internal/session/store.go`, `~/.agent-vm/state/sessions.json`, `0600`, no credentials or terminal contents).
+- Added daemon startup policy (`~/.agent-vm/config/daemon.json`, `GET/PUT /api/v1/daemon/policy`: `manual`, `auto_start`, `restore_last`), last-running VM snapshot (`~/.agent-vm/state/vms.json`) with `.bak` corrupt recovery, `ReconcileStartup`, and bounded exponential-backoff `RetryTracker` (`internal/daemon/recovery_unix.go`, `internal/daemon/recovery_test.go`).
+- Integrated Fail-Closed egress verification (`VerifyEgress`) on daemon VM start and browser start/restart; verified daemon shutdown never stops managed proxy core or EgressGate.
+- Verified `go build ./...`, `go vet ./...`, and `go test -race -v ./internal/daemon ./internal/remote ./internal/session ./internal/cli` all pass.

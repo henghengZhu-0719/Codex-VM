@@ -76,6 +76,7 @@ func (d *daemonInventory) Change(ctx context.Context,name,action string)(daemon.
   opts.ReadOnly=allReadOnly(inst)
   s:=&start{app:d.app,ctx:ctx,opts:opts,dir:project,name:name}
   if err=s.ensureRunningLocked();err!=nil{return daemon.VM{},err}
+  if err=d.VerifyEgress(ctx);err!=nil{return daemon.VM{},err}
  case "delete":
   if inst.Status!=vm.Stopped{return daemon.VM{},errors.New("stop VM before deletion")}
   if !d.app.deleteVM(ctx,name){return daemon.VM{},errors.New("VM deletion not verified")}
@@ -94,6 +95,13 @@ func (d *daemonInventory) Change(ctx context.Context,name,action string)(daemon.
  }
  inst,err=d.instance(ctx,name);if err!=nil{return daemon.VM{},err}
  if (action=="start" && inst.Status!=vm.Running)||((action=="stop"||action=="idle-stop") && inst.Status!=vm.Stopped){return daemon.VM{},errors.New("VM did not reach requested state")}
+ if vms, lerr := d.app.lookVMs(ctx); lerr == nil {
+  out := make([]daemon.VM, 0, len(vms))
+  for _, v := range vms {
+   out = append(out, vmDTO(v))
+  }
+  _ = daemon.SaveVMState(string(d.app.state), out)
+ }
  return vmDTO(inst),nil
 }
 

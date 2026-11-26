@@ -16,13 +16,19 @@ import (
 )
 
 var (
-	vmNameRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$`)
-	sshBin   = "ssh"
+	vmNameRe      = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$`)
+	sessionNameRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}$`)
+	sshBin        = "ssh"
 )
 
 // ValidVMName reports whether name is safe to pass to remote Lima/SSH commands.
 func ValidVMName(name string) bool {
 	return vmNameRe.MatchString(name) && name != "base" && name != "base-building"
+}
+
+// ValidSessionName reports whether name is safe for a remote guest tmux session.
+func ValidSessionName(name string) bool {
+	return sessionNameRe.MatchString(name)
 }
 
 // SSHBaseArgs builds hardened OpenSSH arguments for connecting to host.
@@ -156,6 +162,38 @@ func ExecVMPty(ctx context.Context, h Host, vmName, tool string, extraArgs []str
 		inner := "exec zsh -l -c " + shellQuote("exec "+strings.Join(quoted, " "))
 		remoteVMSSH += " " + shellQuote(inner)
 	}
+	args := append([]string{"-tt"}, SSHBaseArgs(h, false)...)
+	args = append(args, remoteVMSSH)
+	cmd := exec.CommandContext(ctx, sshBin, args...)
+	cmd.Stdin = stdin
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	err := cmd.Run()
+	if err == nil {
+		return 0, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return exitErr.ExitCode(), nil
+	}
+	return 1, err
+}
+
+// AttachVMSession opens a direct interactive SSH PTY attached to a named tmux session
+// inside a VM on a remote host (cross-device session resume without web workbench).
+func AttachVMSession(ctx context.Context, h Host, vmName, sessionName string, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
+	if err := Validate(h); err != nil {
+		return 1, err
+	}
+	if !ValidVMName(vmName) {
+		return 2, fmt.Errorf("invalid VM name: %q", vmName)
+	}
+	if !ValidSessionName(sessionName) {
+		return 2, fmt.Errorf("invalid session name: %q", sessionName)
+	}
+	inner := fmt.Sprintf("exec tmux -L agent-vm attach-session -t =%s", sessionName)
+	remoteVMSSH := fmt.Sprintf("cd && exec /usr/bin/ssh -F .agent-vm/lima/%s/ssh.config -o ForwardAgent=no -o ForwardX11=no -tt lima-%s %s",
+		vmName, vmName, shellQuote(inner))
 	args := append([]string{"-tt"}, SSHBaseArgs(h, false)...)
 	args = append(args, remoteVMSSH)
 	cmd := exec.CommandContext(ctx, sshBin, args...)

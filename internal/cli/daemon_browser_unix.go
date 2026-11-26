@@ -31,6 +31,9 @@ func (d *daemonInventory) BrowserChange(ctx context.Context,name,action string,i
  if err=ctx.Err();err!=nil{return err}
  inst,err:=d.instance(ctx,name);if err!=nil{return err}
  if inst.Status!=vm.Running{return errors.New("VM not running")}
+ if action=="start" || action=="restart" {
+  if err = d.VerifyEgress(ctx); err != nil { return err }
+ }
  b,err:=d.app.readOnlyBackend();if err!=nil{return err}
  return browser.Change(ctx,b,name,action,in)
 }

@@ -28,13 +28,18 @@ func (d *daemonInventory) Sessions(ctx context.Context, name string) ([]guestses
 		return nil, err
 	}
 	if inst.Status != vm.Running {
+		_ = guestsess.SaveVMSessions(string(d.app.state), name, nil)
 		return []guestsess.Session{}, nil
 	}
 	b, err := d.app.readOnlyBackend()
 	if err != nil {
 		return nil, err
 	}
-	return guestsess.List(ctx, b, name)
+	list, err := guestsess.List(ctx, b, name)
+	if err == nil {
+		_ = guestsess.SaveVMSessions(string(d.app.state), name, list)
+	}
+	return list, err
 }
 
 func (d *daemonInventory) ChangeSession(ctx context.Context, name, action string, in daemon.SessionRequest) error {
