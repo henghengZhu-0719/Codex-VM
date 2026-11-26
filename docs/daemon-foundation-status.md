@@ -35,7 +35,16 @@ The daemon now has a bounded single-worker queue (16 waiting tasks, 256 retained
 - Existing VM start verifies the original project via the first mount and derived VM name, reuses ensureRunningLocked and its existing security/mount checks, preserves all-read-only mode, and refuses unsafe environment overrides. No implicit migration or direct Backend.Start bypass. Base and scratch VMs are excluded. Operations verify final Lima state.
 - Task records include target VM; a second pending/running lifecycle operation for that target is rejected with HTTP 409. Daemon operations share the existing file lock with legacy explicit stop/rm and startup paths. Other legacy writers (destroy-all, scratch cleanup, desktop direct operations) still need audit; this is not complete global coordination.
 - A single worker and serialized backend access remain intentional until global Lima and policy interactions are audited; per-VM parallelism remains pending.
-- No create/delete API is exposed yet. Noninteractive start may fail if security confirmation or manual repair is needed. A failed task does not automatically replay or imply rollback.
+- Create/delete APIs are now exposed with the restrictions below. Noninteractive start may fail if security confirmation or manual repair is needed. A failed task does not automatically replay or imply rollback.
+
+## Create/delete migration
+
+- POST /api/v1/vms accepts an absolute host project path, CPU/memory/disk and read-only options. Resolves the derived VM name before enqueueing and again under the operation lock; refuses existing VMs, unsafe overrides and reserved names. Reuses the normal secure create-and-start pipeline (not a stopped-only create).
+- DELETE /api/v1/vms/{id}?confirm={id} requires exact name confirmation and a stopped non-template, non-scratch VM. Reuses existing deletion and state cleanup. The client must explicitly stop a running VM before deletion.
+- CLI: agent-vm daemon vm-create PROJECT [--cpus N --memory N --disk N --readonly]; agent-vm daemon vm-delete NAME --confirm.
+- API operations disable terminal questions. Security confirmations that cannot be answered must fail rather than block. The existing base template must already be available.
+- Legacy destroy-all now acquires the per-VM lock for each deletion; desktop direct calls and other legacy writers still require review. No claims of complete cross-process exclusion or parallel execution.
+- No VM was created or deleted during development; compile and runtime tests remain pending.
 
 ## Remaining
 

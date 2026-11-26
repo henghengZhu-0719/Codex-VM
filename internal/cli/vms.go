@@ -175,9 +175,16 @@ func (e *app) destroyAllCmd(ctx context.Context, args []string) int {
 	st := 0
 	for _, v := range vms {
 		fmt.Fprintf(e.io.Stdout, "Destroying %s...\n", v.Name)
+		unlock, err := e.lockVM(ctx, v.Name)
+		if err != nil {
+			fmt.Fprintln(e.io.Stderr, err)
+			st = 1
+			continue
+		}
 		if !e.deleteVM(ctx, v.Name) {
 			st = 1
 		}
+		unlock()
 	}
 	if st != 0 {
 		return st

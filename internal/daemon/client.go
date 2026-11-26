@@ -3,6 +3,8 @@ package daemon
 
 import (
  "context"
+ "bytes"
+ "io"
  "encoding/json"
  "fmt"
  "net"
@@ -36,8 +38,22 @@ func (c *Client) ChangeVM(ctx context.Context, name, action string, out any) err
  return c.request(ctx,http.MethodPost,"/api/v1/vms/"+url.PathEscape(name)+"/"+action,http.StatusAccepted,out)
 }
 
+func (c *Client) CreateVM(ctx context.Context, input any, out any) error {
+ data,err:=json.Marshal(input);if err!=nil{return err}
+ return c.requestBody(ctx,http.MethodPost,"/api/v1/vms",http.StatusAccepted,bytes.NewReader(data),out)
+}
+
+func (c *Client) DeleteVM(ctx context.Context,name string,out any) error {
+ return c.request(ctx,http.MethodDelete,"/api/v1/vms/"+url.PathEscape(name)+"?confirm="+url.QueryEscape(name),http.StatusAccepted,out)
+}
+
 func (c *Client) request(ctx context.Context, method,path string,status int,out any) error {
- req, err := http.NewRequestWithContext(ctx,method,"http://agent-vm"+path,nil)
+ return c.requestBody(ctx,method,path,status,nil,out)
+}
+
+func (c *Client) requestBody(ctx context.Context, method,path string,status int,body io.Reader,out any) error {
+ req, err := http.NewRequestWithContext(ctx,method,"http://agent-vm"+path,body)
+ if err==nil && body!=nil{req.Header.Set("Content-Type","application/json")}
  if err != nil { return err }
  resp,err:=c.http.Do(req)
  if err!=nil {return err}
