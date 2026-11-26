@@ -46,6 +46,15 @@ The daemon now has a bounded single-worker queue (16 waiting tasks, 256 retained
 - Legacy destroy-all now acquires the per-VM lock for each deletion; desktop direct calls and other legacy writers still require review. No claims of complete cross-process exclusion or parallel execution.
 - No VM was created or deleted during development; compile and runtime tests remain pending.
 
+## Volume and proxy migration
+
+- POST /api/v1/vms/{id}/mounts accepts add/remove, absolute host path and ro/rw; reuses vmVolumeCmd and the existing volumes file, preserving user-written rules. A successful task saves settings; restart is still required to apply them. Legacy vm-volume now takes the existing per-VM lock before the global app-volumes lock and rechecks the original project.
+- GET /api/v1/network/status exposes selection, source/node metadata and core/gate count without raw proxy URLs or probe/error bodies.
+- POST /api/v1/network/actions queues config, import, manual, apply, refresh, delete, stop, gate-close and probe; reuses existing CLI handlers with isolated IO. JSON inputs use the existing CLI schema; inputs and raw outputs are not stored in task history. Legacy proxy CLI and daemon proxy actions share the app-proxy lock.
+- CLI: agent-vm daemon volume add NAME PATH rw; agent-vm daemon volume remove NAME PATH rw; agent-vm daemon proxy status; agent-vm daemon proxy apply < selection.json; agent-vm daemon proxy refresh SOURCE.
+- Single worker and serialized daemon backend operations remain; direct desktop/legacy writers not using shared locks are still outside complete coordination. No change to lower-level proxy forwarding, DNS or Fail-Closed rules. Existing proxy CLI output remains unchanged. Latency/connection queries, full gate status, browser and resource managers remain pending.
+- No actual proxy or mount configuration was modified during development; compile and runtime tests pending.
+
 ## Remaining
 
 - Verify launchd lifecycle on macOS; implement log rotation and stronger unattended recovery.

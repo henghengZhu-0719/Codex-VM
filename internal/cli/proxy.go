@@ -64,7 +64,10 @@ func (e *app) proxyCmd(ctx context.Context, args []string) int {
 		return exitUsage
 	}
 	sub, rest := args[0], args[1:]
-	var err error
+	// Serialize proxy configuration changes across legacy CLI and daemon.
+	unlock, err := e.lockVM(ctx, "app-proxy")
+	if err != nil { fmt.Fprintln(e.io.Stderr, err); return 1 }
+	defer unlock()
 	switch sub {
 	case "status":
 		if len(rest) != 0 {

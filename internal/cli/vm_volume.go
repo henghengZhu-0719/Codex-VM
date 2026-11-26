@@ -41,6 +41,15 @@ func (e *app) vmVolumeCmd(ctx context.Context, args []string) int {
 	if err != nil || vmname.Name(project) != name {
 		return fail(fmt.Errorf("cannot verify the VM's original project directory"))
 	}
+	vmUnlock, err := e.lockVM(ctx, name)
+	if err != nil { return fail(err) }
+	defer vmUnlock()
+	// Recheck after taking the same lock used by start/stop/delete.
+	inst, err = b.Get(ctx, name)
+	if err != nil { return fail(err) }
+	if len(inst.Mounts) == 0 { return fail(fmt.Errorf("VM has no project folder")) }
+	current, err := vmname.AbsDir(inst.Mounts[0].Location)
+	if err != nil || current != project { return fail(fmt.Errorf("VM project changed")) }
 	if !filepath.IsAbs(src) {
 		return fail(fmt.Errorf("folder path contains unsupported characters"))
 	}

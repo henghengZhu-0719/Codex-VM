@@ -61,3 +61,8 @@ func (c *Client) requestBody(ctx context.Context, method,path string,status int,
  if resp.StatusCode!=status {return fmt.Errorf("daemon: HTTP %d",resp.StatusCode)}
  return json.NewDecoder(resp.Body).Decode(out)
 }
+
+func (c *Client) SubmitManager(ctx context.Context,path string,input any,out any) error {
+ data,err:=json.Marshal(input);if err!=nil{return err}
+ return c.requestBody(ctx,http.MethodPost,path,http.StatusAccepted,bytes.NewReader(data),out)
+}
