@@ -47,6 +47,7 @@ struct RemoteVMList: Sendable {
 @MainActor
 final class RemoteHostConnection {
     private var tunnel: Process?
+    private var appTunnels: [String: (process: Process, url: URL)] = [:]
     private var connectionID = UUID()
     private(set) var activeHostID: String?
     private(set) var localURL: URL?
@@ -68,6 +69,11 @@ final class RemoteHostConnection {
         localURL = nil
         old?.terminationHandler = nil
         if old?.isRunning == true { old?.terminate() }
+        for (_, item) in appTunnels {
+            item.process.terminationHandler = nil
+            if item.process.isRunning { item.process.terminate() }
+        }
+        appTunnels.removeAll()
         updateState("disconnected", "未连接")
     }
 
@@ -235,6 +241,178 @@ final class RemoteHostConnection {
         } catch {
             updateState("error", "无法准备远程终端：\(error.localizedDescription)")
         }
+    }
+
+    // Discover the loopback port of a guest app (browser/code/codex/claude) inside a remote VM,
+    // create a local-only SSH forward, and open it on this Mac.
+    func openVMApp(_ host: RemoteHostProfile, vmName: String, app: String) {
+        guard RemoteHostProfile.isValid(host), Self.isValidVMName(vmName),
+              ["browser", "code", "codex", "claude"].contains(app) else {
+            updateState("error", "远程应用参数无效")
+            return
+        }
+        let appLabel: String = {
+            switch app {
+            case "browser": return "浏览器"
+            case "code": return "VS Code"
+            case "codex": return "Codex 官方桌面"
+            case "claude": return "Claude 官方桌面"
+            default: return app
+            }
+        }()
+        let tunnelKey = "\(host.id):\(vmName):\(app)"
+        if let existing = appTunnels[tunnelKey], existing.process.isRunning {
+            NSWorkspace.shared.open(existing.url)
+            updateState(state, "已打开 \(host.name) / \(vmName) 的 \(appLabel)")
+            return
+        }
+        appTunnels.removeValue(forKey: tunnelKey)
+        updateState(state, "正在发现 \(host.name) / \(vmName) 的 \(appLabel) 端口…")
+
+        Task { [weak self] in
+            let discovered = await Task.detached(priority: .utility) {
+                Self.discoverRemoteVMAppPort(host, vmName: vmName, app: app)
+            }.value
+            guard let self else { return }
+            switch discovered {
+            case .failure(let msg):
+                self.updateState("error", "无法打开远端 \(appLabel)：\(msg)")
+            case .success(let remotePort):
+                guard let localPort = Self.availableLoopbackPort() else {
+                    self.updateState("error", "无法分配本机转发端口")
+                    return
+                }
+                let urlStr = app == "code"
+                    ? "http://127.0.0.1:\(localPort)/"
+                    : "http://127.0.0.1:\(localPort)/vnc.html?autoconnect=1&resize=scale"
+                guard let targetURL = URL(string: urlStr) else { return }
+
+                let proc = Process()
+                proc.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+                proc.arguments = [
+                    "-N", "-T",
+                    "-o", "BatchMode=yes",
+                    "-o", "NumberOfPasswordPrompts=0",
+                    "-o", "StrictHostKeyChecking=yes",
+                    "-o", "ExitOnForwardFailure=yes",
+                    "-o", "ForwardAgent=no",
+                    "-o", "ForwardX11=no",
+                    "-o", "ConnectTimeout=8",
+                    "-o", "ServerAliveInterval=15",
+                    "-o", "ServerAliveCountMax=3",
+                    "-p", String(host.sshPort),
+                    "-L", "127.0.0.1:\(localPort):127.0.0.1:\(remotePort)",
+                    "--", "\(host.username)@\(host.hostname)"
+                ]
+                proc.standardInput = FileHandle.nullDevice
+                proc.standardOutput = FileHandle.nullDevice
+                proc.standardError = FileHandle.nullDevice
+                proc.terminationHandler = { [weak self] stopped in
+                    Task { @MainActor [weak self] in
+                        if self?.appTunnels[tunnelKey]?.process === stopped {
+                            self?.appTunnels.removeValue(forKey: tunnelKey)
+                        }
+                    }
+                }
+                do {
+                    try proc.run()
+                } catch {
+                    self.updateState("error", "无法建立 SSH 隧道：\(error.localizedDescription)")
+                    return
+                }
+                self.appTunnels[tunnelKey] = (proc, targetURL)
+
+                let probeURL = URL(string: "http://127.0.0.1:\(localPort)/")!
+                var ready = false
+                for _ in 0..<20 {
+                    guard proc.isRunning else { break }
+                    var req = URLRequest(url: probeURL)
+                    req.timeoutInterval = 1.5
+                    if let (_, resp) = try? await URLSession.shared.data(for: req),
+                       let http = resp as? HTTPURLResponse,
+                       (200...499).contains(http.statusCode) {
+                        ready = true
+                        break
+                    }
+                    try? await Task.sleep(nanoseconds: 250_000_000)
+                }
+                guard ready, proc.isRunning else {
+                    if proc.isRunning { proc.terminate() }
+                    self.appTunnels.removeValue(forKey: tunnelKey)
+                    self.updateState("error", "远端 \(appLabel) 隧道连接超时（端口 \(remotePort) 未响应）")
+                    return
+                }
+                NSWorkspace.shared.open(targetURL)
+                self.updateState(self.state, "已通过 SSH 隧道打开 \(host.name) / \(vmName) 的 \(appLabel)")
+            }
+        }
+    }
+
+    private enum PortDiscoveryResult: Sendable {
+        case success(Int)
+        case failure(String)
+    }
+
+    nonisolated private static func discoverRemoteVMAppPort(_ host: RemoteHostProfile, vmName: String, app: String) -> PortDiscoveryResult {
+        let pyDetect = #"""
+import os, re, sys
+app = sys.argv[1]
+target_vnc = {'browser': '5999', 'codex': '5998', 'claude': '5997'}.get(app)
+found = None
+for entry in os.listdir('/proc'):
+    if not entry.isdigit():
+        continue
+    try:
+        raw = open(f'/proc/{entry}/cmdline', 'rb').read().decode('utf-8', 'ignore')
+    except OSError:
+        continue
+    args = [a for a in raw.split('\x00') if a]
+    if not args:
+        continue
+    joined = ' '.join(args)
+    if app == 'code' and 'code-server' in joined:
+        m = re.search(r'(?:--bind-addr(?:=|\s+))[^\s:]+:(\d+)', joined)
+        if m:
+            found = int(m.group(1))
+            break
+    elif target_vnc and 'websockify' in joined and f'127.0.0.1:{target_vnc}' in joined:
+        for a in args:
+            m = re.match(r'^127\.0\.0\.1:(\d+)$', a)
+            if m and m.group(1) != target_vnc:
+                found = int(m.group(1))
+                break
+        if found:
+            break
+if found and 1024 <= found <= 65535:
+    print(f'PORT={found}')
+"""#
+        let b64 = Data(pyDetect.utf8).base64EncodedString()
+        let inner = "python3 -c \"import base64; exec(base64.b64decode('\(b64)'))\" \(app)"
+        let remoteCmd = "cd && /usr/bin/ssh -F .agent-vm/lima/\(vmName)/ssh.config -o BatchMode=yes -o ConnectTimeout=8 -o ForwardAgent=no -o ForwardX11=no lima-\(vmName) '\(inner)'"
+        let process = Process()
+        let output = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+        process.arguments = ["-T"] + sshOptions(host) + [remoteCmd]
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = output
+        process.standardError = output
+        do {
+            try process.run()
+        } catch {
+            return .failure("SSH 启动失败：\(error.localizedDescription)")
+        }
+        let timeout = DispatchWorkItem { if process.isRunning { process.terminate() } }
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 15, execute: timeout)
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        timeout.cancel()
+        let text = String(decoding: data, as: UTF8.self)
+        for line in text.split(whereSeparator: \.isNewline) {
+            if line.hasPrefix("PORT="), let port = Int(line.dropFirst(5)), (1024...65535).contains(port) {
+                return .success(port)
+            }
+        }
+        return .failure("该应用在远端 VM 中尚未运行，请先在远端启动后再连接")
     }
 
     func openWorkbench() {

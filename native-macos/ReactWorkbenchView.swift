@@ -808,6 +808,14 @@ struct ReactWorkbenchView: NSViewRepresentable {
                    let host = model.remoteHosts.first(where: { $0.id == id }) {
                     model.remoteHostConnection.openVMTerminal(host, vmName: vmName)
                 }
+            case "remoteVMOpenApp":
+                if let id = payload["id"] as? String,
+                   let vmName = payload["vmName"] as? String,
+                   let app = payload["app"] as? String,
+                   model.remoteVMLists[id]?.vms.contains(where: { $0.name == vmName }) == true,
+                   let host = model.remoteHosts.first(where: { $0.id == id }) {
+                    model.remoteHostConnection.openVMApp(host, vmName: vmName, app: app)
+                }
             case "remoteVMList":
                 let id = payload["id"] as? String
                 for host in model.remoteHosts where id == nil || host.id == id {

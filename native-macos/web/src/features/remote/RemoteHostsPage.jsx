@@ -1,9 +1,12 @@
 import React, { useState } from 'react';
 import {
+  AppWindow,
   Check,
   CheckCircle2,
+  Code2,
   Copy,
   ExternalLink,
+  Globe,
   Laptop,
   LoaderCircle,
   Play,
@@ -312,7 +315,28 @@ export default function RemoteHostsPage({
                                   className="primary"
                                   onClick={() => bridge('remoteVMTerminal', { id: h.id, vmName: vm.name })}
                                 >
-                                  <Terminal size={13} /> 连接终端
+                                  <Terminal size={13} /> 终端
+                                </button>
+                                <button
+                                  className="secondary"
+                                  title="通过 SSH 隧道打开远端 VM 内的浏览器 (noVNC)"
+                                  onClick={() => bridge('remoteVMOpenApp', { id: h.id, vmName: vm.name, app: 'browser' })}
+                                >
+                                  <Globe size={13} /> 浏览器
+                                </button>
+                                <button
+                                  className="secondary"
+                                  title="通过 SSH 隧道打开远端 VM 内的 VS Code (code-server)"
+                                  onClick={() => bridge('remoteVMOpenApp', { id: h.id, vmName: vm.name, app: 'code' })}
+                                >
+                                  <Code2 size={13} /> VS Code
+                                </button>
+                                <button
+                                  className="secondary"
+                                  title="通过 SSH 隧道打开远端 VM 内的 Codex 官方桌面"
+                                  onClick={() => bridge('remoteVMOpenApp', { id: h.id, vmName: vm.name, app: 'codex' })}
+                                >
+                                  <AppWindow size={13} /> 桌面
                                 </button>
                                 <button
                                   className="secondary"
