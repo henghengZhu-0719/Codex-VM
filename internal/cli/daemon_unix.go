@@ -52,10 +52,12 @@ func (d *daemonInventory) Mounts(ctx context.Context,name string)(any,error){
 }
 
 func daemonCommand(args []string, streams IO) int {
- if len(args)!=1 {fmt.Fprintln(streams.Stderr,"Usage: agent-vm daemon <serve|status|list>");return 2}
+ if len(args)!=1 {fmt.Fprintln(streams.Stderr,"Usage: agent-vm daemon <serve|status|list|install|uninstall|start|stop|restart|logs>");return 2}
  st,err:=state.Default()
  if err!=nil{fmt.Fprintln(streams.Stderr,err);return 1}
  switch args[0]{
+ case "install","uninstall","start","stop","restart","logs":
+  if err := daemonService(args[0], string(st), streams); err != nil { fmt.Fprintln(streams.Stderr,err); return 1 }; return 0
  case "serve":
   a,err:=newApp(IO{Stdin:nil,Stdout:io.Discard,Stderr:streams.Stderr})
   if err!=nil{fmt.Fprintln(streams.Stderr,err);return 1}
@@ -70,6 +72,6 @@ func daemonCommand(args []string, streams IO) int {
   enc:=json.NewEncoder(streams.Stdout);enc.SetIndent("","  ")
   if err:=enc.Encode(result);err!=nil{return 1};return 0
  default:
-  fmt.Fprintln(streams.Stderr,"Usage: agent-vm daemon <serve|status|list>");return 2
+  fmt.Fprintln(streams.Stderr,"Usage: agent-vm daemon <serve|status|list|install|uninstall|start|stop|restart|logs>");return 2
  }
 }

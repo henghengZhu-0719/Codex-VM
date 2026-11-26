@@ -1,7 +1,8 @@
 Usage: agent-vm [options] <command> [args]
 
 Commands:
-  daemon <serve|status|list>  Opt-in local management service (Unix socket)
+  daemon <command>   Local management service: serve, status, list;
+                     macOS: install, uninstall, start, stop, restart, logs
   install            Put agent-vm on your PATH (a link in ~/.local/bin, or
                      AGENT_VM_BIN_DIR)
   uninstall          Remove that link. VMs and ~/.agent-vm are left alone.

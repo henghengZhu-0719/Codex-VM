@@ -102,7 +102,8 @@ func Serve(ctx context.Context,state string, inventory Inventory) error {
  if err=os.Chmod(socket,0600);err!=nil{return err}
  srv:=&http.Server{Handler:Handler(inventory),ReadHeaderTimeout:5*time.Second,ReadTimeout:10*time.Second,WriteTimeout:30*time.Second,IdleTimeout:30*time.Second,MaxHeaderBytes:16<<10}
  stopped:=make(chan struct{})
- go func(){select{case <-ctx.Done():
+ shutdownDone:=make(chan struct{})
+ go func(){defer close(shutdownDone);select{case <-ctx.Done():
   shutdown,cancel:=context.WithTimeout(context.Background(),10*time.Second)
   defer cancel()
   if srv.Shutdown(shutdown)!=nil{_ = srv.Close()}
@@ -110,6 +111,7 @@ func Serve(ctx context.Context,state string, inventory Inventory) error {
  slog.Info("agent-vm daemon listening")
  err=srv.Serve(listener)
  close(stopped)
+ <-shutdownDone
  if errors.Is(err,http.ErrServerClosed){return nil}
  return err
 }
