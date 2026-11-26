@@ -58,6 +58,9 @@ func needsState(args []string) bool {
 
 // Main runs agent-vm with args (os.Args[1:]) and returns its exit status.
 func Main(args []string, io IO) int {
+	if len(args) > 0 && args[0] == "daemon" {
+		return daemonCommand(args[1:], io)
+	}
 	ctx := context.Background()
 	if !needsState(args) {
 		return (&app{io: io}).main(ctx, args)
