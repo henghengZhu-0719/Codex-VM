@@ -113,6 +113,7 @@ func (d *daemonInventory) Create(ctx context.Context,input daemon.CreateRequest,
 }
 
 func daemonCommand(args []string, streams IO) int {
+ if len(args)>0 && args[0]=="usage"{return daemonUsageCommand(args,streams)}
  if len(args)>0 && args[0]=="browser"{return daemonBrowserCommand(args,streams)}
  if len(args)>0 && (args[0]=="volume" || args[0]=="proxy"){return daemonManagerCommand(args,streams)}
  if len(args)>=1 && (args[0]=="vm-create" || args[0]=="vm-delete"){

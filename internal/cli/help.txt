@@ -5,7 +5,7 @@ Commands:
                      vm-start NAME, vm-stop NAME (async)
                      vm-create PROJECT [resource options], vm-delete NAME --confirm
                      volume {add|remove} NAME PATH {ro|rw}, proxy COMMAND
-                     browser {status|start|stop|restart} NAME
+                     browser {status|start|stop|restart} NAME, usage NAME
                      macOS: install, uninstall, start, stop, restart, logs
   install            Put agent-vm on your PATH (a link in ~/.local/bin, or
                      AGENT_VM_BIN_DIR)

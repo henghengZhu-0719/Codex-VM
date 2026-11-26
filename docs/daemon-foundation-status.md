@@ -79,3 +79,10 @@ The inventory API is read-only; explicit lifecycle requests can change VM state.
 - Daemon shares VM operation lock and guest lifecycle flock with updated Swift prepare/stop scripts. Older installed Desktop builds do not have the guest lock. Viewer resize and other direct UI controls remain outside daemon migration.
 - No public listener, MCP installation, automatic VM start, automatic browser shutdown or profile relocation. Browser restart preserves the profile. No dependency install API. Existing Chromium --no-sandbox compatibility flag remains unchanged.
 - Script copies are intentionally retained for existing Desktop compatibility; future client migration should consolidate them. No build or guest runtime tests performed.
+
+## Resource management foundation
+
+- GET /api/v1/vms/{id}/usage and agent-vm daemon usage NAME report configured resources, guest CPU sample, MemAvailable-based memory, swap, terminal/process activity and existing hostagent balloon target/min/max when available.
+- Missing metrics are explicitly unavailable, not zero. Stopped VMs return configuration only. Idle candidate is a conservative instantaneous observation, not a sustained idle timer or permission to stop. Process-name checks are heuristic, not comprehensive.
+- Audited Desktop SmartMemoryManager and AgentVMApp: existing autoSleepVM calls stop, not a resumable hypervisor pause. Existing balloon controller writes from Desktop; daemon only reads to avoid competing controllers. No new automatic sleep, stop, cache drop, balloon write or resume action. Actual suspend/resume backend capability and unified ownership must be implemented separately.
+- Compile/runtime tests pending.

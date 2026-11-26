@@ -77,6 +77,7 @@ func handler(inventory Inventory,tasks *TaskManager,shutdown <-chan struct{}) ht
  if tasks!=nil{registerTaskRoutes(mux,inventory,tasks,shutdown)}
  registerManagerRoutes(mux,inventory,tasks)
  registerBrowserRoutes(mux,inventory,tasks)
+ registerResourceRoutes(mux,inventory)
  return http.HandlerFunc(func(w http.ResponseWriter,r *http.Request){
   // No browser-origin requests; this is a local native-client protocol.
   if r.Header.Get("Origin")!="" || r.Host!="agent-vm" {send(w,403,map[string]string{"error":"forbidden"});return}
