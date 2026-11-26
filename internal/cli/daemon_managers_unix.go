@@ -81,13 +81,13 @@ func (d *daemonInventory) VerifyEgress(ctx context.Context) error {
 		// No managed proxy config exists yet; default host network isolation applies.
 		return nil
 	}
-	if !s.ManagedEnabled {
+	if !s.ManagedEnabled || !s.UseProxy || s.ProxyMode != managedproxy.ProxyModeMihomo {
 		return nil
 	}
 	checkCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	if !managedproxy.Running(checkCtx, string(d.app.state), s) {
-		return errors.New("managed proxy is enabled but core is not running; fail-closed egress check failed")
+		return errors.New("managed mihomo proxy is enabled but core is not running; fail-closed egress check failed")
 	}
 	return nil
 }

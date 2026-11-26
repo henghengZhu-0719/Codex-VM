@@ -342,6 +342,7 @@ func (m *TaskManager) worker() {
 			case errors.Is(ctxErr, context.DeadlineExceeded):
 				_ = m.update(work.id, "failed", "task deadline exceeded", nil)
 			case err != nil:
+				slog.Warn("background task failed", "task_id", work.id, "error", err)
 				_ = m.update(work.id, "failed", "operation failed", nil)
 			default:
 				_ = m.update(work.id, "succeeded", "", result)
