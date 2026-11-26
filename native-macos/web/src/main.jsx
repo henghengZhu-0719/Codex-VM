@@ -18,6 +18,7 @@ import {
   Plus,
   RefreshCw,
   Search,
+  Server,
   Settings2,
   ShieldAlert,
   ShieldCheck,
@@ -37,6 +38,7 @@ import ToastStack from './components/ToastStack.jsx';
 import ChatPage from './features/chat/ChatPage.jsx';
 import BrowserPage from './features/browser/BrowserPage.jsx';
 import CodexDesktopPage from './features/codexDesktop/CodexDesktopPage.jsx';
+import RemoteHostsPage from './features/remote/RemoteHostsPage.jsx';
 
 const blank = {
   vms: [],
@@ -104,6 +106,7 @@ const blank = {
 
 const tabs = [
   { id: 'vms', label: '虚拟机', icon: Monitor },
+  { id: 'remote', label: '远程主机', icon: Server },
   { id: 'codexDesktop', label: '官方桌面', icon: AppWindow },
   { id: 'browser', label: '浏览器', icon: Globe },
   { id: 'proxy', label: '网络代理', icon: Network },
@@ -219,7 +222,7 @@ function App() {
   }, [state.remoteWorkbench?.port]);
 
   useEffect(() => {
-    if (!isRemoteWeb && page === 'settings') bridge('remoteVMList');
+    if (!isRemoteWeb && (page === 'settings' || page === 'remote')) bridge('remoteVMList');
   }, [page]);
 
   useEffect(() => {
@@ -462,6 +465,9 @@ function App() {
                 <t.icon size={16} />
                 <span className="nav-text">{t.label}</span>
                 {t.id === 'vms' && <span className="nav-count">{vms.length}</span>}
+                {t.id === 'remote' && (state.remoteHosts?.length || 0) > 0 && (
+                  <span className="nav-count">{state.remoteHosts.length}</span>
+                )}
                 {t.id === 'versions' && (state.cliMonitor?.pendingCount || 0) > 0 && (
                   <span className="nav-count nav-count-live">{state.cliMonitor.pendingCount}</span>
                 )}
@@ -473,6 +479,10 @@ function App() {
             <div className="side-status">
               <span className="status-dot active" />
               <span>{running.length} 运行中</span>
+            </div>
+            <div className="side-status">
+              <span className={'status-dot ' + (state.daemon?.connected ? 'active' : '')} />
+              <span>{state.daemon?.connected ? 'Daemon 已连' : '兼容模式'}</span>
             </div>
             <div className="side-status">
               <span className={'status-dot ' + (proxy?.use_proxy ? 'active' : '')} />
@@ -487,6 +497,18 @@ function App() {
 
       <main className="main">
         <div className={'content' + (isRemoteWeb ? ' codex-content' : page === 'codexDesktop' ? ' codex-desktop-content' : page === 'browser' ? ' browser-content' : '')}>
+          {!isRemoteWeb && page === 'remote' && (
+            <RemoteHostsPage
+              hosts={state.remoteHosts}
+              vmLists={state.remoteVMLists}
+              statusText={state.remoteHostStatus}
+              connectionState={state.remoteHostConnectionState}
+              activeHostID={state.activeRemoteHostID}
+              daemon={state.daemon}
+              onOpenSettings={() => setPage('settings')}
+            />
+          )}
+
           {!isRemoteWeb && page === 'vms' && (
             <>
               <SectionTitle title="虚拟机">
