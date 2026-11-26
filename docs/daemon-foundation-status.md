@@ -113,3 +113,14 @@ The inventory API is read-only; explicit lifecycle requests can change VM state.
 - Added guest tool inventory and credential-file presence hints (not verified login), explicit noninteractive tmux installation via existing guest apt/network path, and tmux session tool/last-activity metadata. CLI: daemon session tools VM; daemon session install-tmux VM.
 - Desktop automatic stop now invokes daemon idle-stop VM, a local guarded command taking the existing VM lock and requiring two fresh idle samples. A failed check does not stop the VM proxy. Explicit manual stop remains unchanged. This is best-effort; arbitrary guest process launches outside the lock can race, and idle checks are conservative heuristics. No actual hypervisor pause.
 - No compilation or runtime verification performed.
+
+
+## Batch 1 completion and verification (Phase 0–3)
+
+- Fixed `internal/cli` build collision between `type session` in `commands.go` and the `internal/session` import in `daemon_session_unix.go`, and updated `TestHelp` to account for the `daemon` help section.
+- Added structured JSON `slog` logging with size-based rotation (`internal/daemon/log_unix.go`, 10 MiB / 5 backups, `0700` dir, `0600` files) and integrated `daemon.log` into `daemon logs`.
+- Added cross-platform `DaemonServiceManager` abstraction and Linux `SystemdUnit` generator (`internal/cli/daemon_service.go`) for Phase 10 readiness.
+- Completed legacy CLI lock audit: wrapped `scratch` cleanup deletions in `commands.go` with per-VM `lockVM`.
+- Added versioned, atomic remote host metadata store (`internal/remote/hosts.go`, `~/.agent-vm/config/hosts.json`, `0600`, no SSH credentials) and `/api/v1/hosts` endpoints.
+- Added unified API error payload (`{"code", "error"}`), `X-Agent-VM-API-Version: 1` header, `POST /api/v1/tasks/{id}/cancel` (`agent-vm daemon cancel ID`), `Idempotency-Key` deduplication on mutation endpoints, explicit `501` `/pause` & `/resume` contract endpoints, `.bak` corrupt task journal recovery, and startup VM reconciliation scan.
+- Verified `go build ./...`, `go vet ./...`, and `go test -race -v ./internal/daemon ./internal/remote ./internal/session ./internal/cli` all pass.

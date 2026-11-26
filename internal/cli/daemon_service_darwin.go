@@ -7,10 +7,9 @@ import (
  "context"
  "crypto/sha256"
  "encoding/xml"
- "errors"
- "fmt"
- "io"
- "os"
+	"errors"
+	"fmt"
+	"os"
  "os/exec"
  "path/filepath"
  "strconv"
@@ -103,18 +102,21 @@ func daemonService(command, state string, streams IO) error {
   if !loaded(){return daemonService("start",state,streams)}
   if err=run("kickstart","-k",target);err!=nil{return err}
   return wait(true)
- case "logs":
-  // Bound the displayed history; no indefinite follow or credential dump.
-  for _,name:=range []string{"stdout.log","stderr.log"}{
-   f,err:=os.Open(filepath.Join(logs,name));if err!=nil{return err}
-   info,err:=f.Stat();if err!=nil{f.Close();return err}
-   offset:=max(int64(0),info.Size()-65536)
-   if _,err=f.Seek(offset,io.SeekStart);err!=nil{f.Close();return err}
-   fmt.Fprintln(streams.Stdout,"---",name,"---")
-   _,err=io.CopyN(streams.Stdout,f,info.Size()-offset);f.Close()
-   if err!=nil && !errors.Is(err,io.EOF){return err}
-  }
-  return nil
+	case "logs":
+		// Bound the displayed history; no indefinite follow or credential dump.
+		for _, item := range []struct {
+			label string
+			path  string
+		}{
+			{label: "daemon.log", path: daemon.LogPath(state)},
+			{label: "stdout.log", path: filepath.Join(logs, "stdout.log")},
+			{label: "stderr.log", path: filepath.Join(logs, "stderr.log")},
+		} {
+			if err := copyTail(streams.Stdout, item.label, item.path, 65536); err != nil && !os.IsNotExist(err) {
+				return err
+			}
+		}
+		return nil
  }
  return fmt.Errorf("unknown daemon service command: %s",command)
 }

@@ -3,10 +3,9 @@
 package daemon
 
 import (
- "context"
- "encoding/json"
- "errors"
- "fmt"
+	"context"
+	"errors"
+	"fmt"
  "log/slog"
  "net"
  "net/http"
@@ -40,51 +39,75 @@ func Handler(inventory Inventory) http.Handler {
  return handler(inventory,nil,nil)
 }
 
-func handler(inventory Inventory,tasks *TaskManager,shutdown <-chan struct{}) http.Handler {
- mux:=http.NewServeMux()
- send:=func(w http.ResponseWriter,status int,v any){
-  w.Header().Set("Content-Type","application/json")
-  w.Header().Set("Cache-Control","no-store")
-  w.WriteHeader(status)
-  _=json.NewEncoder(w).Encode(v)
- }
- fail:=func(w http.ResponseWriter,err error){
-  status:=http.StatusServiceUnavailable
-  if errors.Is(err,ErrNotFound){status=http.StatusNotFound}
-  // Avoid exposing local paths or credentials from backend errors.
-  slog.Warn("inventory request failed","status",status)
-  send(w,status,map[string]string{"error":http.StatusText(status)})
- }
- mux.HandleFunc("GET /health",func(w http.ResponseWriter,r *http.Request){
-  send(w,200,map[string]any{"status":"ok","api_version":1})
- })
- mux.HandleFunc("GET /api/v1/vms",func(w http.ResponseWriter,r *http.Request){
-  v,err:=inventory.List(r.Context());if err!=nil{fail(w,err);return}
-  if v==nil{v=[]VM{}}
-  send(w,200,v)
- })
- lookup:=func(w http.ResponseWriter,r *http.Request,kind string){
-  name:=r.PathValue("id")
-  if !namePattern.MatchString(name){send(w,400,map[string]string{"error":"invalid VM name"});return}
-  if kind=="mounts" {
-   v,err:=inventory.Mounts(r.Context(),name);if err!=nil{fail(w,err);return};send(w,200,v);return
-  }
-  v,err:=inventory.Get(r.Context(),name);if err!=nil{fail(w,err);return};send(w,200,v)
- }
- mux.HandleFunc("GET /api/v1/vms/{id}",func(w http.ResponseWriter,r *http.Request){lookup(w,r,"detail")})
- mux.HandleFunc("GET /api/v1/vms/{id}/resources",func(w http.ResponseWriter,r *http.Request){lookup(w,r,"resources")})
- mux.HandleFunc("GET /api/v1/vms/{id}/mounts",func(w http.ResponseWriter,r *http.Request){lookup(w,r,"mounts")})
- if tasks!=nil{registerTaskRoutes(mux,inventory,tasks,shutdown)}
- registerManagerRoutes(mux,inventory,tasks)
- registerBrowserRoutes(mux,inventory,tasks)
- registerResourceRoutes(mux,inventory)
- registerSessionRoutes(mux,inventory,tasks)
- registerQuotaRoutes(mux,inventory,tasks)
- return http.HandlerFunc(func(w http.ResponseWriter,r *http.Request){
-  // No browser-origin requests; this is a local native-client protocol.
-  if r.Header.Get("Origin")!="" || r.Host!="agent-vm" {send(w,403,map[string]string{"error":"forbidden"});return}
-  mux.ServeHTTP(w,r)
- })
+func handler(inventory Inventory, tasks *TaskManager, shutdown <-chan struct{}) http.Handler {
+	mux := http.NewServeMux()
+	fail := func(w http.ResponseWriter, err error) {
+		status := http.StatusServiceUnavailable
+		code := "service_unavailable"
+		if errors.Is(err, ErrNotFound) {
+			status = http.StatusNotFound
+			code = "not_found"
+		}
+		// Avoid exposing local paths or credentials from backend errors.
+		slog.Warn("inventory request failed", "status", status)
+		writeError(w, status, code, http.StatusText(status))
+	}
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "api_version": 1})
+	})
+	mux.HandleFunc("GET /api/v1/vms", func(w http.ResponseWriter, r *http.Request) {
+		v, err := inventory.List(r.Context())
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		if v == nil {
+			v = []VM{}
+		}
+		writeJSON(w, http.StatusOK, v)
+	})
+	lookup := func(w http.ResponseWriter, r *http.Request, kind string) {
+		name := r.PathValue("id")
+		if !namePattern.MatchString(name) {
+			writeError(w, http.StatusBadRequest, "invalid_vm_name", "invalid VM name")
+			return
+		}
+		if kind == "mounts" {
+			v, err := inventory.Mounts(r.Context(), name)
+			if err != nil {
+				fail(w, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, v)
+			return
+		}
+		v, err := inventory.Get(r.Context(), name)
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, v)
+	}
+	mux.HandleFunc("GET /api/v1/vms/{id}", func(w http.ResponseWriter, r *http.Request) { lookup(w, r, "detail") })
+	mux.HandleFunc("GET /api/v1/vms/{id}/resources", func(w http.ResponseWriter, r *http.Request) { lookup(w, r, "resources") })
+	mux.HandleFunc("GET /api/v1/vms/{id}/mounts", func(w http.ResponseWriter, r *http.Request) { lookup(w, r, "mounts") })
+	if tasks != nil {
+		registerTaskRoutes(mux, inventory, tasks, shutdown)
+	}
+	registerHostRoutes(mux, inventory)
+	registerManagerRoutes(mux, inventory, tasks)
+	registerBrowserRoutes(mux, inventory, tasks)
+	registerResourceRoutes(mux, inventory)
+	registerSessionRoutes(mux, inventory, tasks)
+	registerQuotaRoutes(mux, inventory, tasks)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// No browser-origin requests; this is a local native-client protocol.
+		if r.Header.Get("Origin") != "" || r.Host != "agent-vm" {
+			writeError(w, http.StatusForbidden, "forbidden", "forbidden")
+			return
+		}
+		mux.ServeHTTP(w, r)
+	})
 }
 
 func Serve(ctx context.Context,state string, inventory Inventory) error {
@@ -110,7 +133,18 @@ func Serve(ctx context.Context,state string, inventory Inventory) error {
  listener,err:=net.Listen("unix",socket);if err!=nil{return err}
  defer listener.Close()
  if err=os.Chmod(socket,0600);err!=nil{return err}
- tasks,err:=NewTaskManager(ctx,filepath.Join(dir,"tasks.json"));if err!=nil{return err}
+	if logger, closeLog, logErr := SetupLogger(state, os.Stderr); logErr == nil {
+		prev := slog.Default()
+		slog.SetDefault(logger)
+		defer func() {
+			slog.SetDefault(prev)
+			_ = closeLog()
+		}()
+	}
+	tasks, err := NewTaskManager(ctx, filepath.Join(dir, "tasks.json"))
+	if err != nil {
+		return err
+	}
  streamCtx,stopStreams:=context.WithCancel(ctx);defer stopStreams()
  defer func(){closeCtx,cancel:=context.WithTimeout(context.Background(),10*time.Second);defer cancel();if err:=tasks.Close(closeCtx);err!=nil{slog.Error("task shutdown incomplete","error",err)}}()
  pollDone:=make(chan struct{})
@@ -124,7 +158,20 @@ func Serve(ctx context.Context,state string, inventory Inventory) error {
   defer cancel()
   if srv.Shutdown(shutdown)!=nil{_ = srv.Close()}
  case <-stopped:}}()
- slog.Info("agent-vm daemon listening")
+	reconcileCtx, cancelReconcile := context.WithTimeout(streamCtx, 10*time.Second)
+	if vms, rerr := inventory.List(reconcileCtx); rerr != nil {
+		slog.Warn("initial VM reconciliation failed", "error", rerr)
+	} else {
+		running := 0
+		for _, v := range vms {
+			if v.Status == "Running" {
+				running++
+			}
+		}
+		slog.Info("initial VM reconciliation complete", "total_vms", len(vms), "running_vms", running)
+	}
+	cancelReconcile()
+	slog.Info("agent-vm daemon listening")
  err=srv.Serve(listener)
  stopStreams()
  close(stopped)

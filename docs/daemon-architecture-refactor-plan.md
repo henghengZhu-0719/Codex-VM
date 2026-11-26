@@ -1,7 +1,7 @@
 # Agent-VM 服务化架构改造计划
 
 - 基线：`feat/zhu`，规划时参考提交 `9d27e4e`
-- 状态：待实施
+- 状态：批次 1（Phase 0–3）已完成并通过单元测试与竞态检测；待推进批次 2（Phase 4–5）
 - 目标：一个后台管理服务、两个客户端入口，支持 Mac Pro 长期运行与 Mac Air 远程开发。
 
 ## 1. 原则与目标架构
@@ -55,31 +55,31 @@ docs/
 
 ### Phase 0 — 代码审计与迁移准备（P0）
 
-- [ ] 获取最新分支，梳理 Go、SwiftUI、React 的依赖与职责。
-- [ ] 确认 VM、代理、浏览器、远程连接、资源管理进程归属。
-- [ ] 盘点配置、凭据、历史数据、文件权限与现有第三方补丁。
-- [ ] 明确兼容接口、状态迁移、回滚路径，避免重复开发。
+- [x] 获取最新分支，梳理 Go、SwiftUI、React 的依赖与职责。
+- [x] 确认 VM、代理、浏览器、远程连接、资源管理进程归属。
+- [x] 盘点配置、凭据、历史数据、文件权限与现有第三方补丁。
+- [x] 明确兼容接口、状态迁移、回滚路径，避免重复开发。
 
 ### Phase 1 — Daemon 基础（P0）
 
-- [ ] 新增 daemon 前台运行入口及 start、stop、restart、status、install、uninstall、logs 管理命令。
-- [ ] HTTP + JSON over Unix Domain Socket：`~/.agent-vm/run/agent-vm.sock`。
-- [ ] Socket 和父目录仅允许当前用户访问；不默认监听公网端口。
-- [ ] 单实例锁、优雅退出、健康检查、结构化日志和轮转。
-- [ ] macOS 用户级 launchd LaunchAgent：登录后启动、异常重启；明确主动停止语义，防止被立即重启。
-- [ ] 实现 Go 客户端 SDK；为后续 systemd 适配保留接口。
+- [x] 新增 daemon 前台运行入口及 start、stop、restart、status、install、uninstall、logs 管理命令。
+- [x] HTTP + JSON over Unix Domain Socket：`~/.agent-vm/run/agent-vm.sock`。
+- [x] Socket 和父目录仅允许当前用户访问；不默认监听公网端口。
+- [x] 单实例锁、优雅退出、健康检查、结构化日志和轮转。
+- [x] macOS 用户级 launchd LaunchAgent：登录后启动、异常重启；明确主动停止语义，防止被立即重启。
+- [x] 实现 Go 客户端 SDK；为后续 systemd 适配保留接口。
 
 ### Phase 2 — 核心管理逻辑迁移（P0）
 
-- [ ] VM Manager：创建、启动、停止、暂停、恢复、删除与状态监控。
-- [ ] Network Manager：代理配置、出口管理、EgressGate。
-- [ ] Browser Manager：Chromium 生命周期、健康、进程树内存监控。
-- [ ] Volume Manager：默认公共共享、项目和额外挂载、权限与保护。
-- [ ] Resource Manager：CPU、内存、磁盘、空闲识别。
-- [ ] Session / Tool / Quota Manager：会话、工具安装升级、版本检测、额度缓存。
-- [ ] Remote Manager：统一主机配置与远程接入；客户端持有的 SSH 凭据不迁移到远端。
-- [ ] 每 VM 操作互斥、全局配置写入协调、任务状态恢复；迁移后禁止旧路径绕过协调并发修改。
-- [ ] 复用现有实现，逐模块切换，保留可回滚路径。
+- [x] VM Manager：创建、启动、停止、暂停、恢复、删除与状态监控（pause/resume 已保留统一 API 契约并返回显式 501，待底层支持）。
+- [x] Network Manager：代理配置、出口管理、EgressGate。
+- [x] Browser Manager：Chromium 生命周期、健康、进程树内存监控。
+- [x] Volume Manager：默认公共共享、项目和额外挂载、权限与保护。
+- [x] Resource Manager：CPU、内存、磁盘、空闲识别。
+- [x] Session / Tool / Quota Manager：会话、工具安装升级、版本检测、额度缓存。
+- [x] Remote Manager：统一主机配置与远程接入（`~/.agent-vm/config/hosts.json` 与 `/api/v1/hosts`）；客户端持有的 SSH 凭据不迁移到远端。
+- [x] 每 VM 操作互斥、全局配置写入协调、任务状态恢复；迁移后禁止旧路径绕过协调并发修改（旧 CLI `scratch` 与 `destroy-all` 等写路径已统一接入 per-VM 文件锁）。
+- [x] 复用现有实现，逐模块切换，保留可回滚路径。
 
 ### Phase 3 — 统一 API（P0）
 
@@ -103,10 +103,10 @@ docs/
 | GET | /tasks/:id | 后台任务 |
 | GET | /events | SSE 事件流 |
 
-- [ ] 耗时操作返回 Task ID，SSE 推送进度与最终结果。
-- [ ] 客户端断开不取消任务；明确任务超时、取消、幂等及重启后的状态协调，不盲目重放破坏性操作。
-- [ ] 统一错误格式、输入验证、接口版本与客户端兼容策略。
-- [ ] 补全代理、共享目录、浏览器、会话、额度等写入接口。
+- [x] 耗时操作返回 Task ID，SSE 推送进度与最终结果。
+- [x] 客户端断开不取消任务；明确任务超时、取消（`POST /api/v1/tasks/:id/cancel`）、幂等（`Idempotency-Key`）及重启后的状态协调，不盲目重放破坏性操作。
+- [x] 统一错误格式（`{"code": "...", "error": "..."}`）、输入验证、接口版本（`X-Agent-VM-API-Version: 1`）与客户端兼容策略。
+- [x] 补全代理、共享目录、浏览器、会话、额度、远程主机等写入接口。
 
 ### Phase 4 — Desktop 解耦（P0）
 

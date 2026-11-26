@@ -237,7 +237,10 @@ func (e *app) scratch(ctx, cleanup context.Context, opts VMOpts, dir string, fn 
 	dead, unknown := e.scratchLeftovers()
 	for _, left := range dead {
 		fmt.Fprintf(e.io.Stdout, "Deleting scratch VM '%s', left by a run that did not finish...\n", left)
-		e.deleteVM(cleanup, left)
+		if unlock, err := e.lockVM(cleanup, left); err == nil {
+			e.deleteVM(cleanup, left)
+			unlock()
+		}
 	}
 	for _, left := range unknown {
 		fmt.Fprintf(e.io.Stderr, "Note: scratch VM '%s' has a record without a process number, so it is not known whether a run still uses it: left alone. 'agent-vm rm %s' deletes it.\n", left, left)
@@ -272,7 +275,12 @@ func (e *app) scratch(ctx, cleanup context.Context, opts VMOpts, dir string, fn 
 		}
 	}
 	fmt.Fprintf(e.io.Stdout, "Deleting scratch VM '%s'...\n", name)
-	if !e.deleteVM(cleanup, name) {
+	if unlock, err := e.lockVM(cleanup, name); err == nil {
+		if !e.deleteVM(cleanup, name) {
+			st = 1
+		}
+		unlock()
+	} else {
 		st = 1
 	}
 	return st

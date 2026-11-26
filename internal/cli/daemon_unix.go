@@ -14,12 +14,13 @@ import (
  "sync"
  "syscall"
 
- "github.com/sylvinus/agent-vm/internal/daemon"
- "github.com/sylvinus/agent-vm/internal/quota"
- "github.com/sylvinus/agent-vm/internal/resource"
- "github.com/sylvinus/agent-vm/internal/state"
- "github.com/sylvinus/agent-vm/internal/vm"
- "github.com/sylvinus/agent-vm/internal/vmname"
+	"github.com/sylvinus/agent-vm/internal/daemon"
+	"github.com/sylvinus/agent-vm/internal/quota"
+	"github.com/sylvinus/agent-vm/internal/remote"
+	"github.com/sylvinus/agent-vm/internal/resource"
+	"github.com/sylvinus/agent-vm/internal/state"
+	"github.com/sylvinus/agent-vm/internal/vm"
+	"github.com/sylvinus/agent-vm/internal/vmname"
 )
 
 // A single app owns the existing read-only backend. Serialize calls until
@@ -121,7 +122,54 @@ func (d *daemonInventory) Create(ctx context.Context,input daemon.CreateRequest,
  return vmDTO(inst),nil
 }
 
+func (d *daemonInventory) ListHosts(ctx context.Context) ([]remote.Host, error) {
+	unlock, err := d.app.lockVM(ctx, "app-hosts")
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	return remote.Load(string(d.app.state))
+}
+
+func (d *daemonInventory) UpsertHost(ctx context.Context, h remote.Host) (remote.Host, error) {
+	unlock, err := d.app.lockVM(ctx, "app-hosts")
+	if err != nil {
+		return remote.Host{}, err
+	}
+	defer unlock()
+	return remote.Upsert(string(d.app.state), h)
+}
+
+func (d *daemonInventory) RemoveHost(ctx context.Context, name string) error {
+	unlock, err := d.app.lockVM(ctx, "app-hosts")
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return remote.Remove(string(d.app.state), name)
+}
+
 func daemonCommand(args []string, streams IO) int {
+	if len(args) == 2 && args[0] == "cancel" {
+		st, err := state.Default()
+		if err != nil {
+			fmt.Fprintln(streams.Stderr, err)
+			return 1
+		}
+		c := daemon.NewClient(daemon.SocketPath(string(st)))
+		defer c.Close()
+		var result any
+		if err = c.CancelTask(context.Background(), args[1], &result); err != nil {
+			fmt.Fprintln(streams.Stderr, err)
+			return 1
+		}
+		enc := json.NewEncoder(streams.Stdout)
+		enc.SetIndent("", "  ")
+		if err = enc.Encode(result); err != nil {
+			return 1
+		}
+		return 0
+	}
  if len(args)>0 && args[0]=="quota"{return daemonQuotaCommand(args,streams)}
  if len(args)>0 && args[0]=="session"{return daemonSessionCommand(args,streams)}
  if len(args)>0 && args[0]=="usage"{return daemonUsageCommand(args,streams)}

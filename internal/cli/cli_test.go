@@ -99,6 +99,12 @@ func TestHelp(t *testing.T) {
 		} {
 			s = strings.Replace(s, cut, "", 1)
 		}
+		// daemon subcommand is new.
+		if before, rest, ok := strings.Cut(s, "  daemon <command>"); ok {
+			if _, after, ok := strings.Cut(rest, "  install            "); ok {
+				s = before + "  install            " + after
+			}
+		}
 		// Network isolation and guarded files are new.
 		if before, rest, ok := strings.Cut(s, "The VMs reach the internet"); ok {
 			_, after, _ := strings.Cut(rest, "Both files are read when a VM starts.\n\n")
