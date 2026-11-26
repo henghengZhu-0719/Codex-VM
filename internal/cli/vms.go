@@ -59,6 +59,9 @@ func (e *app) stopCmd(ctx context.Context, args []string) int {
 	if status != 0 {
 		return status
 	}
+	unlock, err := e.lockVM(ctx, name)
+	if err != nil { fmt.Fprintln(e.io.Stderr, err); return 1 }
+	defer unlock()
 	fmt.Fprintf(e.io.Stdout, "Stopping VM '%s'...\n", name)
 	if !e.stopVM(ctx, name) {
 		fmt.Fprintf(e.io.Stderr, "Error: VM '%s' is still running, or Lima cannot say. See 'agent-vm list'.\n", name)
@@ -98,6 +101,9 @@ func (e *app) rmCmd(ctx context.Context, args []string) int {
 	if status != 0 {
 		return status
 	}
+	unlock, err := e.lockVM(ctx, name)
+	if err != nil { fmt.Fprintln(e.io.Stderr, err); return 1 }
+	defer unlock()
 	if !e.removeVM(ctx, name) {
 		return 1
 	}

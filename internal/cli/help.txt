@@ -2,6 +2,7 @@ Usage: agent-vm [options] <command> [args]
 
 Commands:
   daemon <command>   Local management service: serve, status, list, tasks, refresh;
+                     vm-start NAME, vm-stop NAME (async)
                      macOS: install, uninstall, start, stop, restart, logs
   install            Put agent-vm on your PATH (a link in ~/.local/bin, or
                      AGENT_VM_BIN_DIR)

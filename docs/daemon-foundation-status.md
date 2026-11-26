@@ -27,7 +27,15 @@ Graceful server shutdown now waits for the HTTP shutdown goroutine before releas
 
 ## Async task foundation
 
-The daemon now has a bounded single-worker queue (16 waiting tasks, 256 retained records), two-minute cooperative operation deadlines, task IDs and atomic JSON snapshots in its private run directory. Interrupted queued/running tasks are marked interrupted after restart, never replayed automatically. The first supported task is read-only VM inventory refresh. Submit with agent-vm daemon refresh, list with agent-vm daemon tasks. HTTP POST /api/v1/tasks/inventory returns 202 and a task ID; GET /api/v1/tasks and GET /api/v1/tasks/{id} expose records. GET /api/v1/events streams task snapshots on change and every 15 seconds, bounded to eight concurrent streams. Reconnecting clients receive a fresh snapshot rather than an event replay. Client disconnect does not cancel work. VM mutation endpoints are intentionally not exposed yet. The deadline is cooperative; backend calls must honor context.
+The daemon now has a bounded single-worker queue (16 waiting tasks, 256 retained records), two-minute cooperative operation deadlines, task IDs and atomic JSON snapshots in its private run directory. Interrupted queued/running tasks are marked interrupted after restart, never replayed automatically. The first supported task is read-only VM inventory refresh. Submit with agent-vm daemon refresh, list with agent-vm daemon tasks. HTTP POST /api/v1/tasks/inventory returns 202 and a task ID; GET /api/v1/tasks and GET /api/v1/tasks/{id} expose records. GET /api/v1/events streams task snapshots on change and every 15 seconds, bounded to eight concurrent streams. Reconnecting clients receive a fresh snapshot rather than an event replay. Client disconnect does not cancel work. The first lifecycle endpoints are now exposed for existing project VMs. The deadline is cooperative; backend calls must honor context.
+
+## Lifecycle migration (incremental)
+
+- POST /api/v1/vms/{id}/start and /stop submit asynchronous operations with a ten-minute cooperative deadline. CLI: agent-vm daemon vm-start NAME or vm-stop NAME.
+- Existing VM start verifies the original project via the first mount and derived VM name, reuses ensureRunningLocked and its existing security/mount checks, preserves all-read-only mode, and refuses unsafe environment overrides. No implicit migration or direct Backend.Start bypass. Base and scratch VMs are excluded. Operations verify final Lima state.
+- Task records include target VM; a second pending/running lifecycle operation for that target is rejected with HTTP 409. Daemon operations share the existing file lock with legacy explicit stop/rm and startup paths. Other legacy writers (destroy-all, scratch cleanup, desktop direct operations) still need audit; this is not complete global coordination.
+- A single worker and serialized backend access remain intentional until global Lima and policy interactions are audited; per-VM parallelism remains pending.
+- No create/delete API is exposed yet. Noninteractive start may fail if security confirmation or manual repair is needed. A failed task does not automatically replay or imply rollback.
 
 ## Remaining
 
@@ -36,4 +44,4 @@ The daemon now has a bounded single-worker queue (16 waiting tasks, 256 retained
 - Integrate lifecycle and manager operations into the task queue; add cancellation/idempotency, actual VM reconciliation, API error schema, security and compatibility tests. Verify task persistence and SSE at runtime.
 - Desktop/CLI integration beyond opt-in daemon commands.
 
-The read-only API deliberately does not change VM or network state. No claim of runtime verification or Phase 0–3 completion. Roll back by stopping the foreground daemon; legacy commands and data remain unchanged.
+The inventory API is read-only; explicit lifecycle requests can change VM state. No claim of runtime verification or Phase 0–3 completion. Roll back by stopping the foreground daemon; legacy commands and data remain unchanged.

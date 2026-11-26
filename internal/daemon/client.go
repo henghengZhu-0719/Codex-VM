@@ -7,6 +7,7 @@ import (
  "fmt"
  "net"
  "net/http"
+ "net/url"
  "time"
 )
 
@@ -28,6 +29,11 @@ func (c *Client) Get(ctx context.Context, path string, out any) error {
 
 func (c *Client) SubmitInventory(ctx context.Context,out any) error {
  return c.request(ctx,http.MethodPost,"/api/v1/tasks/inventory",http.StatusAccepted,out)
+}
+
+func (c *Client) ChangeVM(ctx context.Context, name, action string, out any) error {
+ if action!="start" && action!="stop"{return fmt.Errorf("unsupported VM action")}
+ return c.request(ctx,http.MethodPost,"/api/v1/vms/"+url.PathEscape(name)+"/"+action,http.StatusAccepted,out)
 }
 
 func (c *Client) request(ctx context.Context, method,path string,status int,out any) error {

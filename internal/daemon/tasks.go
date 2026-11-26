@@ -1,3 +1,5 @@
+//go:build darwin || linux
+
 package daemon
 
 import (
@@ -21,6 +23,7 @@ var ErrBusy = errors.New("task queue full or service closing")
 type Task struct {
  ID string `json:"id"`
  Kind string `json:"kind"`
+ Target string `json:"target,omitempty"`
  Status string `json:"status"`
  CreatedAt time.Time `json:"created_at"`
  UpdatedAt time.Time `json:"updated_at"`
@@ -28,7 +31,7 @@ type Task struct {
  VMs []VM `json:"vms,omitempty"`
 }
 
-type taskWork struct { id string; run func(context.Context) ([]VM,error) }
+type taskWork struct { id string; timeout time.Duration; run func(context.Context) ([]VM,error) }
 
 type TaskManager struct {
  mu sync.Mutex
@@ -74,12 +77,19 @@ func (m *TaskManager) persistLocked() error {
 func (m *TaskManager) notifyLocked(){close(m.changed);m.changed=make(chan struct{})}
 
 func (m *TaskManager) Submit(kind string, run func(context.Context)([]VM,error))(Task,error){
+ return m.SubmitTarget(kind,"",2*time.Minute,run)
+}
+
+func (m *TaskManager) SubmitTarget(kind,target string,timeout time.Duration,run func(context.Context)([]VM,error))(Task,error){
  m.mu.Lock();defer m.mu.Unlock()
  if m.closing || m.ctx.Err()!=nil || len(m.queue)>=cap(m.queue){return Task{},ErrBusy}
  var raw [16]byte
  if _,err:=rand.Read(raw[:]);err!=nil{return Task{},err}
+ if target!="" {
+  for _,existing:=range m.tasks {if existing.Target==target && (existing.Status=="queued" || existing.Status=="running"){return Task{},ErrBusy}}
+ }
  now:=time.Now().UTC()
- t:=Task{ID:hex.EncodeToString(raw[:]),Kind:kind,Status:"queued",CreatedAt:now,UpdatedAt:now}
+ t:=Task{ID:hex.EncodeToString(raw[:]),Kind:kind,Target:target,Status:"queued",CreatedAt:now,UpdatedAt:now}
  var evicted *Task
  if len(m.tasks)>=maxTasks {
   for _,v:=range m.tasks {
@@ -91,7 +101,7 @@ func (m *TaskManager) Submit(kind string, run func(context.Context)([]VM,error))
  }
  m.tasks[t.ID]=t
  if err:=m.persistLocked();err!=nil{delete(m.tasks,t.ID);if evicted!=nil{m.tasks[evicted.ID]=*evicted};return Task{},err}
- m.queue<-taskWork{id:t.ID,run:run}
+ m.queue<-taskWork{id:t.ID,timeout:timeout,run:run}
  m.notifyLocked()
  return t,nil
 }
@@ -117,7 +127,7 @@ func (m *TaskManager) worker(){
   case work:=<-m.queue:
    if m.ctx.Err()!=nil{return}
    if m.update(work.id,"running","",nil)!=nil{continue}
-   ctx,cancel:=context.WithTimeout(m.ctx,2*time.Minute)
+   ctx,cancel:=context.WithTimeout(m.ctx,work.timeout)
    result,err:=work.run(ctx)
    ctxErr:=ctx.Err()
    cancel()
