@@ -22,6 +22,8 @@ type Session struct {
  Name string `json:"name"`
  Attached int `json:"attached"`
  CreatedAt time.Time `json:"created_at"`
+ Agent string `json:"agent,omitempty"`
+ LastActivity time.Time `json:"last_activity"`
 }
 
 func ValidAgent(s string)bool{
@@ -41,16 +43,18 @@ func List(ctx context.Context,b vm.Backend,name string)([]Session,error){
  // An absent tmux server is normal; a missing tmux installation is not.
  raw,err:=command(ctx,b,name,"","sh","-c",`command -v tmux >/dev/null || exit 127
  if [ ! -S "${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/agent-vm" ]; then exit 0; fi
- exec tmux -L agent-vm list-sessions -F '#{session_name}|#{session_attached}|#{session_created}'`)
+ exec tmux -L agent-vm list-sessions -F '#{session_name}|#{session_attached}|#{session_created}|#{@agent-vm-tool}|#{session_activity}'`)
  if err!=nil{return nil,err}
  result:=[]Session{}
  for _,line:=range strings.Split(strings.TrimSpace(raw),"\n"){
   if line==""{continue}
   fields:=strings.Split(line,"|")
-  if len(fields)!=3 || !ValidName(fields[0]){return nil,errors.New("invalid session record")}
+  if len(fields)!=5 || !ValidName(fields[0]){return nil,errors.New("invalid session record")}
   n,e:=strconv.Atoi(fields[1]);ts,e2:=strconv.ParseInt(fields[2],10,64)
   if e!=nil || e2!=nil{return nil,errors.New("invalid session metadata")}
-  result=append(result,Session{Name:fields[0],Attached:n,CreatedAt:time.Unix(ts,0).UTC()})
+  activity,e3:=strconv.ParseInt(fields[4],10,64);if e3!=nil{return nil,errors.New("invalid session activity")}
+  agent:=fields[3];if !ValidAgent(agent){agent=""}
+  result=append(result,Session{Name:fields[0],Attached:n,CreatedAt:time.Unix(ts,0).UTC(),Agent:agent,LastActivity:time.Unix(activity,0).UTC()})
  }
  return result,nil
 }
@@ -65,7 +69,8 @@ func Create(ctx context.Context,b vm.Backend,vmName,dir,name,agent string)error{
  switch agent{case "codex-resume":tool="codex";program="codex resume; exec zsh -l";case "claude-resume":tool="claude";program="claude --resume; exec zsh -l"}
  _,err:=command(ctx,b,vmName,dir,"sh","-c",`command -v tmux >/dev/null || exit 127
  if [ "$2" != shell ]; then command -v "$2" >/dev/null || exit 127; fi
- exec tmux -L agent-vm new-session -d -s "$1" -c "$PWD" "zsh -l -c '$3'"`,"agent-vm",name,tool,program)
+ tmux -L agent-vm new-session -d -s "$1" -c "$PWD" "zsh -l -c '$3'" || exit $?
+ exec tmux -L agent-vm set-option -t "=$1" @agent-vm-tool "$4"`,"agent-vm",name,tool,program,agent)
  return err
 }
 

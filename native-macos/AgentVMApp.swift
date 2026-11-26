@@ -1137,11 +1137,11 @@ cat /var/lib/agent-vm-region/status
         autoSleepingVMs.insert(vm.name)
         let vmName = vm.name
         let label = displayName(for: vm)
-        run(["stop", vmName]) { [weak self] code, _ in
+        run(["daemon", "idle-stop", vmName]) { [weak self] code, _ in
             guard let self else { return }
             self.autoSleepingVMs.remove(vmName)
-            self.stopVMMihomo(vmName)
             if code == 0 {
+                self.stopVMMihomo(vmName)
                 self.vmLastActiveAt.removeValue(forKey: vmName)
                 self.vmIdleSeconds.removeValue(forKey: vmName)
                 self.pushToast(title: reason, message: label, level: "info", vmName: vmName)

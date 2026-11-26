@@ -107,3 +107,9 @@ The inventory API is read-only; explicit lifecycle requests can change VM state.
 - Session creation accepts codex-resume and claude-resume for native interactive history pickers, distinct from attaching a live tmux session.
 - Desktop defaults auto-sleep to disabled for new preferences, treats missing metrics as active, counts managed tmux sessions even when detached, and respects disabled auto-sleep under critical memory pressure. Existing explicit auto-sleep preferences remain. This is best-effort protection, not a race-free lease; stale samples and direct stop can still interrupt sessions.
 - Guest metrics recognize tmux server process names. No automatic VM stop or second memory controller added. Compile/runtime tests pending.
+
+## Session tools and idle-stop guard
+
+- Added guest tool inventory and credential-file presence hints (not verified login), explicit noninteractive tmux installation via existing guest apt/network path, and tmux session tool/last-activity metadata. CLI: daemon session tools VM; daemon session install-tmux VM.
+- Desktop automatic stop now invokes daemon idle-stop VM, a local guarded command taking the existing VM lock and requiring two fresh idle samples. A failed check does not stop the VM proxy. Explicit manual stop remains unchanged. This is best-effort; arbitrary guest process launches outside the lock can race, and idle checks are conservative heuristics. No actual hypervisor pause.
+- No compilation or runtime verification performed.

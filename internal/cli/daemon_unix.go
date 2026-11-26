@@ -16,6 +16,7 @@ import (
 
  "github.com/sylvinus/agent-vm/internal/daemon"
  "github.com/sylvinus/agent-vm/internal/quota"
+ "github.com/sylvinus/agent-vm/internal/resource"
  "github.com/sylvinus/agent-vm/internal/state"
  "github.com/sylvinus/agent-vm/internal/vm"
  "github.com/sylvinus/agent-vm/internal/vmname"
@@ -79,13 +80,19 @@ func (d *daemonInventory) Change(ctx context.Context,name,action string)(daemon.
   if !d.app.deleteVM(ctx,name){return daemon.VM{},errors.New("VM deletion not verified")}
   d.quotaMu.Lock();delete(d.quotas,name);d.quotaMu.Unlock()
   return daemon.VM{Name:name,Status:"Deleted"},nil
+ case "idle-stop":
+  if inst.Status==vm.Stopped{return vmDTO(inst),nil}
+  if inst.Status!=vm.Running{return daemon.VM{},errors.New("VM not running")}
+  b,err:=d.app.readOnlyBackend();if err!=nil{return daemon.VM{},err}
+  for i:=0;i<2;i++{m,err:=resource.Inspect(ctx,b,name);if err!=nil||!m.IdleCandidate{return daemon.VM{},errors.New("VM activity detected or unknown")}}
+  if !d.app.stopVM(ctx,name){return daemon.VM{},errors.New("VM stop not verified")}
  case "stop":
   if inst.Status==vm.Stopped{return vmDTO(inst),nil}
   if !d.app.stopVM(ctx,name){return daemon.VM{},errors.New("VM stop not verified")}
  default:return daemon.VM{},errors.New("unsupported VM action")
  }
  inst,err=d.instance(ctx,name);if err!=nil{return daemon.VM{},err}
- if (action=="start" && inst.Status!=vm.Running)||(action=="stop" && inst.Status!=vm.Stopped){return daemon.VM{},errors.New("VM did not reach requested state")}
+ if (action=="start" && inst.Status!=vm.Running)||((action=="stop"||action=="idle-stop") && inst.Status!=vm.Stopped){return daemon.VM{},errors.New("VM did not reach requested state")}
  return vmDTO(inst),nil
 }
 
@@ -140,6 +147,11 @@ func daemonCommand(args []string, streams IO) int {
   if err=json.NewEncoder(streams.Stdout).Encode(result);err!=nil{return 1};return 0
  }
 
+ if len(args)==2 && args[0]=="idle-stop"{
+  a,err:=newApp(streams);if err!=nil{fmt.Fprintln(streams.Stderr,err);return 1};a.migrate=nil
+  if !sessionVMName.MatchString(args[1]){return 2}
+  _,err=(&daemonInventory{app:a}).Change(context.Background(),args[1],"idle-stop");if err!=nil{fmt.Fprintln(streams.Stderr,err);return 1};return 0
+ }
  if len(args)==2 && (args[0]=="vm-start" || args[0]=="vm-stop"){
   st,err:=state.Default();if err!=nil{fmt.Fprintln(streams.Stderr,err);return 1}
   c:=daemon.NewClient(daemon.SocketPath(string(st)));defer c.Close()

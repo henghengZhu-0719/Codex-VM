@@ -37,6 +37,7 @@ func (d *daemonInventory) ChangeSession(ctx context.Context,name,action string,i
  if inst.Status!=vm.Running{return errors.New("VM not running")}
  b,err:=d.app.readOnlyBackend();if err!=nil{return err}
  switch action{
+ case "install-tmux":return session.InstallTmux(ctx,b,name)
  case "create":
   if len(inst.Mounts)==0{return errors.New("project mount unavailable")}
   dir,err:=vmname.AbsDir(inst.Mounts[0].Location)
@@ -49,7 +50,7 @@ func (d *daemonInventory) ChangeSession(ctx context.Context,name,action string,i
 
 func daemonSessionCommand(args []string,streams IO)int{
  fail:=func(err error)int{fmt.Fprintln(streams.Stderr,err);return 1}
- usage:=func()int{fmt.Fprintln(streams.Stderr,"Usage: agent-vm daemon session list VM | create VM NAME [shell|codex|claude|opencode|vibe|pi|codex-resume|claude-resume] | attach VM NAME | stop VM NAME --confirm");return 2}
+ usage:=func()int{fmt.Fprintln(streams.Stderr,"Usage: agent-vm daemon session tools VM | install-tmux VM | list VM | create VM NAME [shell|codex|claude|opencode|vibe|pi|codex-resume|claude-resume] | attach VM NAME | stop VM NAME --confirm");return 2}
  if len(args)<3||!sessionVMName.MatchString(args[2]){return usage()}
  name:=args[2]
  if args[1]=="attach"{
@@ -66,6 +67,12 @@ func daemonSessionCommand(args []string,streams IO)int{
  path:="/api/v1/vms/"+url.PathEscape(name)+"/sessions"
  var result any
  switch args[1]{
+ case "tools":
+  if len(args)!=3{return usage()}
+  err=c.Get(context.Background(),path+"/tools",&result)
+ case "install-tmux":
+  if len(args)!=3{return usage()}
+  err=c.SubmitEmpty(context.Background(),path+"/install-tmux",&result)
  case "list":
   if len(args)!=3{return usage()}
   err=c.Get(context.Background(),path,&result)
@@ -81,4 +88,12 @@ func daemonSessionCommand(args []string,streams IO)int{
  if err!=nil{return fail(err)}
  enc:=json.NewEncoder(streams.Stdout);enc.SetIndent("","  ")
  if err=enc.Encode(result);err!=nil{return fail(err)};return 0
+}
+
+func (d *daemonInventory) SessionTools(ctx context.Context,name string)(session.Tools,error){
+ d.mu.Lock();defer d.mu.Unlock()
+ inst,err:=d.instance(ctx,name);if err!=nil{return session.Tools{},err}
+ if inst.Status!=vm.Running{return session.Tools{},errors.New("VM not running")}
+ b,err:=d.app.readOnlyBackend();if err!=nil{return session.Tools{},err}
+ return session.InspectTools(ctx,b,name)
 }
