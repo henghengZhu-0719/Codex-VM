@@ -63,3 +63,11 @@ The daemon now has a bounded single-worker queue (16 waiting tasks, 256 retained
 - Desktop/CLI integration beyond opt-in daemon commands.
 
 The inventory API is read-only; explicit lifecycle requests can change VM state. No claim of runtime verification or Phase 0–3 completion. Roll back by stopping the foreground daemon; legacy commands and data remain unchanged.
+
+## Network queries and concurrency audit
+
+- Added GET /api/v1/network/delay?node=ID and GET /api/v1/network/connections, CLI daemon proxy delay ID and daemon proxy connections. The latter reports totals and connection count, not destination history; controller failure is distinct from an empty connection list.
+- Proxy read queries use the shared app-proxy lock but no longer take the daemon VM mutex. Query deadline is cooperative. Delay is per-node rather than unbounded all-node fanout.
+- Background task panics are converted to failed task records rather than terminating the daemon.
+- Audited internal/vm/lima.go: NewLima and prepare use process-wide environment, withLog changes the global logrus writer, and lifecycle operations call global network reconciliation. Simply increasing workers or removing the inventory mutex would not provide safe VM parallelism. Keep one mutation worker until process-isolated execution or a broader Lima refactor is implemented. No additional service is needed.
+- Compile and runtime tests remain pending.

@@ -8,6 +8,7 @@ import (
  "encoding/hex"
  "encoding/json"
  "errors"
+ "log/slog"
  "os"
  "path/filepath"
  "sort"
@@ -128,7 +129,7 @@ func (m *TaskManager) worker(){
    if m.ctx.Err()!=nil{return}
    if m.update(work.id,"running","",nil)!=nil{continue}
    ctx,cancel:=context.WithTimeout(m.ctx,work.timeout)
-   result,err:=work.run(ctx)
+   result,err:=runTaskSafely(ctx,work.run)
    ctxErr:=ctx.Err()
    cancel()
    switch {
@@ -139,6 +140,12 @@ func (m *TaskManager) worker(){
    }
   }
  }
+}
+
+// Keep a failed handler from terminating the whole daemon.
+func runTaskSafely(ctx context.Context,run func(context.Context)([]VM,error))(result []VM,err error){
+ defer func(){if recover()!=nil{slog.Error("background task panicked");result=nil;err=errors.New("task panicked")}}()
+ return run(ctx)
 }
 
 func (m *TaskManager) Get(id string)(Task,bool){

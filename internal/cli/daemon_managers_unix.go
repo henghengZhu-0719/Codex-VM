@@ -10,6 +10,8 @@ import (
  "fmt"
  "io"
  "path/filepath"
+ "time"
+ "github.com/sylvinus/agent-vm/internal/managedproxy"
  "net/url"
 
  "github.com/sylvinus/agent-vm/internal/daemon"
@@ -33,7 +35,6 @@ func (d *daemonInventory) ChangeVolume(ctx context.Context,name string,in daemon
 }
 
 func (d *daemonInventory) NetworkStatus(ctx context.Context)(any,error){
- d.mu.Lock();defer d.mu.Unlock()
  a:=d.managerApp(nil)
  unlock,err:=a.lockVM(ctx,"app-proxy");if err!=nil{return nil,err};defer unlock()
  st,err:=a.buildProxyStatus(ctx);if err!=nil{return nil,err}
@@ -45,6 +46,33 @@ func (d *daemonInventory) NetworkStatus(ctx context.Context)(any,error){
  }
  return map[string]any{"proxy_mode":st.ProxyMode,"managed_enabled":st.ManagedEnabled,"use_proxy":st.UseProxy,"running":st.Running,
   "core_available":st.CoreAvailable,"port":st.Port,"selected":st.Selected,"route":st.Route,"sources":sources,"gate_count":len(st.Gates)},nil
+}
+
+// Queries use the existing proxy lock without occupying the VM operation lane.
+func (d *daemonInventory) NetworkQuery(ctx context.Context,kind,node string)(any,error){
+ a:=d.managerApp(nil)
+ ctx,cancel:=context.WithTimeout(ctx,12*time.Second);defer cancel()
+ unlock,err:=a.lockVM(ctx,"app-proxy");if err!=nil{return nil,err};defer unlock()
+ switch kind {
+ case "delay":
+  s,err:=managedproxy.Load(string(a.state));if err!=nil{return nil,err}
+  delay,err:=managedproxy.Delay(ctx,string(a.state),s,node);if err!=nil{return nil,err}
+  return map[string]any{"node":node,"delay_ms":delay},nil
+ case "connections":
+  // Unlike the legacy helper, distinguish controller failure from no traffic.
+  var raw struct {
+   Upload int64 `json:"uploadTotal"`
+   Download int64 `json:"downloadTotal"`
+   Connections []struct {
+    Upload int64 `json:"upload"`
+    Download int64 `json:"download"`
+    Metadata struct { Network string `json:"network"` } `json:"metadata"`
+   } `json:"connections"`
+  }
+  if err:=managedproxy.API(ctx,string(a.state),"GET","/connections",nil,&raw);err!=nil{return nil,err}
+  return map[string]any{"upload_total":raw.Upload,"download_total":raw.Download,"connection_count":len(raw.Connections)},nil
+ }
+ return nil,errors.New("unsupported network query")
 }
 
 func (d *daemonInventory) ChangeProxy(ctx context.Context,in daemon.ProxyRequest)error{
@@ -61,7 +89,7 @@ func (d *daemonInventory) ChangeProxy(ctx context.Context,in daemon.ProxyRequest
 
 func daemonManagerCommand(args []string,streams IO)int{
  fail:=func(err error)int{fmt.Fprintln(streams.Stderr,err);return 1}
- usage:=func()int{fmt.Fprintln(streams.Stderr,"Usage: agent-vm daemon volume {add|remove} NAME PATH {ro|rw}; daemon proxy {status|config|import|manual|apply|refresh|delete|stop|gate-close|probe}");return 2}
+ usage:=func()int{fmt.Fprintln(streams.Stderr,"Usage: agent-vm daemon volume {add|remove} NAME PATH {ro|rw}; daemon proxy {status|config|import|manual|apply|refresh|delete|stop|gate-close|probe|delay|connections}");return 2}
  st,err:=state.Default();if err!=nil{return fail(err)}
  c:=daemon.NewClient(daemon.SocketPath(string(st)));defer c.Close()
  ctx:=context.Background()
@@ -76,6 +104,12 @@ func daemonManagerCommand(args []string,streams IO)int{
  case "proxy":
   if len(args)<2{return usage()}
   in:=daemon.ProxyRequest{Action:args[1]}
+  if in.Action=="delay" || in.Action=="connections" {
+   path:="/api/v1/network/"+in.Action
+   if in.Action=="delay"{if len(args)!=3{return usage()};path+="?node="+url.QueryEscape(args[2])}else if len(args)!=2{return usage()}
+   if err=c.Get(ctx,path,&result);err!=nil{return fail(err)}
+   break
+  }
   if in.Action=="status"{
    if len(args)!=2{return usage()}
    if err=c.Get(ctx,"/api/v1/network/status",&result);err!=nil{return fail(err)}

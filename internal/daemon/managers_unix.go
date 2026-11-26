@@ -29,6 +29,7 @@ type ProxyRequest struct {
 type Managers interface {
  ChangeVolume(context.Context,string,VolumeRequest) error
  NetworkStatus(context.Context)(any,error)
+ NetworkQuery(context.Context,string,string)(any,error)
  ChangeProxy(context.Context,ProxyRequest) error
 }
 
@@ -73,6 +74,15 @@ func registerManagerRoutes(mux *http.ServeMux,inventory Inventory,tasks *TaskMan
   if err!=nil{send(w,503,map[string]string{"error":"network status unavailable"});return}
   send(w,200,result)
  })
+ for _,kind:=range []string{"delay","connections"}{
+  mux.HandleFunc("GET /api/v1/network/"+kind,func(w http.ResponseWriter,r *http.Request){
+   node:=r.URL.Query().Get("node")
+   if kind=="delay" && (node=="" || len(node)>256){send(w,400,map[string]string{"error":"node required"});return}
+   result,err:=manager.NetworkQuery(r.Context(),kind,node)
+   if err!=nil{send(w,503,map[string]string{"error":"network query unavailable"});return}
+   send(w,200,result)
+  })
+ }
  if tasks==nil{return}
  mux.HandleFunc("POST /api/v1/vms/{id}/mounts",func(w http.ResponseWriter,r *http.Request){
   name:=r.PathValue("id")
