@@ -86,3 +86,11 @@ The inventory API is read-only; explicit lifecycle requests can change VM state.
 - Missing metrics are explicitly unavailable, not zero. Stopped VMs return configuration only. Idle candidate is a conservative instantaneous observation, not a sustained idle timer or permission to stop. Process-name checks are heuristic, not comprehensive.
 - Audited Desktop SmartMemoryManager and AgentVMApp: existing autoSleepVM calls stop, not a resumable hypervisor pause. Existing balloon controller writes from Desktop; daemon only reads to avoid competing controllers. No new automatic sleep, stop, cache drop, balloon write or resume action. Actual suspend/resume backend capability and unified ownership must be implemented separately.
 - Compile/runtime tests pending.
+
+## Detached AI/terminal sessions
+
+- Added guest tmux session manager using a separate agent-vm socket name. List/create/stop via local daemon API, attach via direct existing guest SSH/PTY path. No arbitrary command HTTP endpoint and no additional daemon.
+- CLI: agent-vm daemon session create VM NAME codex; agent-vm daemon session list VM; agent-vm daemon session attach VM NAME; agent-vm daemon session stop VM NAME --confirm. Shell, Codex, Claude, OpenCode, Vibe and Pi supported; guest tmux and chosen tool must already be installed. No automatic install.
+- Sessions are independent of Desktop and management client connection while the guest and tmux server remain running. Detach using Ctrl-b d. Stop kills the selected session; VM shutdown/reboot destroys live processes. Native AI history resume remains separate.
+- Create uses the verified existing project mount and fixed agent commands without adding approval bypass flags. Duplicate names rejected by tmux. API lifecycle operations serialized by existing VM lock. Direct attach does not hold the VM lock for the duration of the terminal.
+- Desktop legacy auto-sleep still needs unified activity ownership; turn off auto-sleep when relying on long-running sessions. Quota reporting and remote host CLI routing remain pending. No runtime or compile verification.
