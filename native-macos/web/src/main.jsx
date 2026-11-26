@@ -70,6 +70,7 @@ const blank = {
   remoteHostStatus: '未连接',
   remoteHostConnectionState: 'disconnected',
   activeRemoteHostID: '',
+  daemon: { connected: false, status: 'disconnected', tasks: [] },
   cliMonitor: {
     autoUpdate: true,
     checking: false,
@@ -1322,7 +1323,8 @@ function App() {
                   const list = state.remoteVMLists?.[h.id];
                   const vms = list?.vms || [];
                   const selected = vms.find(vm => vm.name === selectedRemoteVMs[h.id]);
-                  const placeholder = !list || list.loading ? '加载中…' : list.error ? '加载失败' : vms.length ? '选择 VM' : '暂无运行中的 VM';
+                  const placeholder = !list || list.loading ? '加载中…' : list.error ? '加载失败' : vms.length ? '选择 VM' : '暂无 VM';
+                  const isRunning = selected?.status === 'Running';
                   return (
                     <div className="remote-host" key={h.id}>
                       <div className="remote-host-heading">
@@ -1339,9 +1341,9 @@ function App() {
                           <option value="" disabled>{placeholder}</option>
                           {vms.map(vm => (
                             <option key={vm.name} value={vm.name}>
-                              {vms.some(other => other.name !== vm.name && other.displayName === vm.displayName)
+                              {(vms.some(other => other.name !== vm.name && other.displayName === vm.displayName)
                                 ? `${vm.displayName} · ${vm.name}`
-                                : vm.displayName}
+                                : vm.displayName) + (vm.status ? ` [${vm.status === 'Running' ? '运行中' : vm.status}]` : '')}
                             </option>
                           ))}
                         </select>
@@ -1349,10 +1351,26 @@ function App() {
                           onClick={() => bridge('remoteVMList', { id: h.id })}>
                           <RefreshCw size={14} />
                         </IconButton>
-                        <button className="primary" disabled={!selected || list?.loading}
+                        <button className="primary" disabled={!selected || !isRunning || list?.loading}
                           onClick={() => bridge('remoteVMTerminal', { id: h.id, vmName: selected.name })}>
                           <Terminal size={14} /> 连接 VM
                         </button>
+                        {selected && !isRunning && (
+                          <button className="secondary" disabled={list?.loading}
+                            onClick={() => bridge('remoteHostVMStart', { id: h.id, vmName: selected.name })}>
+                            启动
+                          </button>
+                        )}
+                        {selected && isRunning && (
+                          <button className="secondary" disabled={list?.loading}
+                            onClick={() => {
+                              if (window.confirm(`确定停止远程主机「${h.name}」上的虚拟机「${selected.displayName}」？`)) {
+                                bridge('remoteHostVMStop', { id: h.id, vmName: selected.name });
+                              }
+                            }}>
+                            停止
+                          </button>
+                        )}
                         <button className="secondary" disabled={state.remoteHostConnectionState === 'connecting'}
                           onClick={() => bridge('remoteHostConnect', { id: h.id })}>
                           {state.activeRemoteHostID === h.id ? (state.remoteHostConnectionState === 'connecting' ? '正在连接网页…' : '网页重连') : '网页模式'}
@@ -1378,6 +1396,32 @@ function App() {
                 {!!state.activeRemoteHostID && <div className="inline-actions">
                   <button className="secondary" onClick={() => bridge('remoteHostDisconnect')}>断开连接</button>
                 </div>}
+              </section>
+              <section className="panel">
+                <h2>本机后台服务（Daemon）与任务队列</h2>
+                <div className="muted" style={{ marginBottom: 10 }}>
+                  状态：{state.daemon?.connected ? '已连接（SSE 实时同步 · 退出 App 不停止后台任务）' : state.daemon?.status === 'reconnecting' ? '未检测到后台服务（重连中，当前使用兼容模式）' : '未连接'}
+                </div>
+                {(state.daemon?.tasks || []).length === 0 ? (
+                  <div className="muted">暂无后台任务记录。</div>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    {(state.daemon?.tasks || []).slice(0, 8).map(task => (
+                      <div key={task.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, fontSize: 12 }}>
+                        <span>
+                          <strong>{task.kind}</strong>
+                          {task.target ? ` · ${task.target}` : ''}
+                          {' · '}
+                          <span className="muted">{task.status}</span>
+                          {task.error ? ` (${task.error})` : ''}
+                        </span>
+                        {(task.status === 'queued' || task.status === 'running') && (
+                          <button className="secondary" onClick={() => bridge('daemonCancelTask', { id: task.id })}>取消</button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
               </section>
               <section className="panel">
                 <h2>本机远程工作台（提供给其他设备连接）</h2>

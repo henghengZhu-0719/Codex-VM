@@ -249,6 +249,12 @@ struct CodexQuotaStatus: Decodable {
     @Published var remoteHostConnectionState = "disconnected"
     @Published private(set) var remoteVMLists: [String: RemoteVMList] = [:]
     let remoteHostConnection = RemoteHostConnection()
+    @Published var daemonConnected = false
+    @Published var daemonStatus = "disconnected"
+    @Published var daemonTasks: [DaemonTask] = []
+    let daemonClient = DaemonClient()
+    private var daemonEventStream: DaemonEventStream?
+    private var lastCompletedTaskIDs: Set<String> = []
     let chatStore = AgentChatStore()
     private var codexProcesses: [String: Process] = [:]
     private var stoppedSessions: Set<String> = []
@@ -313,6 +319,8 @@ struct CodexQuotaStatus: Decodable {
         }
         terminationObserver = NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated {
+                // Closing the desktop client disconnects SSE only; it never stops the background daemon or active tasks.
+                self?.daemonEventStream?.stop()
                 self?.pressureMonitor.stop()
                 self?.codeEditorManager.stopAll()
                 self?.stopAllVMMihomo()
@@ -322,6 +330,31 @@ struct CodexQuotaStatus: Decodable {
                 self?.remoteHostConnection.disconnect()
             }
         }
+        let stream = DaemonEventStream(client: daemonClient)
+        stream.onStateChange = { [weak self] connected, status in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let wasConnected = self.daemonConnected
+                self.daemonConnected = connected
+                self.daemonStatus = status
+                if connected && !wasConnected {
+                    self.refresh()
+                }
+            }
+        }
+        stream.onTasks = { [weak self] tasks in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.daemonTasks = tasks
+                let finished = Set(tasks.filter { $0.status == "succeeded" || $0.status == "failed" || $0.status == "cancelled" }.map(\.id))
+                if !self.lastCompletedTaskIDs.isEmpty && !finished.subtracting(self.lastCompletedTaskIDs).isEmpty {
+                    self.refresh()
+                }
+                self.lastCompletedTaskIDs = finished
+            }
+        }
+        daemonEventStream = stream
+        stream.start()
         pressureMonitor.onChange = { [weak self] level in
             Task { @MainActor in
                 self?.handleHostMemoryPressure(level)
@@ -1850,6 +1883,44 @@ print(json.dumps({
         }
     }
 
+    func cancelDaemonTask(_ id: String) {
+        let client = daemonClient
+        Task { [weak self] in
+            do {
+                _ = try await Task.detached(priority: .utility) {
+                    try client.cancelTask(id: id)
+                }.value
+                await MainActor.run {
+                    self?.pushToast(title: "已取消后台任务", message: String(id.prefix(8)), level: "ok")
+                }
+            } catch {
+                await MainActor.run {
+                    self?.pushToast(title: "取消任务失败", message: error.localizedDescription, level: "error")
+                }
+            }
+        }
+    }
+
+    func changeRemoteHostVM(_ host: RemoteHostProfile, vmName: String, action: String) {
+        remoteHostStatus = "正在对 \(host.name) / \(vmName) 执行 \(action)…"
+        Task { [weak self] in
+            let (ok, message) = await Task.detached(priority: .utility) {
+                RemoteHostConnection.changeVM(host, vmName: vmName, action: action)
+            }.value
+            guard let self else { return }
+            if ok {
+                self.remoteHostStatus = "已向 \(host.name) 提交 \(action) 任务（\(vmName)）"
+                self.pushToast(title: "远程 VM 操作已提交", message: "\(host.name) / \(vmName): \(action)", level: "ok")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+                    self?.refreshRemoteVMs(host)
+                }
+            } else {
+                self.remoteHostStatus = message
+                self.pushToast(title: "远程 VM 操作失败", message: message, level: "error")
+            }
+        }
+    }
+
     func removeRemoteHost(_ id: String) {
         if remoteHostConnection.activeHostID == id { remoteHostConnection.disconnect() }
         remoteHosts.removeAll { $0.id == id }
@@ -2366,6 +2437,30 @@ print(json.dumps({
         }
     }
     func stop(_ vm: VM) {
+        if daemonConnected {
+            let client = daemonClient
+            let vmName = vm.name
+            output = "已提交后台停止任务：\(vmName)\n"
+            operationFailed = false
+            Task { [weak self] in
+                do {
+                    let task = try await Task.detached(priority: .utility) {
+                        try client.changeVM(name: vmName, action: "stop")
+                    }.value
+                    await MainActor.run {
+                        self?.stopVMMihomo(vmName)
+                        self?.pushToast(title: "后台停止已提交", message: "\(vmName) · 任务 \(task.id.prefix(8))", level: "ok", vmName: vmName)
+                    }
+                } catch {
+                    await MainActor.run {
+                        self?.output = error.localizedDescription
+                        self?.operationFailed = true
+                        self?.pushToast(title: "停止失败", message: error.localizedDescription, level: "error", vmName: vmName)
+                    }
+                }
+            }
+            return
+        }
         busy = true
         run(["stop", vm.name]) { code, text in
             self.stopVMMihomo(vm.name)
@@ -2377,6 +2472,30 @@ print(json.dumps({
         if panel.runModal() == .OK { project = panel.url?.path ?? "" }
     }
     func start(_ vm: VM) {
+        if daemonConnected {
+            guard saveNetworkSettings(), prepareSharedFolder() else { return }
+            let client = daemonClient
+            let vmName = vm.name
+            output = "已提交后台启动任务：\(vmName)\n"
+            operationFailed = false
+            Task { [weak self] in
+                do {
+                    let task = try await Task.detached(priority: .utility) {
+                        try client.changeVM(name: vmName, action: "start")
+                    }.value
+                    await MainActor.run {
+                        self?.pushToast(title: "后台启动已提交", message: "\(vmName) · 任务 \(task.id.prefix(8))", level: "ok", vmName: vmName)
+                    }
+                } catch {
+                    await MainActor.run {
+                        self?.output = error.localizedDescription
+                        self?.operationFailed = true
+                        self?.pushToast(title: "启动失败", message: error.localizedDescription, level: "error", vmName: vmName)
+                    }
+                }
+            }
+            return
+        }
         guard let project = vmMounts[vm.name]?.first?.location else {
             output = "无法确定该虚拟机的项目文件夹。"; operationFailed = true; return
         }

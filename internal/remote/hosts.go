@@ -140,6 +140,23 @@ func Upsert(stateDir string, h Host) (Host, error) {
 	return h, nil
 }
 
+// Find looks up a configured remote host by alias name.
+func Find(stateDir, name string) (Host, error) {
+	if !hostAliasRe.MatchString(name) {
+		return Host{}, fmt.Errorf("%w: invalid host name", ErrInvalid)
+	}
+	hosts, err := Load(stateDir)
+	if err != nil {
+		return Host{}, err
+	}
+	for _, h := range hosts {
+		if h.Name == name {
+			return h, nil
+		}
+	}
+	return Host{}, ErrNotFound
+}
+
 // Remove deletes a named remote host entry.
 func Remove(stateDir, name string) error {
 	if !hostAliasRe.MatchString(name) {

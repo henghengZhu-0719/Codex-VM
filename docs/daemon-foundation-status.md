@@ -124,3 +124,12 @@ The inventory API is read-only; explicit lifecycle requests can change VM state.
 - Added versioned, atomic remote host metadata store (`internal/remote/hosts.go`, `~/.agent-vm/config/hosts.json`, `0600`, no SSH credentials) and `/api/v1/hosts` endpoints.
 - Added unified API error payload (`{"code", "error"}`), `X-Agent-VM-API-Version: 1` header, `POST /api/v1/tasks/{id}/cancel` (`agent-vm daemon cancel ID`), `Idempotency-Key` deduplication on mutation endpoints, explicit `501` `/pause` & `/resume` contract endpoints, `.bak` corrupt task journal recovery, and startup VM reconciliation scan.
 - Verified `go build ./...`, `go vet ./...`, and `go test -race -v ./internal/daemon ./internal/remote ./internal/session ./internal/cli` all pass.
+
+
+## Batch 2 completion and verification (Phase 4–5)
+
+- Added custom transport dialer support to `daemon.Client` (`NewClientWithDialer`) and implemented hardened OpenSSH stdio daemon tunneling (`internal/remote/ssh.go`, `DialDaemon`, `CheckSSH`, `ExecVMPty`) enforcing `StrictHostKeyChecking=yes`, `ForwardAgent=no`, and `ForwardX11=no` with zero listening ports.
+- Added CLI remote host management (`agent-vm host add/list/remove/check`) and `--host NAME <list|start|stop|rm|tasks|cancel|shell|codex|claude|opencode|vibe|pi>` (`internal/cli/host_unix.go`, `internal/cli/host_test.go`).
+- Added native Swift Unix-socket `DaemonClient` and auto-reconnecting `DaemonEventStream` (`native-macos/DaemonClient.swift`) wired into `AgentVMApp.swift` and `ReactWorkbenchView.swift`; VM start/stop routes through the background Daemon when connected, and closing Desktop only closes the SSE socket without stopping the Daemon or active tasks.
+- Upgraded `RemoteHostConnection.swift` and React UI (`native-macos/web/src/main.jsx`) to display all remote VM states (including Stopped), support remote start/stop via SSH daemon commands, and display live Daemon SSE status and cancellable task queue.
+- Verified Go (`-race`), React (`vite build`), and macOS SwiftUI build (`native-macos/build.sh`).

@@ -61,6 +61,23 @@ func Main(args []string, io IO) int {
 	if len(args) > 0 && args[0] == "daemon" {
 		return daemonCommand(args[1:], io)
 	}
+	if len(args) > 0 && args[0] == "host" {
+		return hostCommand(args[1:], io)
+	}
+	if len(args) > 0 && (args[0] == "--host" || strings.HasPrefix(args[0], "--host=")) {
+		var hostName string
+		var rest []string
+		if args[0] == "--host" {
+			if len(args) < 2 {
+				fmt.Fprintln(io.Stderr, "Error: --host requires a host name")
+				return exitUsage
+			}
+			hostName, rest = args[1], args[2:]
+		} else {
+			hostName, rest = strings.TrimPrefix(args[0], "--host="), args[1:]
+		}
+		return remoteHostCommand(hostName, rest, io)
+	}
 	ctx := context.Background()
 	if !needsState(args) {
 		return (&app{io: io}).main(ctx, args)

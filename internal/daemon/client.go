@@ -20,13 +20,26 @@ type Client struct {
 }
 
 func NewClient(socket string) *Client {
-	t := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+	return NewClientWithDialer(func(ctx context.Context) (net.Conn, error) {
 		return (&net.Dialer{Timeout: 3 * time.Second}).DialContext(ctx, "unix", socket)
-	}}
+	}, 15*time.Second)
+}
+
+// NewClientWithDialer builds a Client using a custom transport dialer (e.g. Unix socket or SSH stdio bridge).
+func NewClientWithDialer(dial func(ctx context.Context) (net.Conn, error), timeout time.Duration) *Client {
+	if timeout <= 0 {
+		timeout = 15 * time.Second
+	}
+	t := &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return dial(ctx)
+		},
+		DisableKeepAlives: true,
+	}
 	return &Client{
 		http: &http.Client{
 			Transport: t,
-			Timeout:   15 * time.Second,
+			Timeout:   timeout,
 			CheckRedirect: func(*http.Request, []*http.Request) error {
 				return http.ErrUseLastResponse
 			},

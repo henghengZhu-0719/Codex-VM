@@ -1,7 +1,7 @@
 # Agent-VM 服务化架构改造计划
 
 - 基线：`feat/zhu`，规划时参考提交 `9d27e4e`
-- 状态：批次 1（Phase 0–3）已完成并通过单元测试与竞态检测；待推进批次 2（Phase 4–5）
+- 状态：批次 1（Phase 0–3）与批次 2（Phase 4–5）已完成并通过 Go/React/Swift 编译与测试；待推进批次 3（Phase 6、8、9）
 - 目标：一个后台管理服务、两个客户端入口，支持 Mac Pro 长期运行与 Mac Air 远程开发。
 
 ## 1. 原则与目标架构
@@ -110,12 +110,12 @@ docs/
 
 ### Phase 4 — Desktop 解耦（P0）
 
-- [ ] 保留当前 SwiftUI 原生外壳、菜单栏、React 界面及样式。
-- [ ] SwiftUI 保留窗口、文件选择、通知、Keychain、Terminal 调用及受限 WKWebView Bridge。
-- [ ] 将业务调用迁移为 React → SwiftUI Bridge → Daemon。
-- [ ] 增加服务连接状态、任务进度、SSE 重连与状态刷新。
-- [ ] 保留 VM 卡片、AI 额度、代理、浏览器、共享目录、设置等功能。
-- [ ] 退出 App 不停止 Daemon 或已提交的后台任务。
+- [x] 保留当前 SwiftUI 原生外壳、菜单栏、React 界面及样式。
+- [x] SwiftUI 保留窗口、文件选择、通知、Keychain、Terminal 调用及受限 WKWebView Bridge。
+- [x] 将业务调用迁移为 React → SwiftUI Bridge → Daemon（Daemon 在线时 VM 启停走 Unix Socket 异步任务，未启动时自动回退兼容路径）。
+- [x] 增加服务连接状态、任务进度、SSE 重连与状态刷新（`DaemonClient.swift` + React Daemon 任务队列面板）。
+- [x] 保留 VM 卡片、AI 额度、代理、浏览器、共享目录、设置等功能。
+- [x] 退出 App 不停止 Daemon 或已提交的后台任务（仅关闭客户端 SSE 订阅）。
 
 ### Phase 5 — CLI 与远程连接（P0）
 
@@ -134,11 +134,11 @@ agent-vm --host mac-pro codex dev
 agent-vm --host mac-pro claude dev
 ```
 
-- [ ] 本地与远程共用 API 语义；支持全部 VM 状态，包括已停止 VM。
-- [ ] 复用 EasyTier + SSH 密钥认证、严格主机密钥校验；远程管理通过受认证 SSH 通道访问 Daemon。
-- [ ] SSH PTY 直接进入远端 VM，无须网页工作台。
-- [ ] Desktop 按宿主机分组显示本地及远程 VM；连接异常不影响服务端任务。
-- [ ] 保持 SSH agent/X11 转发禁用等原有安全边界。
+- [x] 本地与远程共用 API 语义；支持全部 VM 状态，包括已停止 VM。
+- [x] 复用 EasyTier + SSH 密钥认证、严格主机密钥校验；远程管理通过受认证 SSH 通道访问 Daemon（零公网/本地监听端口）。
+- [x] SSH PTY 直接进入远端 VM，无须网页工作台。
+- [x] Desktop 按宿主机分组显示本地及远程 VM（含已停止状态与远程启停）；连接异常不影响服务端任务。
+- [x] 保持 SSH agent/X11 转发禁用等原有安全边界。
 
 ### Phase 6 — AI 会话持久化（P0）
 

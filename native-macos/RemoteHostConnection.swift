@@ -35,6 +35,7 @@ struct RemoteHostProfile: Codable, Identifiable, Sendable {
 struct RemoteVMOption: Sendable {
     let name: String
     let displayName: String
+    let status: String
 }
 
 struct RemoteVMList: Sendable {
@@ -117,15 +118,55 @@ final class RemoteHostConnection {
         let aliases = aliasData.flatMap { try? JSONDecoder().decode([String: String].self, from: $0) } ?? [:]
         let options: [RemoteVMOption] = lines.compactMap { line in
             guard line.hasPrefix(namePrefix) else { return nil }
-            let name = String(line.dropFirst(namePrefix.count))
+            let rest = String(line.dropFirst(namePrefix.count))
+            let parts = rest.split(separator: "\t", maxSplits: 1).map(String.init)
+            let name = parts[0]
+            let status = parts.count > 1 ? parts[1] : "Running"
             guard isValidVMName(name) else { return nil }
             let alias = aliases[name]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            return RemoteVMOption(name: name, displayName: alias.isEmpty ? name : alias)
+            return RemoteVMOption(name: name, displayName: alias.isEmpty ? name : alias, status: status)
         }
         return RemoteVMList(vms: options.sorted { lhs, rhs in
+            if lhs.status != rhs.status { return lhs.status == "Running" }
             let order = lhs.displayName.localizedStandardCompare(rhs.displayName)
             return order == .orderedSame ? lhs.name < rhs.name : order == .orderedAscending
         })
+    }
+
+    // Start or stop a VM on the remote host via its authenticated local daemon over SSH.
+    nonisolated static func changeVM(_ host: RemoteHostProfile, vmName: String, action: String) -> (Bool, String) {
+        guard RemoteHostProfile.isValid(host), isValidVMName(vmName), (action == "start" || action == "stop") else {
+            return (false, "远程主机、VM 名称或操作无效")
+        }
+        let script = """
+        cli='/Applications/Agent VM.app/Contents/MacOS/agent-vm'
+        if [ ! -x "$cli" ]; then cli="$HOME/.local/bin/agent-vm"; fi
+        if [ ! -x "$cli" ]; then cli=$(command -v agent-vm) || { echo '远端找不到 agent-vm' >&2; exit 1; }; fi
+        "$cli" daemon vm-\(action) '\(vmName)'
+        """
+        let quoted = script.replacingOccurrences(of: "'", with: "'\\''")
+        let process = Process()
+        let output = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+        process.arguments = ["-T"] + sshOptions(host) + ["/bin/sh -c '\(quoted)'"]
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = output
+        process.standardError = output
+        do {
+            try process.run()
+        } catch {
+            return (false, "无法启动 SSH：\(error.localizedDescription)")
+        }
+        let timeout = DispatchWorkItem { if process.isRunning { process.terminate() } }
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 20, execute: timeout)
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        timeout.cancel()
+        let text = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        if process.terminationStatus == 0 {
+            return (true, text)
+        }
+        return (false, text.isEmpty ? "远程操作失败（退出码 \(process.terminationStatus)）" : String(text.prefix(240)))
     }
 
     nonisolated private static let vmListCommand = #"""
@@ -141,11 +182,12 @@ final class RemoteHostConnection {
             /usr/bin/plutil -extract vmAliases json -o - - 2>/dev/null) || aliases='{}'
         printf 'agent-vm-aliases %s\n' "$aliases"
         printf '%s\n' "$vms" | /usr/bin/awk '
-            {
+            NR > 1 {
                 offset = ($1 == ">")
                 name = $(1 + offset)
-                if ($(2 + offset) == "Running" && name != "base" && name != "base-building")
-                    print "agent-vm-name " name
+                status = $(2 + offset)
+                if (name != "" && status != "" && name != "base" && name != "base-building")
+                    print "agent-vm-name " name "\t" status
             }
         ' || exit $?
         printf '%s\n' 'agent-vm-list-end'

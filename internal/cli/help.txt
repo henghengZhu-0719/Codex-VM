@@ -1,7 +1,7 @@
 Usage: agent-vm [options] <command> [args]
 
 Commands:
-  daemon <command>   Local management service: serve, status, list, tasks, refresh;
+  daemon <command>   Local management service: serve, status, list, tasks, refresh, cancel ID;
                      vm-start NAME, vm-stop NAME (async)
                      vm-create PROJECT [resource options], vm-delete NAME --confirm
                      volume {add|remove} NAME PATH {ro|rw}, proxy COMMAND
@@ -9,6 +9,9 @@ Commands:
                      session {list|create|attach|stop} VM [NAME]
                      quota {status|refresh} VM
                      macOS: install, uninstall, start, stop, restart, logs
+  host <command>     Manage remote hosts: add NAME [USER@]ADDR[:PORT], list, remove NAME, check NAME
+  --host NAME <cmd>  Operate a remote host: list, start VM, stop VM, rm VM --confirm,
+                     tasks, cancel ID, shell VM, codex VM, claude VM, opencode VM, vibe VM, pi VM
   install            Put agent-vm on your PATH (a link in ~/.local/bin, or
                      AGENT_VM_BIN_DIR)
   uninstall          Remove that link. VMs and ~/.agent-vm are left alone.

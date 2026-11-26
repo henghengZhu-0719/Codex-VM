@@ -323,8 +323,23 @@ struct ReactWorkbenchView: NSViewRepresentable {
                 "remoteHostStatus":model.remoteHostStatus,
                 "remoteVMLists":model.remoteVMLists.mapValues { list in
                     ["loading":list.loading, "error":list.error,
-                     "vms":list.vms.map { ["name":$0.name, "displayName":$0.displayName] }] as [String: Any]
+                     "vms":list.vms.map { ["name":$0.name, "displayName":$0.displayName, "status":$0.status] }] as [String: Any]
                 },
+                "daemon":[
+                    "connected":model.daemonConnected,
+                    "status":model.daemonStatus,
+                    "tasks":model.daemonTasks.suffix(20).reversed().map { t -> [String: Any] in
+                        [
+                            "id": t.id,
+                            "kind": t.kind,
+                            "target": t.target ?? "",
+                            "status": t.status,
+                            "createdAt": t.createdAt,
+                            "updatedAt": t.updatedAt,
+                            "error": t.error ?? ""
+                        ]
+                    }
+                ] as [String: Any],
                 "remoteHostConnectionState":model.remoteHostConnectionState,
                 "activeRemoteHostID":model.remoteHostConnection.activeHostID ?? "",
                 "remoteWorkbench":[
@@ -797,6 +812,17 @@ struct ReactWorkbenchView: NSViewRepresentable {
                 let id = payload["id"] as? String
                 for host in model.remoteHosts where id == nil || host.id == id {
                     model.refreshRemoteVMs(host)
+                }
+            case "remoteHostVMStart", "remoteHostVMStop":
+                if let id = payload["id"] as? String,
+                   let vmName = payload["vmName"] as? String,
+                   let host = model.remoteHosts.first(where: { $0.id == id }) {
+                    let act = action == "remoteHostVMStart" ? "start" : "stop"
+                    model.changeRemoteHostVM(host, vmName: vmName, action: act)
+                }
+            case "daemonCancelTask":
+                if let id = payload["id"] as? String {
+                    model.cancelDaemonTask(id)
                 }
             case "remoteHostConnect":
                 if let id = payload["id"] as? String,

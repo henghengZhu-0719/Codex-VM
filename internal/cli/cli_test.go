@@ -99,7 +99,7 @@ func TestHelp(t *testing.T) {
 		} {
 			s = strings.Replace(s, cut, "", 1)
 		}
-		// daemon subcommand is new.
+		// daemon / host subcommands are new.
 		if before, rest, ok := strings.Cut(s, "  daemon <command>"); ok {
 			if _, after, ok := strings.Cut(rest, "  install            "); ok {
 				s = before + "  install            " + after
