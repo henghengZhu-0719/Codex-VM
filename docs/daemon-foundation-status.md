@@ -71,3 +71,11 @@ The inventory API is read-only; explicit lifecycle requests can change VM state.
 - Background task panics are converted to failed task records rather than terminating the daemon.
 - Audited internal/vm/lima.go: NewLima and prepare use process-wide environment, withLog changes the global logrus writer, and lifecycle operations call global network reconciliation. Simply increasing workers or removing the inventory mutex would not provide safe VM parallelism. Keep one mutation worker until process-isolated execution or a broader Lima refactor is implemented. No additional service is needed.
 - Compile and runtime tests remain pending.
+
+## Browser lifecycle migration
+
+- Embedded existing Swift guest Python status, prepare and stop scripts in the Go browser package; uses the same Chromium profile, systemd transient service/detached fallback, X display and loopback viewer/CDP settings.
+- GET /api/v1/vms/{id}/browser reports health and process-tree RSS; POST /api/v1/vms/{id}/browser/{start,stop,restart} queues explicit operations on running project VMs. CLI: agent-vm daemon browser status NAME, start NAME, stop NAME, restart NAME.
+- Daemon shares VM operation lock and guest lifecycle flock with updated Swift prepare/stop scripts. Older installed Desktop builds do not have the guest lock. Viewer resize and other direct UI controls remain outside daemon migration.
+- No public listener, MCP installation, automatic VM start, automatic browser shutdown or profile relocation. Browser restart preserves the profile. No dependency install API. Existing Chromium --no-sandbox compatibility flag remains unchanged.
+- Script copies are intentionally retained for existing Desktop compatibility; future client migration should consolidate them. No build or guest runtime tests performed.

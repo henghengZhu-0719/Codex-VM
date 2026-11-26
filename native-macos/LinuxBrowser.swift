@@ -1394,6 +1394,11 @@ print(json.dumps({
 
     static let prepareScript = #"""
 import os, pathlib, socket, subprocess, time, json, shutil, hashlib, signal
+import fcntl
+_browser_dir = pathlib.Path.home() / '.config/agent-vm-browser'
+_browser_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+_browser_lock = open(_browser_dir / 'lifecycle.lock', 'a')
+fcntl.flock(_browser_lock, fcntl.LOCK_EX)
 
 def emit(obj):
     print(json.dumps(obj), flush=True)
@@ -1691,6 +1696,11 @@ except Exception as error:
 
     static let stopScript = #"""
 import os, pathlib, signal, time
+import fcntl
+_browser_dir = pathlib.Path.home() / '.config/agent-vm-browser'
+_browser_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+_browser_lock = open(_browser_dir / 'lifecycle.lock', 'a')
+fcntl.flock(_browser_lock, fcntl.LOCK_EX)
 
 def proc_running(match):
     pids = []
