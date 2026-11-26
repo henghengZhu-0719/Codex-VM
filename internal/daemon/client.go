@@ -66,3 +66,7 @@ func (c *Client) SubmitManager(ctx context.Context,path string,input any,out any
  data,err:=json.Marshal(input);if err!=nil{return err}
  return c.requestBody(ctx,http.MethodPost,path,http.StatusAccepted,bytes.NewReader(data),out)
 }
+
+func (c *Client) SubmitEmpty(ctx context.Context,path string,out any) error {
+ return c.request(ctx,http.MethodPost,path,http.StatusAccepted,out)
+}

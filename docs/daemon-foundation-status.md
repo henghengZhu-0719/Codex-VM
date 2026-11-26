@@ -94,3 +94,9 @@ The inventory API is read-only; explicit lifecycle requests can change VM state.
 - Sessions are independent of Desktop and management client connection while the guest and tmux server remain running. Detach using Ctrl-b d. Stop kills the selected session; VM shutdown/reboot destroys live processes. Native AI history resume remains separate.
 - Create uses the verified existing project mount and fixed agent commands without adding approval bypass flags. Duplicate names rejected by tmux. API lifecycle operations serialized by existing VM lock. Direct attach does not hold the VM lock for the duration of the terminal.
 - Desktop legacy auto-sleep still needs unified activity ownership; turn off auto-sleep when relying on long-running sessions. Quota reporting and remote host CLI routing remain pending. No runtime or compile verification.
+
+## Quota migration
+
+- Reused the existing guest quota query for Codex, Antigravity and Claude. Credentials stay in the guest; typed output excludes raw errors and account email. Existing provider endpoints are unchanged and may change independently.
+- Explicit refresh is an asynchronous task; GET returns in-memory snapshot with timestamp and stale flag after 20 minutes. No automatic polling or persistent credential cache. Desktop continues its legacy quota path until client migration. CLI: daemon quota refresh VM; daemon quota status VM.
+- Compile and runtime tests pending.

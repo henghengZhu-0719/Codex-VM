@@ -15,6 +15,7 @@ import (
  "syscall"
 
  "github.com/sylvinus/agent-vm/internal/daemon"
+ "github.com/sylvinus/agent-vm/internal/quota"
  "github.com/sylvinus/agent-vm/internal/state"
  "github.com/sylvinus/agent-vm/internal/vm"
  "github.com/sylvinus/agent-vm/internal/vmname"
@@ -22,7 +23,7 @@ import (
 
 // A single app owns the existing read-only backend. Serialize calls until
 // its thread-safety and shared Lima configuration have been audited.
-type daemonInventory struct { app *app; mu sync.Mutex }
+type daemonInventory struct { app *app; mu sync.Mutex; quotaMu sync.Mutex; quotas map[string]quota.Snapshot }
 
 func vmDTO(v *vm.Instance) daemon.VM {
  return daemon.VM{Name:v.Name, Status:string(v.Status), CPUs:v.CPUs, Memory:v.Memory, Disk:v.Disk}
@@ -76,6 +77,7 @@ func (d *daemonInventory) Change(ctx context.Context,name,action string)(daemon.
  case "delete":
   if inst.Status!=vm.Stopped{return daemon.VM{},errors.New("stop VM before deletion")}
   if !d.app.deleteVM(ctx,name){return daemon.VM{},errors.New("VM deletion not verified")}
+  d.quotaMu.Lock();delete(d.quotas,name);d.quotaMu.Unlock()
   return daemon.VM{Name:name,Status:"Deleted"},nil
  case "stop":
   if inst.Status==vm.Stopped{return vmDTO(inst),nil}
@@ -113,6 +115,7 @@ func (d *daemonInventory) Create(ctx context.Context,input daemon.CreateRequest,
 }
 
 func daemonCommand(args []string, streams IO) int {
+ if len(args)>0 && args[0]=="quota"{return daemonQuotaCommand(args,streams)}
  if len(args)>0 && args[0]=="session"{return daemonSessionCommand(args,streams)}
  if len(args)>0 && args[0]=="usage"{return daemonUsageCommand(args,streams)}
  if len(args)>0 && args[0]=="browser"{return daemonBrowserCommand(args,streams)}
