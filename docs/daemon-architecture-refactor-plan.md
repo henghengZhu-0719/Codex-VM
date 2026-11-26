@@ -1,7 +1,7 @@
 # Agent-VM 服务化架构改造计划
 
 - 基线：`feat/zhu`，规划时参考提交 `9d27e4e`
-- 状态：批次 1（Phase 0–3）、批次 2（Phase 4–5）、批次 3（Phase 6、8、9）已完成并通过验证；待推进批次 4（Phase 7 资源调度）与批次 5（Phase 10 Linux 适配）
+- 状态：全部 5 个批次（Phase 0–10）已完成并通过编译、竞态测试、macOS 桌面构建与 Linux 交叉编译验证
 - 目标：一个后台管理服务、两个客户端入口，支持 Mac Pro 长期运行与 Mac Air 远程开发。
 
 ## 1. 原则与目标架构
@@ -150,11 +150,11 @@ agent-vm --host mac-pro claude dev
 
 ### Phase 7 — 智能资源调度（P1）
 
-- [ ] 复用现有 10 分钟空闲休眠、VZ 内存气球及浏览器进程树监控。
-- [ ] 空闲时间、内存预警阈值（建议初始 85%，实际结合 macOS 内存压力）、回收策略可配置。
-- [ ] 结合 CPU、I/O、进程和会话状态判断空闲，不仅依据终端窗口。
-- [ ] 优先回收可回收内存，再评估允许暂停的空闲 VM。
-- [ ] 默认保护活跃 Agent 与常驻浏览器；资源不足时限制新启动，不强制终止现有任务。
+- [x] 复用现有 10 分钟空闲休眠、VZ 内存气球及浏览器进程树监控。
+- [x] 空闲时间、内存预警阈值（默认 85%）、回收策略可配置（`~/.agent-vm/config/resource-policy.json` 与 `GET/PUT /api/v1/resource/policy`）。
+- [x] 结合 CPU、I/O、进程和会话状态判断空闲，不仅依据终端窗口（`resource.Evaluate` 与 `GET /api/v1/resource/evaluate/{id}`）。
+- [x] 优先回收可回收内存，再评估允许暂停的空闲 VM。
+- [x] 默认保护活跃 Agent 与常驻浏览器；资源不足时限制新启动（`allow_new_start: false`），不强制终止现有任务。
 
 ### Phase 8 — 长期运行与故障恢复（P0）
 
@@ -174,9 +174,9 @@ agent-vm --host mac-pro claude dev
 
 ### Phase 10 — Linux 服务端兼容（P2）
 
-- [ ] 将 launchd 与 systemd、VZ 与 QEMU/KVM 的平台差异通过接口隔离。
-- [ ] 复用 Go Daemon 与 CLI，Linux 不要求开发 SwiftUI 客户端。
-- [ ] 根据宿主机资源决定浏览器及 VM 能力，不能假设所有 VPS 支持嵌套虚拟化。
+- [x] 将 launchd 与 systemd、VZ 与 QEMU/KVM 的平台差异通过接口隔离（`DaemonServiceManager` + `daemon_service_linux.go` + `capabilities_{darwin,linux}.go`）。
+- [x] 复用 Go Daemon 与 CLI，Linux 不要求开发 SwiftUI 客户端（支持 `systemctl --user` 安装/启停/重启/日志）。
+- [x] 根据宿主机资源决定浏览器及 VM 能力（`GET /api/v1/host/capabilities`），不能假设所有 VPS 支持嵌套虚拟化。
 
 ## 4. 存储与兼容
 

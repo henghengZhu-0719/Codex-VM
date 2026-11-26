@@ -142,3 +142,11 @@ The inventory API is read-only; explicit lifecycle requests can change VM state.
 - Added daemon startup policy (`~/.agent-vm/config/daemon.json`, `GET/PUT /api/v1/daemon/policy`: `manual`, `auto_start`, `restore_last`), last-running VM snapshot (`~/.agent-vm/state/vms.json`) with `.bak` corrupt recovery, `ReconcileStartup`, and bounded exponential-backoff `RetryTracker` (`internal/daemon/recovery_unix.go`, `internal/daemon/recovery_test.go`).
 - Integrated Fail-Closed egress verification (`VerifyEgress`) on daemon VM start and browser start/restart; verified daemon shutdown never stops managed proxy core or EgressGate.
 - Verified `go build ./...`, `go vet ./...`, and `go test -race -v ./internal/daemon ./internal/remote ./internal/session ./internal/cli` all pass.
+
+
+## Batch 4 & Batch 5 completion and verification (Phase 7 & Phase 10)
+
+- Added configurable resource scheduling policy (`internal/resource/policy.go`, `~/.agent-vm/config/resource-policy.json`, `GET/PUT /api/v1/resource/policy`) and conservative evaluator (`resource.Evaluate`, `GET /api/v1/resource/evaluate/{id}`) that protects active Agent sessions and persistent Chromium, prioritizes balloon memory reclaim before idle stop, and blocks new VM starts under high host memory pressure without killing running workloads.
+- Added cross-platform host capability detection (`internal/resource/capabilities*.go`, `GET /api/v1/host/capabilities`) reporting CPU, RAM, VZ/KVM/QEMU availability, and VM/browser suitability without assuming nested virtualization on small VPS hosts.
+- Implemented Linux `systemd --user` service lifecycle in `internal/cli/daemon_service_linux.go` (`install`, `uninstall`, `start`, `stop`, `restart`, `logs`).
+- Verified `-race` tests across `internal/resource`, `internal/daemon`, `internal/remote`, `internal/session`, and `internal/cli`, plus Linux `amd64`/`arm64` cross-compilation of core packages.

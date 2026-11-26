@@ -98,7 +98,7 @@ func handler(inventory Inventory, tasks *TaskManager, shutdown <-chan struct{}, 
 	registerPolicyRoutes(mux, stateDir)
 	registerManagerRoutes(mux, inventory, tasks)
 	registerBrowserRoutes(mux, inventory, tasks)
-	registerResourceRoutes(mux, inventory)
+	registerResourceRoutes(mux, inventory, stateDir)
 	registerSessionRoutes(mux, inventory, tasks)
 	registerQuotaRoutes(mux, inventory, tasks)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
