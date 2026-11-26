@@ -37,7 +37,8 @@ if c<=a: raise RuntimeError('invalid CPU sample')
 mem={}
 for line in open('/proc/meminfo'):
     k,v=line.split(':',1)
-    mem[k]=int(v.split()[0])*1024
+    fields=v.split()
+    if fields and fields[0].isdigit(): mem[k]=int(fields[0])*1024
 total=mem['MemTotal']
 avail=mem['MemAvailable']
 if total<=0 or not 0<=avail<=total: raise RuntimeError('invalid memory sample')
@@ -51,7 +52,7 @@ for entry in os.scandir('/proc'):
         stat=open(entry.path+'/stat').read().rsplit(')',1)[1].split()
         if int(stat[4])!=0: active+=1
         comm=open(entry.path+'/comm').read().strip().lower()
-        if any(comm==n or comm.startswith(n+'-') for n in names): protected+=1
+        if any(comm==n or comm.startswith(n+'-') or comm.startswith(n+':') for n in names): protected+=1
     except FileNotFoundError: continue
     except ProcessLookupError: continue
 pct=max(0,min(100,100*(1-(d-b)/(c-a))))

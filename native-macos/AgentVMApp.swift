@@ -193,7 +193,7 @@ struct CodexQuotaStatus: Decodable {
         return UserDefaults.standard.bool(forKey: "smartBalloonEnabled")
     }()
     @Published var autoSleepVMMinutes: Int = {
-        if UserDefaults.standard.object(forKey: "autoSleepVMMinutes") == nil { return 30 }
+        if UserDefaults.standard.object(forKey: "autoSleepVMMinutes") == nil { return 0 }
         return max(0, UserDefaults.standard.integer(forKey: "autoSleepVMMinutes"))
     }()
     @Published var guiIdleMinutes: Int = {
@@ -1098,10 +1098,9 @@ cat /var/lib/agent-vm-region/status
         if isVMBurstActive(vm.name) { return true }
         if let ed = codeEditors[vm.name], ed.status == "running" { return true }
         if let br = linuxBrowsers[vm.name], (br.status == "ready" || br.appRunning) { return true }
-        if let usage = vmUsage[vm.name] {
-            if usage.cpuPercent >= 3.0 { return true }
-            if usage.activeSessions > 0 { return true }
-        }
+        guard let usage = vmUsage[vm.name] else { return true }
+        if usage.cpuPercent >= 3.0 { return true }
+        if usage.activeSessions > 0 { return true }
         return false
     }
     func handleHostMemoryPressure(_ level: HostMemoryPressureLevel) {
@@ -1119,7 +1118,7 @@ cat /var/lib/agent-vm-region/status
                 }
             }
         }
-        if level == .critical && !busy {
+        if level == .critical && !busy && autoSleepVMMinutes > 0 {
             let now = Date()
             for vm in machines where vm.status == "Running" && vm.name != "base" && vm.name != "base-building" {
                 guard !pinnedVMs.contains(vm.name), !isVMActive(vm), !autoSleepingVMs.contains(vm.name) else { continue }
@@ -1475,8 +1474,12 @@ print(json.dumps({
         [ -z "$tmpfs" ] && tmpfs=0
         swap=$(awk '/^SwapTotal:/ { st=$2 } /^SwapFree:/ { sf=$2 } END { printf "%.0f|%.0f", (st>sf?(st-sf):0)/1024, st/1024 }' /proc/meminfo)
         top_procs=$(ps -eo comm,rss --no-headers 2>/dev/null | awk '{m[$1]+=$2} END {for (k in m) printf "%.0f %s\n", m[k]/1024, k}' | sort -nr | head -n 3 | awk '{printf "%s%s %sM", (NR>1?",":""), $2, $1}')
-        active_sessions=$(ps -eo tty,comm --no-headers 2>/dev/null | awk '($1 ~ /^pts\//) || ($2 ~ /^(codex|claude|agy|opencode|vibe|pi|ChatGPT|chromium|chrome)$/) { c++ } END { print c+0 }')
+        active_sessions=$(ps -eo tty,comm --no-headers 2>/dev/null | awk '($1 ~ /^pts\//) || ($2 ~ /^(codex|claude|agy|opencode|vibe|pi|ChatGPT|chromium|chrome|tmux|tmux: server|screen|code-server|node|python|python3)$/) { c++ } END { print c+0 }')
         [ -z "$active_sessions" ] && active_sessions=0
+        if command -v tmux >/dev/null 2>&1; then
+          managed_sessions=$(tmux -L agent-vm list-sessions -F '#{session_name}' 2>/dev/null | wc -l)
+          active_sessions=$((active_sessions + managed_sessions))
+        fi
         agents=""
         PATH="$HOME/.local/bin:$HOME/.claude/local/bin:$PATH"
         for a in codex claude agy; do

@@ -100,3 +100,10 @@ The inventory API is read-only; explicit lifecycle requests can change VM state.
 - Reused the existing guest quota query for Codex, Antigravity and Claude. Credentials stay in the guest; typed output excludes raw errors and account email. Existing provider endpoints are unchanged and may change independently.
 - Explicit refresh is an asynchronous task; GET returns in-memory snapshot with timestamp and stale flag after 20 minutes. No automatic polling or persistent credential cache. Desktop continues its legacy quota path until client migration. CLI: daemon quota refresh VM; daemon quota status VM.
 - Compile and runtime tests pending.
+
+## AI session and quota follow-up
+
+- Daemon polls at most one eligible running VM per minute when no pending/running task was observed; quota refresh attempts are throttled per VM for 20 minutes, including failures. Manual refresh remains available.
+- Session creation accepts codex-resume and claude-resume for native interactive history pickers, distinct from attaching a live tmux session.
+- Desktop defaults auto-sleep to disabled for new preferences, treats missing metrics as active, counts managed tmux sessions even when detached, and respects disabled auto-sleep under critical memory pressure. Existing explicit auto-sleep preferences remain. This is best-effort protection, not a race-free lease; stale samples and direct stop can still interrupt sessions.
+- Guest metrics recognize tmux server process names. No automatic VM stop or second memory controller added. Compile/runtime tests pending.

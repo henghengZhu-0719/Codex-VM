@@ -113,6 +113,9 @@ func Serve(ctx context.Context,state string, inventory Inventory) error {
  tasks,err:=NewTaskManager(ctx,filepath.Join(dir,"tasks.json"));if err!=nil{return err}
  streamCtx,stopStreams:=context.WithCancel(ctx);defer stopStreams()
  defer func(){closeCtx,cancel:=context.WithTimeout(context.Background(),10*time.Second);defer cancel();if err:=tasks.Close(closeCtx);err!=nil{slog.Error("task shutdown incomplete","error",err)}}()
+ pollDone:=make(chan struct{})
+ go func(){defer close(pollDone);pollQuotas(streamCtx,inventory,tasks)}()
+ defer func(){stopStreams();<-pollDone}()
  srv:=&http.Server{Handler:handler(inventory,tasks,streamCtx.Done()),ReadHeaderTimeout:5*time.Second,ReadTimeout:10*time.Second,WriteTimeout:30*time.Second,IdleTimeout:30*time.Second,MaxHeaderBytes:16<<10}
  stopped:=make(chan struct{})
  shutdownDone:=make(chan struct{})

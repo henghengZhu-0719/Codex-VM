@@ -49,7 +49,7 @@ func (d *daemonInventory) ChangeSession(ctx context.Context,name,action string,i
 
 func daemonSessionCommand(args []string,streams IO)int{
  fail:=func(err error)int{fmt.Fprintln(streams.Stderr,err);return 1}
- usage:=func()int{fmt.Fprintln(streams.Stderr,"Usage: agent-vm daemon session list VM | create VM NAME [shell|codex|claude|opencode|vibe|pi] | attach VM NAME | stop VM NAME --confirm");return 2}
+ usage:=func()int{fmt.Fprintln(streams.Stderr,"Usage: agent-vm daemon session list VM | create VM NAME [shell|codex|claude|opencode|vibe|pi|codex-resume|claude-resume] | attach VM NAME | stop VM NAME --confirm");return 2}
  if len(args)<3||!sessionVMName.MatchString(args[2]){return usage()}
  name:=args[2]
  if args[1]=="attach"{

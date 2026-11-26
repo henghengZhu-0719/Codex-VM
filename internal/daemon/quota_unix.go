@@ -36,3 +36,31 @@ func registerQuotaRoutes(mux *http.ServeMux,inventory Inventory,tasks *TaskManag
   w.Header().Set("Location","/api/v1/tasks/"+t.ID);send(w,202,t)
  })
 }
+
+ // Poll at most one eligible VM per tick, avoiding a busy mutation queue.
+func pollQuotas(ctx context.Context,inventory Inventory,tasks *TaskManager){
+ manager,ok:=inventory.(QuotaManager);if !ok{return}
+ ticker:=time.NewTicker(time.Minute);defer ticker.Stop()
+ attempted:=map[string]time.Time{}
+ for {
+  select{case <-ctx.Done():return;case <-ticker.C:}
+  snapshot,_:=tasks.Snapshot()
+  busy:=false
+  for _,t:=range snapshot{if t.Status=="queued"||t.Status=="running"{busy=true;break}}
+  if busy{continue}
+  sample,cancel:=context.WithTimeout(ctx,10*time.Second)
+  vms,err:=inventory.List(sample);cancel()
+  if err!=nil{continue}
+  present:=map[string]bool{}
+  for _,v:=range vms{present[v.Name]=true}
+  for name:=range attempted{if !present[name]{delete(attempted,name)}}
+  for _,v:=range vms{
+   if v.Status!="Running"||v.Name=="base"||v.Name=="base-building"||!namePattern.MatchString(v.Name){continue}
+   if time.Since(attempted[v.Name])<20*time.Minute{continue}
+   if snap,ok:=manager.CachedQuota(v.Name);ok&&time.Since(snap.FetchedAt)<20*time.Minute{continue}
+   name:=v.Name
+   if _,err:=tasks.SubmitTarget("quota-refresh",name,90*time.Second,func(ctx context.Context)([]VM,error){return nil,manager.RefreshQuota(ctx,name)});err==nil{attempted[name]=time.Now()}
+   break
+  }
+ }
+}

@@ -25,7 +25,7 @@ type Session struct {
 }
 
 func ValidAgent(s string)bool{
- switch s{case "shell","codex","claude","opencode","vibe","pi":return true};return false
+ switch s{case "shell","codex","claude","opencode","vibe","pi","codex-resume","claude-resume":return true};return false
 }
 
 func command(ctx context.Context,b vm.Backend,name,dir string,args ...string)(string,error){
@@ -61,9 +61,11 @@ func Create(ctx context.Context,b vm.Backend,vmName,dir,name,agent string)error{
  // so its last output remains available for inspection and native resume.
  program:="exec zsh -l"
  if agent!="shell"{program=agent+"; exec zsh -l"}
+ tool:=agent
+ switch agent{case "codex-resume":tool="codex";program="codex resume; exec zsh -l";case "claude-resume":tool="claude";program="claude --resume; exec zsh -l"}
  _,err:=command(ctx,b,vmName,dir,"sh","-c",`command -v tmux >/dev/null || exit 127
  if [ "$2" != shell ]; then command -v "$2" >/dev/null || exit 127; fi
- exec tmux -L agent-vm new-session -d -s "$1" -c "$PWD" "zsh -l -c '$3'"`,"agent-vm",name,agent,program)
+ exec tmux -L agent-vm new-session -d -s "$1" -c "$PWD" "zsh -l -c '$3'"`,"agent-vm",name,tool,program)
  return err
 }
 
