@@ -37,6 +37,10 @@ var namePattern=regexp.MustCompile("^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$")
 func SocketPath(state string) string { return filepath.Join(state,"run","agent-vm.sock") }
 
 func Handler(inventory Inventory) http.Handler {
+ return handler(inventory,nil,nil)
+}
+
+func handler(inventory Inventory,tasks *TaskManager,shutdown <-chan struct{}) http.Handler {
  mux:=http.NewServeMux()
  send:=func(w http.ResponseWriter,status int,v any){
   w.Header().Set("Content-Type","application/json")
@@ -70,6 +74,7 @@ func Handler(inventory Inventory) http.Handler {
  mux.HandleFunc("GET /api/v1/vms/{id}",func(w http.ResponseWriter,r *http.Request){lookup(w,r,"detail")})
  mux.HandleFunc("GET /api/v1/vms/{id}/resources",func(w http.ResponseWriter,r *http.Request){lookup(w,r,"resources")})
  mux.HandleFunc("GET /api/v1/vms/{id}/mounts",func(w http.ResponseWriter,r *http.Request){lookup(w,r,"mounts")})
+ if tasks!=nil{registerTaskRoutes(mux,inventory,tasks,shutdown)}
  return http.HandlerFunc(func(w http.ResponseWriter,r *http.Request){
   // No browser-origin requests; this is a local native-client protocol.
   if r.Header.Get("Origin")!="" || r.Host!="agent-vm" {send(w,403,map[string]string{"error":"forbidden"});return}
@@ -100,7 +105,10 @@ func Serve(ctx context.Context,state string, inventory Inventory) error {
  listener,err:=net.Listen("unix",socket);if err!=nil{return err}
  defer listener.Close()
  if err=os.Chmod(socket,0600);err!=nil{return err}
- srv:=&http.Server{Handler:Handler(inventory),ReadHeaderTimeout:5*time.Second,ReadTimeout:10*time.Second,WriteTimeout:30*time.Second,IdleTimeout:30*time.Second,MaxHeaderBytes:16<<10}
+ tasks,err:=NewTaskManager(ctx,filepath.Join(dir,"tasks.json"));if err!=nil{return err}
+ streamCtx,stopStreams:=context.WithCancel(ctx);defer stopStreams()
+ defer func(){closeCtx,cancel:=context.WithTimeout(context.Background(),10*time.Second);defer cancel();if err:=tasks.Close(closeCtx);err!=nil{slog.Error("task shutdown incomplete","error",err)}}()
+ srv:=&http.Server{Handler:handler(inventory,tasks,streamCtx.Done()),ReadHeaderTimeout:5*time.Second,ReadTimeout:10*time.Second,WriteTimeout:30*time.Second,IdleTimeout:30*time.Second,MaxHeaderBytes:16<<10}
  stopped:=make(chan struct{})
  shutdownDone:=make(chan struct{})
  go func(){defer close(shutdownDone);select{case <-ctx.Done():
@@ -110,6 +118,7 @@ func Serve(ctx context.Context,state string, inventory Inventory) error {
  case <-stopped:}}()
  slog.Info("agent-vm daemon listening")
  err=srv.Serve(listener)
+ stopStreams()
  close(stopped)
  <-shutdownDone
  if errors.Is(err,http.ErrServerClosed){return nil}

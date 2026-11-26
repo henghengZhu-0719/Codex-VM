@@ -52,7 +52,7 @@ func (d *daemonInventory) Mounts(ctx context.Context,name string)(any,error){
 }
 
 func daemonCommand(args []string, streams IO) int {
- if len(args)!=1 {fmt.Fprintln(streams.Stderr,"Usage: agent-vm daemon <serve|status|list|install|uninstall|start|stop|restart|logs>");return 2}
+ if len(args)!=1 {fmt.Fprintln(streams.Stderr,"Usage: agent-vm daemon <serve|status|list|tasks|refresh|install|uninstall|start|stop|restart|logs>");return 2}
  st,err:=state.Default()
  if err!=nil{fmt.Fprintln(streams.Stderr,err);return 1}
  switch args[0]{
@@ -64,14 +64,17 @@ func daemonCommand(args []string, streams IO) int {
   ctx,cancel:=signal.NotifyContext(context.Background(),os.Interrupt,syscall.SIGTERM);defer cancel()
   if err=daemon.Serve(ctx,string(st),&daemonInventory{app:a});err!=nil{fmt.Fprintln(streams.Stderr,err);return 1}
   return 0
- case "status","list":
+ case "status","list","tasks","refresh":
   c:=daemon.NewClient(daemon.SocketPath(string(st)));defer c.Close()
   path:="/health";if args[0]=="list"{path="/api/v1/vms"}
+  if args[0]=="tasks"{path="/api/v1/tasks"}
   var result any
-  if err:=c.Get(context.Background(),path,&result);err!=nil{fmt.Fprintln(streams.Stderr,err);return 1}
+  var requestErr error
+  if args[0]=="refresh"{requestErr=c.SubmitInventory(context.Background(),&result)}else{requestErr=c.Get(context.Background(),path,&result)}
+  if requestErr!=nil{fmt.Fprintln(streams.Stderr,requestErr);return 1}
   enc:=json.NewEncoder(streams.Stdout);enc.SetIndent("","  ")
   if err:=enc.Encode(result);err!=nil{return 1};return 0
  default:
-  fmt.Fprintln(streams.Stderr,"Usage: agent-vm daemon <serve|status|list|install|uninstall|start|stop|restart|logs>");return 2
+  fmt.Fprintln(streams.Stderr,"Usage: agent-vm daemon <serve|status|list|tasks|refresh|install|uninstall|start|stop|restart|logs>");return 2
  }
 }

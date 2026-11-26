@@ -23,11 +23,19 @@ func NewClient(socket string) *Client {
 func (c *Client) Close() { c.transport.CloseIdleConnections() }
 
 func (c *Client) Get(ctx context.Context, path string, out any) error {
- req, err := http.NewRequestWithContext(ctx,http.MethodGet,"http://agent-vm"+path,nil)
+ return c.request(ctx,http.MethodGet,path,http.StatusOK,out)
+}
+
+func (c *Client) SubmitInventory(ctx context.Context,out any) error {
+ return c.request(ctx,http.MethodPost,"/api/v1/tasks/inventory",http.StatusAccepted,out)
+}
+
+func (c *Client) request(ctx context.Context, method,path string,status int,out any) error {
+ req, err := http.NewRequestWithContext(ctx,method,"http://agent-vm"+path,nil)
  if err != nil { return err }
  resp,err:=c.http.Do(req)
  if err!=nil {return err}
  defer resp.Body.Close()
- if resp.StatusCode!=http.StatusOK {return fmt.Errorf("daemon: HTTP %d",resp.StatusCode)}
+ if resp.StatusCode!=status {return fmt.Errorf("daemon: HTTP %d",resp.StatusCode)}
  return json.NewDecoder(resp.Body).Decode(out)
 }

@@ -25,11 +25,15 @@ Use a stable installed CLI binary, then run agent-vm daemon install to register 
 
 Graceful server shutdown now waits for the HTTP shutdown goroutine before releasing the instance lock.
 
+## Async task foundation
+
+The daemon now has a bounded single-worker queue (16 waiting tasks, 256 retained records), two-minute cooperative operation deadlines, task IDs and atomic JSON snapshots in its private run directory. Interrupted queued/running tasks are marked interrupted after restart, never replayed automatically. The first supported task is read-only VM inventory refresh. Submit with agent-vm daemon refresh, list with agent-vm daemon tasks. HTTP POST /api/v1/tasks/inventory returns 202 and a task ID; GET /api/v1/tasks and GET /api/v1/tasks/{id} expose records. GET /api/v1/events streams task snapshots on change and every 15 seconds, bounded to eight concurrent streams. Reconnecting clients receive a fresh snapshot rather than an event replay. Client disconnect does not cancel work. VM mutation endpoints are intentionally not exposed yet. The deadline is cooperative; backend calls must honor context.
+
 ## Remaining
 
 - Verify launchd lifecycle on macOS; implement log rotation and stronger unattended recovery.
 - Full Phase 0 audit, write-operation migration, global coordination with legacy CLI, network/volume/browser/session managers.
-- Async tasks, persistent reconciliation, SSE, API error schema, security and compatibility tests.
+- Integrate lifecycle and manager operations into the task queue; add cancellation/idempotency, actual VM reconciliation, API error schema, security and compatibility tests. Verify task persistence and SSE at runtime.
 - Desktop/CLI integration beyond opt-in daemon commands.
 
 The read-only API deliberately does not change VM or network state. No claim of runtime verification or Phase 0–3 completion. Roll back by stopping the foreground daemon; legacy commands and data remain unchanged.
